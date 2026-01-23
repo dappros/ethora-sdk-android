@@ -1,6 +1,8 @@
 package com.ethora.chat.core.xmpp
 
 import android.util.Log
+import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.models.User
 import kotlinx.coroutines.*
 import okhttp3.*
 import okio.ByteString
@@ -329,6 +331,74 @@ class XMPPWebSocketConnection(
                 }
             }
             
+            // Handle room-config stanzas (room creation)
+            if (xml.contains("<room-config") || xml.contains("room-config")) {
+                parseAndHandleRoomCreation(xml)
+                return // Handled
+            }
+            
+            // Handle presence stanzas
+            if (xml.contains("<presence")) {
+                parseAndHandlePresence(xml)
+                return // Handled
+            }
+            
+            // Handle IQ stanzas
+            if (xml.contains("<iq")) {
+                parseAndHandleIQ(xml)
+                // Continue processing as IQ might also contain messages
+            }
+            
+            // Handle message error stanzas (type="error")
+            if (xml.contains("<message") && (xml.contains("type=\"error\"") || xml.contains("type='error'"))) {
+                parseAndHandleMessageError(xml)
+                return // Handled, don't process as regular message
+            }
+            
+            // Handle chat invite stanzas (contains <invite>)
+            if (xml.contains("<message") && xml.contains("<invite")) {
+                parseAndHandleChatInvite(xml)
+                return // Handled, don't process as regular message
+            }
+            
+            // Handle reaction history from MAM (contains reactions in MAM result)
+            if (xml.contains("urn:xmpp:mam:2") && xml.contains("<reactions")) {
+                parseAndHandleReactionHistory(xml)
+                // Continue processing as it might also be a regular MAM message
+            }
+            
+            // Handle composing/paused stanzas (typing indicators)
+            if (xml.contains("<composing") || xml.contains("<paused")) {
+                parseAndHandleComposing(xml)
+            }
+            
+            // Handle edit message stanzas (id contains 'edit-message')
+            if (xml.contains("<message") && extractAttribute(xml, "id")?.contains("edit-message") == true) {
+                parseAndHandleEditMessage(xml)
+                return // Handled, don't process as regular message
+            }
+            
+            // Handle reaction stanzas (id contains 'message-reaction')
+            if (xml.contains("<message") && extractAttribute(xml, "id")?.contains("message-reaction") == true) {
+                parseAndHandleReaction(xml)
+                return // Handled, don't process as regular message
+            }
+            
+            // Handle delete message stanzas (id='deleteMessageStanza')
+            if (xml.contains("<message") && extractAttribute(xml, "id") == "deleteMessageStanza") {
+                parseAndHandleDeleteMessage(xml)
+                return // Handled, don't process as regular message
+            }
+            
+            // Handle normal stanzas - parse real-time messages
+            if (xml.contains("<message") && xml.contains("type=\"groupchat\"") && !xml.contains("urn:xmpp:mam:2")) {
+                // Check if it's a typing indicator first
+                if (!xml.contains("<composing") && !xml.contains("<paused") && xml.contains("<body>")) {
+                    // This is a real-time message (not MAM result, not typing indicator)
+                    parseAndHandleRealtimeMessage(xml)
+                }
+            }
+            
             // Handle normal stanzas
             val stanza = XMPPStanza(
                 id = extractAttribute(xml, "id") ?: "",
@@ -346,6 +416,140 @@ class XMPPWebSocketConnection(
         }
     }
     
+    /**
+     * Parse and handle composing/paused stanza (typing indicator)
+     * Matches web: handleComposing in stanzaHandlers.ts
+     */
+    private fun parseAndHandleComposing(xml: String) {
+        try {
+            val from = extractAttribute(xml, "from") ?: ""
+            val roomJid = from.split("/").firstOrNull() ?: return
+            // composingUser part after room JID (room@conference/...); may be empty on some servers
+            val composingUser = from.split("/").getOrNull(1) ?: ""
+            
+            // Get current user's xmppUsername to filter out own typing indicators
+            val currentUserXmppUsername = com.ethora.chat.core.store.UserStore.currentUser.value?.xmppUsername
+            
+            // Don't show own typing indicator.
+            // Web compares normalized JIDs without domain & underscores; do the same.
+            if (!currentUserXmppUsername.isNullOrBlank()) {
+                val composingBare = composingUser.split("@").firstOrNull()?.replace("_", "")?.lowercase()
+                val currentBare = currentUserXmppUsername.split("@").firstOrNull()?.replace("_", "")?.lowercase()
+                if (!composingBare.isNullOrBlank() && composingBare == currentBare) {
+                    return // Ignore own typing indicator
+                }
+            }
+            
+            // Check if composing or paused
+            val isComposing = xml.contains("<composing")
+            
+            // Extract fullName from <data> element
+            val dataStart = xml.indexOf("<data")
+            val dataEnd = xml.indexOf("/>", dataStart)
+            val dataXml = if (dataStart != -1 && dataEnd != -1) {
+                xml.substring(dataStart, dataEnd + 2)
+            } else ""
+            
+            val fullName = extractAttribute(dataXml, "fullName") ?: "User"
+            
+            // Build composing list
+            val composingList = if (isComposing) {
+                listOf(fullName)
+            } else {
+                emptyList()
+            }
+            
+            // Notify delegate (will update RoomStore)
+            clientWrapper?.let { client ->
+                delegate?.onComposingReceived(client, roomJid, isComposing, composingList)
+            }
+            
+            Log.d(TAG, "📝 Parsed composing indicator: room=$roomJid, composing=$isComposing, user=$fullName")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing composing stanza", e)
+        }
+    }
+    
+    /**
+     * Parse and handle real-time message (not from MAM)
+     */
+    private fun parseAndHandleRealtimeMessage(xml: String) {
+        try {
+            val messageId = extractAttribute(xml, "id") ?: ""
+            val from = extractAttribute(xml, "from") ?: ""
+            val body = extractElementText(xml, "body") ?: ""
+            
+            if (body.isBlank() || messageId.isBlank()) {
+                return
+            }
+            
+            // Extract room JID from 'from' attribute (format: room@conference.domain/user@domain/resource)
+            val roomJid = from.split("/").firstOrNull() ?: return
+            
+            // Extract user info from 'from' attribute
+            val userJid = from.split("/").getOrNull(1) ?: from
+            val username = userJid.split("@").firstOrNull() ?: "unknown"
+            
+            // Extract user info from <data> element if present
+            val dataStart = xml.indexOf("<data")
+            val dataEnd = xml.indexOf("/>", dataStart)
+            val dataXml = if (dataStart != -1 && dataEnd != -1) {
+                xml.substring(dataStart, dataEnd + 2)
+            } else ""
+            
+            val senderFirstName = extractAttribute(dataXml, "senderFirstName")
+            val senderLastName = extractAttribute(dataXml, "senderLastName")
+            val photoURL = extractAttribute(dataXml, "photoURL")
+            val fullName = extractAttribute(dataXml, "fullName")
+            val senderJID = extractAttribute(dataXml, "senderJID")
+            
+            val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
+            
+            // Determine user ID
+            val userId = senderJID?.split("@")?.firstOrNull() 
+                ?: userJid.split("@").firstOrNull() 
+                ?: username
+            
+            // Create User object
+            val user = User(
+                id = userId,
+                firstName = senderFirstName ?: fullName?.split(" ")?.firstOrNull(),
+                lastName = senderLastName ?: fullName?.split(" ")?.drop(1)?.joinToString(" "),
+                name = fullName,
+                profileImage = cleanPhotoURL,
+                username = username,
+                xmppUsername = senderJID ?: userJid,
+                userJID = senderJID ?: userJid
+            )
+            
+            // Check if message is deleted (has <deleted> element)
+            val isDeleted = xml.contains("<deleted") || xml.contains("<deleted>")
+            
+            // Create Message object
+            val message = Message(
+                id = messageId,
+                user = user,
+                date = java.util.Date(),
+                body = body,
+                roomJid = roomJid,
+                timestamp = System.currentTimeMillis(),
+                xmppId = messageId,
+                xmppFrom = from,
+                pending = false, // Real-time messages are not pending
+                isDeleted = isDeleted
+            )
+            
+            // Add to MessageStore.
+            // This will automatically replace any optimistic pending message
+            // with the same ID (matches web: addRoomMessage logic).
+            com.ethora.chat.core.store.MessageStore.addMessage(roomJid, message)
+            
+            Log.d(TAG, "📨 Parsed real-time message: ID=$messageId, From=$from, Body=${body.take(50)}")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing real-time message", e)
+        }
+    }
+    
     private fun extractAttribute(xml: String, attr: String): String? {
         val regex = "$attr=\"([^\"]+)\"".toRegex()
         return regex.find(xml)?.groupValues?.get(1)
@@ -354,6 +558,197 @@ class XMPPWebSocketConnection(
     private fun extractElementText(xml: String, element: String): String? {
         val regex = "<$element[^>]*>([^<]+)</$element>".toRegex()
         return regex.find(xml)?.groupValues?.get(1)
+    }
+    
+    /**
+     * Parse and handle edit message stanza
+     * Matches web: onEditMessage in stanzaHandlers.ts
+     */
+    private fun parseAndHandleEditMessage(xml: String) {
+        try {
+            // Extract <replace> element with id and text attributes
+            val replaceStart = xml.indexOf("<replace")
+            val replaceEnd = xml.indexOf(">", replaceStart)
+            if (replaceStart == -1 || replaceEnd == -1) {
+                Log.w(TAG, "⚠️ Edit message stanza missing <replace> element")
+                return
+            }
+            
+            val replaceXml = xml.substring(replaceStart, replaceEnd + 1)
+            val messageId = extractAttribute(replaceXml, "id")
+            val newText = extractAttribute(replaceXml, "text")
+            
+            if (messageId.isNullOrBlank() || newText == null) {
+                Log.w(TAG, "⚠️ Edit message stanza missing id or text attribute")
+                return
+            }
+            
+            // Extract room JID from stanza-id or from attribute
+            val stanzaIdStart = xml.indexOf("<stanza-id")
+            val stanzaIdEnd = xml.indexOf(">", stanzaIdStart)
+            val stanzaIdXml = if (stanzaIdStart != -1 && stanzaIdEnd != -1) {
+                xml.substring(stanzaIdStart, stanzaIdEnd + 1)
+            } else ""
+            
+            val roomJid = extractAttribute(stanzaIdXml, "by") 
+                ?: extractAttribute(xml, "from")?.split("/")?.firstOrNull()
+                ?: return
+            
+            Log.d(TAG, "✏️ Edit message received: room=$roomJid, messageId=$messageId, newText=${newText.take(50)}")
+            
+            // Notify delegate
+            clientWrapper?.let { client ->
+                delegate?.onMessageEdited(client, roomJid, messageId, newText)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing edit message stanza", e)
+        }
+    }
+    
+    /**
+     * Parse and handle reaction stanza
+     * Matches web: onReactionMessage in stanzaHandlers.ts
+     */
+    private fun parseAndHandleReaction(xml: String) {
+        try {
+            // Extract <reactions> element
+            val reactionsStart = xml.indexOf("<reactions")
+            val reactionsEnd = xml.indexOf(">", reactionsStart)
+            if (reactionsStart == -1 || reactionsEnd == -1) {
+                Log.w(TAG, "⚠️ Reaction stanza missing <reactions> element")
+                return
+            }
+            
+            val reactionsXml = xml.substring(reactionsStart, xml.indexOf("</reactions>", reactionsEnd) + "</reactions>".length)
+            val messageId = extractAttribute(reactionsXml, "id")
+            val from = extractAttribute(reactionsXml, "from")
+            
+            if (messageId.isNullOrBlank() || from.isNullOrBlank()) {
+                Log.w(TAG, "⚠️ Reaction stanza missing id or from attribute")
+                return
+            }
+            
+            // Extract reaction emojis
+            val reactionElements = mutableListOf<String>()
+            var searchStart = reactionsEnd + 1
+            while (true) {
+                val reactionStart = xml.indexOf("<reaction>", searchStart)
+                if (reactionStart == -1) break
+                val reactionEnd = xml.indexOf("</reaction>", reactionStart)
+                if (reactionEnd == -1) break
+                val reactionText = xml.substring(reactionStart + "<reaction>".length, reactionEnd)
+                reactionElements.add(reactionText)
+                searchStart = reactionEnd + "</reaction>".length
+            }
+            
+            // Extract data element
+            val dataStart = xml.indexOf("<data")
+            val dataEnd = xml.indexOf("/>", dataStart)
+            val dataXml = if (dataStart != -1 && dataEnd != -1) {
+                xml.substring(dataStart, dataEnd + 2)
+            } else ""
+            
+            val senderFirstName = extractAttribute(dataXml, "senderFirstName") ?: ""
+            val senderLastName = extractAttribute(dataXml, "senderLastName") ?: ""
+            val data = mapOf(
+                "senderFirstName" to senderFirstName,
+                "senderLastName" to senderLastName
+            )
+            
+            // Extract room JID from from attribute
+            val roomJid = extractAttribute(xml, "to")?.split("/")?.firstOrNull() ?: return
+            
+            Log.d(TAG, "😀 Reaction received: room=$roomJid, messageId=$messageId, from=$from, reactions=$reactionElements")
+            
+            // Notify delegate
+            clientWrapper?.let { client ->
+                delegate?.onReactionReceived(client, roomJid, messageId, from, reactionElements, data)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing reaction stanza", e)
+        }
+    }
+    
+    /**
+     * Parse and handle delete message stanza
+     * Matches web: onDeleteMessage in stanzaHandlers.ts
+     */
+    private fun parseAndHandleDeleteMessage(xml: String) {
+        try {
+            // Extract <delete> element with id attribute
+            val deleteStart = xml.indexOf("<delete")
+            val deleteEnd = xml.indexOf(">", deleteStart)
+            if (deleteStart == -1 || deleteEnd == -1) {
+                Log.w(TAG, "⚠️ Delete message stanza missing <delete> element")
+                return
+            }
+            
+            val deleteXml = xml.substring(deleteStart, deleteEnd + 1)
+            val deletedMessageId = extractAttribute(deleteXml, "id")
+            
+            if (deletedMessageId.isNullOrBlank()) {
+                Log.w(TAG, "⚠️ Delete message stanza missing id attribute")
+                return
+            }
+            
+            // Extract room JID from stanza-id or from attribute
+            val stanzaIdStart = xml.indexOf("<stanza-id")
+            val stanzaIdEnd = xml.indexOf(">", stanzaIdStart)
+            val stanzaIdXml = if (stanzaIdStart != -1 && stanzaIdEnd != -1) {
+                xml.substring(stanzaIdStart, stanzaIdEnd + 1)
+            } else ""
+            
+            val roomJid = extractAttribute(stanzaIdXml, "by") 
+                ?: extractAttribute(xml, "from")?.split("/")?.firstOrNull()
+                ?: return
+            
+            Log.d(TAG, "🗑️ Delete message received: room=$roomJid, messageId=$deletedMessageId")
+            
+            // Update message in MessageStore to set isDeleted=true
+            val currentMessages = com.ethora.chat.core.store.MessageStore.getMessagesForRoom(roomJid)
+            val messageToUpdate = currentMessages.firstOrNull { it.id == deletedMessageId }
+            
+            if (messageToUpdate != null) {
+                val updatedMessage = messageToUpdate.copy(isDeleted = true)
+                com.ethora.chat.core.store.MessageStore.updateMessage(roomJid, updatedMessage)
+                Log.d(TAG, "✅ Updated message $deletedMessageId to deleted")
+            } else {
+                Log.w(TAG, "⚠️ Message $deletedMessageId not found in store")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing delete message stanza", e)
+        }
+    }
+    
+    /**
+     * Send typing indicator (composing/paused)
+     * Matches web: sendTypingRequest.xmpp.ts
+     */
+    suspend fun sendTypingIndicator(roomJid: String, fullName: String, isTyping: Boolean) {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot send typing indicator: not authenticated")
+            return
+        }
+        
+        // Ensure room JID has @conference domain
+        val fixedRoomJid = if (roomJid.contains("@")) {
+            roomJid
+        } else {
+            "$roomJid@conference.xmpp.ethoradev.com"
+        }
+        
+        val id = if (isTyping) "typing-${System.currentTimeMillis()}" else "stop-typing-${System.currentTimeMillis()}"
+        val composingElement = if (isTyping) "composing" else "paused"
+        val escapedFullName = fullName
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&apos;")
+        
+        val message = """<message type="groupchat" id="$id" to="$fixedRoomJid"><$composingElement xmlns="http://jabber.org/protocol/chatstates" /><data fullName="$escapedFullName" /></message>"""
+        sendRaw(message)
+        Log.d(TAG, "📝 Sent typing indicator to $fixedRoomJid: $composingElement (user: $fullName)")
     }
     
     /**
@@ -367,30 +762,126 @@ class XMPPWebSocketConnection(
     
     /**
      * Send message to room
+     * Matches web: sendTextMessage.xmpp.ts
+     * Returns the message ID that was sent
      */
-    suspend fun sendMessage(roomJid: String, body: String) {
+    suspend fun sendMessage(
+        roomJid: String, 
+        body: String,
+        firstName: String? = null,
+        lastName: String? = null,
+        photo: String? = null,
+        walletAddress: String? = null,
+        isReply: Boolean = false,
+        showInChannel: Boolean = false,
+        mainMessage: String? = null,
+        customId: String? = null
+    ): String? {
         if (!isAuthenticated) {
             Log.e(TAG, "Cannot send message: not authenticated")
-            return
+            return null
         }
         
-        val messageId = "msg_${System.currentTimeMillis()}"
-        // Escape XML special characters in body
-        val escapedBody = body
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\"", "&quot;")
-            .replace("'", "&apos;")
-        val message = """<message to="$roomJid" type="groupchat" id="$messageId"><body>$escapedBody</body></message>"""
+        // Ensure room JID has @conference domain
+        val fixedRoomJid = if (roomJid.contains("@")) {
+            roomJid
+        } else {
+            "$roomJid@conference.xmpp.ethoradev.com"
+        }
+        
+        // Get current user info
+        val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
+        val senderFirstName = firstName ?: currentUser?.firstName ?: ""
+        val senderLastName = lastName ?: currentUser?.lastName ?: ""
+        val fullName = if (senderFirstName.isNotBlank() && senderLastName.isNotBlank()) {
+            "$senderFirstName $senderLastName"
+        } else {
+            currentUser?.fullName ?: senderFirstName.ifBlank { senderLastName }
+        }
+        val photoURL = photo ?: currentUser?.profileImage ?: ""
+        val senderJID = clientWrapper?.let { 
+            "${currentUser?.xmppUsername ?: ""}@${host}"
+        } ?: ""
+        val senderWalletAddress = walletAddress ?: ""
+        
+        val messageId = customId ?: if (isReply) {
+            "send-reply-message-${System.currentTimeMillis()}"
+        } else {
+            "send-text-message-${System.currentTimeMillis()}"
+        }
+        
+        // Escape XML special characters
+        val escapedBody = escapeXml(body)
+        val escapedFirstName = escapeXml(senderFirstName)
+        val escapedLastName = escapeXml(senderLastName)
+        val escapedFullName = escapeXml(fullName)
+        val escapedPhotoURL = escapeXml(photoURL)
+        val escapedSenderJID = escapeXml(senderJID)
+        val escapedWalletAddress = escapeXml(senderWalletAddress)
+        val escapedRoomJid = escapeXml(fixedRoomJid)
+        val escapedMainMessage = mainMessage?.let { escapeXml(it) } ?: ""
+        
+        // Build data element (matches web version exactly)
+        // Web version uses devServer URL as xmlns (unusual but that's what they do)
+        // Format: xmlns="wss://xmpp.ethoradev.com:5443/ws" (without quotes in the actual XML)
+        val dataElement = """<data xmlns="wss://xmpp.ethoradev.com:5443/ws" senderFirstName="$escapedFirstName" senderLastName="$escapedLastName" fullName="$escapedFullName" photoURL="$escapedPhotoURL" senderJID="$escapedSenderJID" senderWalletAddress="$escapedWalletAddress" roomJid="$escapedRoomJid" isSystemMessage="false" tokenAmount="0" quickReplies="" notDisplayedValue="" showInChannel="${showInChannel}" isReply="${isReply}" mainMessage="$escapedMainMessage" push="true"/>"""
+        
+        val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$dataElement<body>$escapedBody</body></message>"""
         sendRaw(message)
-        Log.d(TAG, "📤 Sent message to $roomJid: $body")
+        Log.d(TAG, "📤 Sent message to $fixedRoomJid: $body (ID: $messageId)")
+        Log.d(TAG, "📤 Message XML: ${message.take(500)}")
+        return messageId
+    }
+    
+    /**
+     * Send media message
+     * Matches web: sendMediaMessage.xmpp.ts
+     */
+    suspend fun sendMediaMessage(
+        roomJid: String,
+        mediaData: Map<String, Any>,
+        messageId: String
+    ): Boolean {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot send media message: not authenticated")
+            return false
+        }
+        
+        // Ensure room JID has @conference domain
+        val fixedRoomJid = if (roomJid.contains("@")) {
+            roomJid
+        } else {
+            "$roomJid@conference.xmpp.ethoradev.com"
+        }
+        
+        // Get current user's JID for from attribute
+        val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
+        val fromJid = "${currentUser?.xmppUsername ?: ""}@$host"
+        
+        // Build data element XML with all media attributes
+        val dataAttributes = mediaData.map { (key, value) ->
+            val escapedValue = value.toString()
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&apos;")
+            "$key=\"$escapedValue\""
+        }.joinToString(" ")
+        
+        // Matches web version: includes from attribute and store hint
+        val message = """<message id="$messageId" type="groupchat" from="$fromJid" to="$fixedRoomJid"><body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
+        sendRaw(message)
+        Log.d(TAG, "📤 Sent media message to $fixedRoomJid")
+        return true
     }
     
     /**
      * Send MAM query for message history
+     * Matches web: getHistory.xmpp.ts
+     * Note: Web version uses timestamp (number) for before, not message ID
      */
-    suspend fun sendMAMQuery(roomJid: String, max: Int, before: Long? = null, queryId: String): Boolean {
+    suspend fun sendMAMQuery(roomJid: String, max: Int, beforeTimestamp: Long? = null, queryId: String): Boolean {
         if (!isAuthenticated) {
             Log.e(TAG, "Cannot send MAM query: not authenticated")
             return false
@@ -403,24 +894,579 @@ class XMPPWebSocketConnection(
             "$roomJid@conference.xmpp.ethoradev.com"
         }
         
-        // For MAM pagination, we can use timestamp in ISO 8601 format or message ID
-        // Using timestamp in milliseconds converted to ISO 8601 format
-        val beforeElement = if (before != null && before > 0) {
-            val isoDate = java.time.Instant.ofEpochMilli(before).toString()
-            "<before>$isoDate</before>"
+        // Web version uses timestamp (number) for before element, not message ID
+        // Format: <before>timestamp</before> or <before></before>
+        val beforeElement = if (beforeTimestamp != null && beforeTimestamp > 0) {
+            "<before>$beforeTimestamp</before>"
         } else {
-            ""
+            "<before></before>"
         }
         
-        val mamQuery = if (beforeElement.isNotEmpty()) {
-            """<iq type='set' to='$fixedRoomJid' id='$queryId'><query xmlns='urn:xmpp:mam:2'><set xmlns='http://jabber.org/protocol/rsm'><max>$max</max>$beforeElement</set></query></iq>"""
-        } else {
-            """<iq type='set' to='$fixedRoomJid' id='$queryId'><query xmlns='urn:xmpp:mam:2'><set xmlns='http://jabber.org/protocol/rsm'><max>$max</max></set></query></iq>"""
-        }
+        val mamQuery = """<iq type='set' to='$fixedRoomJid' id='$queryId'><query xmlns='urn:xmpp:mam:2'><set xmlns='http://jabber.org/protocol/rsm'><max>$max</max>$beforeElement</set></query></iq>"""
         
         sendRaw(mamQuery)
-        Log.d(TAG, "📤 Sent MAM query for $fixedRoomJid (max: $max, before: $before)")
+        Log.d(TAG, "📤 Sent MAM query for $fixedRoomJid (max: $max, beforeTimestamp: $beforeTimestamp)")
         return true
+    }
+    
+    /**
+     * Edit message
+     * Matches web: editMessage.xmpp.ts
+     */
+    suspend fun editMessage(roomJid: String, messageId: String, newText: String) {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot edit message: not authenticated")
+            return
+        }
+
+        val fixedRoomJid = if (roomJid.contains("@")) {
+            roomJid
+        } else {
+            "$roomJid@conference.xmpp.ethoradev.com"
+        }
+
+        val id = "edit-message-${System.currentTimeMillis()}"
+        val escapedText = escapeXml(newText)
+        
+        val stanza = """<message to="$fixedRoomJid" type="groupchat" id="$id">
+            |<replace id="$messageId" text="$escapedText"/>
+            |</message>""".trimMargin()
+        sendRaw(stanza)
+        Log.d(TAG, "✏️ Sent edit message to $fixedRoomJid: messageId=$messageId, newText=${newText.take(50)}")
+    }
+    
+    /**
+     * Delete message
+     * Matches web: deleteMessage.xmpp.ts
+     */
+    suspend fun deleteMessage(roomJid: String, messageId: String) {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot delete message: not authenticated")
+            return
+        }
+
+        val fixedRoomJid = if (roomJid.contains("@")) {
+            roomJid
+        } else {
+            "$roomJid@conference.xmpp.ethoradev.com"
+        }
+
+        val id = "deleteMessageStanza"
+        
+        val stanza = """<message to="$fixedRoomJid" type="groupchat" id="$id">
+            |<body>wow</body>
+            |<delete id="$messageId"/>
+            |</message>""".trimMargin()
+        sendRaw(stanza)
+        Log.d(TAG, "🗑️ Sent delete message to $fixedRoomJid: messageId=$messageId")
+    }
+    
+    /**
+     * Send message reaction
+     * Matches web: sendMessageReaction.xmpp.ts
+     */
+    suspend fun sendMessageReaction(roomJid: String, messageId: String, reactions: List<String>) {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot send reaction: not authenticated")
+            return
+        }
+
+        val fixedRoomJid = if (roomJid.contains("@")) {
+            roomJid
+        } else {
+            "$roomJid@conference.xmpp.ethoradev.com"
+        }
+
+        val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
+        val senderFirstName = currentUser?.firstName ?: ""
+        val senderLastName = currentUser?.lastName ?: ""
+        val fromJid = clientWrapper?.let { "${currentUser?.xmppUsername ?: ""}@xmpp.ethoradev.com" } ?: ""
+        
+        val id = "message-reaction:${System.currentTimeMillis()}"
+        
+        // Build reactions XML
+        val reactionsXml = reactions.joinToString("") { reaction ->
+            "<reaction>$reaction</reaction>"
+        }
+        
+        val stanza = """<message type="groupchat" id="$id" from="$fromJid" to="$fixedRoomJid">
+            |<reactions id="$messageId" from="$fromJid" xmlns="urn:xmpp:reactions:0">
+            |$reactionsXml
+            |</reactions>
+            |<data senderFirstName="${escapeXml(senderFirstName)}" senderLastName="${escapeXml(senderLastName)}"/>
+            |<store xmlns="urn:xmpp:hints"/>
+            |</message>""".trimMargin()
+        sendRaw(stanza)
+        Log.d(TAG, "😀 Sent reaction to $fixedRoomJid: messageId=$messageId, reactions=$reactions")
+    }
+    
+    /**
+     * Parse and handle room creation stanza
+     * Matches web: onNewRoomCreated in stanzaHandlers.ts
+     */
+    private fun parseAndHandleRoomCreation(xml: String) {
+        try {
+            val from = extractAttribute(xml, "from") ?: return
+            val roomJid = from.split("/").firstOrNull() ?: from
+            
+            Log.d(TAG, "🏠 New room created: $roomJid")
+            // TODO: Set as current room and fetch rooms from API
+            // For now, just log it
+            // In web version: store.dispatch(setCurrentRoom({ roomJID: stanza.attrs.from }))
+            // Then: xmpp.getRoomsStanza()
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing room creation stanza", e)
+        }
+    }
+    
+    /**
+     * Parse and handle presence stanza
+     * Matches web: onPresenceInRoom and onRoomKicked in stanzaHandlers.ts
+     */
+    private fun parseAndHandlePresence(xml: String) {
+        try {
+            val from = extractAttribute(xml, "from") ?: ""
+            val type = extractAttribute(xml, "type")
+            val presenceId = extractAttribute(xml, "id")
+            
+            // Handle room kicked (presence type="unavailable" with status codes 110 and 321)
+            if (type == "unavailable") {
+                val hasStatus110 = xml.contains("code=\"110\"") || xml.contains("code='110'")
+                val hasStatus321 = xml.contains("code=\"321\"") || xml.contains("code='321'")
+                
+                if (hasStatus110 && hasStatus321) {
+                    val roomJid = from.split("/").firstOrNull() ?: return
+                    Log.d(TAG, "🚫 User was kicked from room: $roomJid")
+                    // TODO: Notify delegate or remove room from RoomStore
+                    // For now, just log it
+                    return
+                }
+            }
+            
+            // Handle presence in room (id="presenceInRoom")
+            if (presenceId == "presenceInRoom" && !xml.contains("<error")) {
+                val roomJid = from.split("/").firstOrNull() ?: return
+                
+                // Extract role from presence
+                // Format: <x xmlns="..."><item role="..." /></x>
+                val roleMatch = "role=\"([^\"]+)\"".toRegex().find(xml)
+                val role = roleMatch?.groupValues?.get(1)
+                
+                if (role != null) {
+                    Log.d(TAG, "👤 Presence in room: $roomJid, role: $role")
+                    // TODO: Update room role in RoomStore
+                    // For now, just log it
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing presence stanza", e)
+        }
+    }
+    
+    /**
+     * Parse and handle IQ stanza
+     * Matches web: onGetChatRooms, onGetRoomInfo, onGetLastMessageArchive in stanzaHandlers.ts
+     */
+    private fun parseAndHandleIQ(xml: String) {
+        try {
+            val iqId = extractAttribute(xml, "id") ?: ""
+            val type = extractAttribute(xml, "type") ?: ""
+            
+            // Handle MAM query completion (contains <fin> element)
+            // Matches web: onGetLastMessageArchive in stanzaHandlers.ts
+            if (type == "result" && xml.contains("<fin")) {
+                parseAndHandleMAMQueryCompletion(xml, iqId)
+            }
+            
+            // Handle get chat rooms (id="getUserRooms")
+            if (iqId == "getUserRooms" && type == "result") {
+                parseAndHandleGetChatRooms(xml)
+            }
+            
+            // Handle room info (id="roomInfo")
+            if (iqId == "roomInfo" && type == "result" && !xml.contains("<error")) {
+                Log.d(TAG, "📋 Received room info IQ")
+                // TODO: Parse and update room info
+            }
+            
+            // Handle last message archive (id contains "get-history")
+            if (iqId.contains("get-history") && type == "result") {
+                parseAndHandleLastMessageArchive(xml)
+            }
+            
+            // Mark MAM query as complete (for getHistory tracking)
+            if (iqId.contains("get-history") && type == "result") {
+                // Mark query as complete in mamQueryComplete set
+                mamQueryComplete.add(iqId)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing IQ stanza", e)
+        }
+    }
+    
+    /**
+     * Parse and handle MAM query completion
+     * Matches web: onGetLastMessageArchive in stanzaHandlers.ts
+     * Sets historyComplete and messageStats in RoomStore
+     */
+    private fun parseAndHandleMAMQueryCompletion(xml: String, iqId: String) {
+        try {
+            val from = extractAttribute(xml, "from") ?: return
+            val roomJid = from.split("/").firstOrNull() ?: return
+            
+            val finStart = xml.indexOf("<fin")
+            if (finStart == -1) return
+            
+            val finEnd = xml.indexOf(">", finStart)
+            val finXml = xml.substring(finStart, finEnd + 1)
+            
+            val complete = extractAttribute(finXml, "complete") ?: "false"
+            val isComplete = complete == "true"
+            
+            // Extract set element for messageStats
+            val setStart = xml.indexOf("<set")
+            var firstTimestamp: Long? = null
+            var lastTimestamp: Long? = null
+            
+            if (setStart != -1) {
+                val setEnd = xml.indexOf("</set>", setStart)
+                if (setEnd != -1) {
+                    val setXml = xml.substring(setStart, setEnd + "</set>".length)
+                    val first = extractElementText(setXml, "first") ?: ""
+                    val last = extractElementText(setXml, "last") ?: ""
+                    
+                    firstTimestamp = first.toLongOrNull()
+                    lastTimestamp = last.toLongOrNull()
+                }
+            }
+            
+            Log.d(TAG, "📚 MAM query completion for $roomJid (IQ ID: $iqId): complete=$isComplete, first=$firstTimestamp, last=$lastTimestamp")
+            
+            // Update room with historyComplete and messageStats
+            val room = com.ethora.chat.core.store.RoomStore.getRoomByJid(roomJid)
+            if (room != null) {
+                val updatedRoom = room.copy(
+                    historyComplete = isComplete,
+                    messageStats = com.ethora.chat.core.models.MessageStats(
+                        firstMessageTimestamp = firstTimestamp,
+                        lastMessageTimestamp = lastTimestamp
+                    )
+                )
+                com.ethora.chat.core.store.RoomStore.updateRoom(updatedRoom)
+                Log.d(TAG, "✅ Updated room $roomJid: historyComplete=$isComplete")
+            } else {
+                Log.w(TAG, "⚠️ Room not found for MAM completion: $roomJid")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing MAM query completion", e)
+        }
+    }
+    
+    /**
+     * Parse and handle get chat rooms IQ
+     * Matches web: onGetChatRooms in stanzaHandlers.ts
+     */
+    private fun parseAndHandleGetChatRooms(xml: String) {
+        try {
+            // Extract query element
+            val queryStart = xml.indexOf("<query")
+            if (queryStart == -1) return
+            
+            // Find all <item> elements in query
+            val items = mutableListOf<Map<String, String>>()
+            var searchStart = queryStart
+            
+            while (true) {
+                val itemStart = xml.indexOf("<item", searchStart)
+                if (itemStart == -1) break
+                
+                val itemEnd = xml.indexOf("/>", itemStart)
+                if (itemEnd == -1) break
+                
+                val itemXml = xml.substring(itemStart, itemEnd + 2)
+                val jid = extractAttribute(itemXml, "jid") ?: ""
+                val name = extractAttribute(itemXml, "name") ?: ""
+                val usersCnt = extractAttribute(itemXml, "users_cnt") ?: "0"
+                val roomBg = extractAttribute(itemXml, "room_background")
+                val roomThumbnail = extractAttribute(itemXml, "room_thumbnail")
+                
+                if (jid.isNotEmpty()) {
+                    items.add(mapOf(
+                        "jid" to jid,
+                        "name" to name,
+                        "users_cnt" to usersCnt,
+                        "room_background" to (roomBg ?: ""),
+                        "room_thumbnail" to (roomThumbnail ?: "")
+                    ))
+                }
+                
+                searchStart = itemEnd + 2
+            }
+            
+            Log.d(TAG, "📋 Received ${items.size} chat rooms from IQ")
+            // TODO: Add rooms to RoomStore
+            // For now, rooms are loaded from API, so this might be redundant
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing get chat rooms IQ", e)
+        }
+    }
+    
+    /**
+     * Parse and handle last message archive IQ
+     * Matches web: onGetLastMessageArchive in stanzaHandlers.ts
+     */
+    private fun parseAndHandleLastMessageArchive(xml: String) {
+        try {
+            val from = extractAttribute(xml, "from") ?: return
+            val finStart = xml.indexOf("<fin")
+            if (finStart == -1) return
+            
+            val finEnd = xml.indexOf(">", finStart)
+            val finXml = xml.substring(finStart, finEnd + 1)
+            
+            val complete = extractAttribute(finXml, "complete") ?: "false"
+            val isComplete = complete == "true"
+            
+            // Extract set element
+            val setStart = xml.indexOf("<set")
+            if (setStart != -1) {
+                val setEnd = xml.indexOf("</set>", setStart)
+                if (setEnd != -1) {
+                    val setXml = xml.substring(setStart, setEnd + "</set>".length)
+                    val first = extractElementText(setXml, "first") ?: ""
+                    val last = extractElementText(setXml, "last") ?: ""
+                    
+                    val firstTimestamp = first.toLongOrNull() ?: 0L
+                    val lastTimestamp = last.toLongOrNull() ?: 0L
+                    
+                    Log.d(TAG, "📚 Last message archive for $from: complete=$isComplete, first=$firstTimestamp, last=$lastTimestamp")
+                    // TODO: Update room messageStats in RoomStore
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing last message archive IQ", e)
+        }
+    }
+    
+    /**
+     * Parse and handle message error stanza
+     * Matches web: onMessageError in stanzaHandlers.ts
+     */
+    private fun parseAndHandleMessageError(xml: String) {
+        try {
+            val from = extractAttribute(xml, "from") ?: return
+            val roomJid = from.split("/").firstOrNull() ?: return
+            
+            // Check for "not-authorized" or "forbidden" errors
+            val hasNotAuthorized = xml.contains("not-authorized") || xml.contains("not_authorized")
+            val hasForbidden = xml.contains("forbidden")
+            
+            if (hasNotAuthorized || hasForbidden) {
+                Log.w(TAG, "⚠️ Message error for room $roomJid: not authorized or forbidden")
+                // TODO: Send presence to room and retry queued messages
+                // For now, just log it
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing message error stanza", e)
+        }
+    }
+    
+    /**
+     * Parse and handle chat invite stanza
+     * Matches web: onChatInvite in stanzaHandlers.ts
+     */
+    private fun parseAndHandleChatInvite(xml: String) {
+        try {
+            val from = extractAttribute(xml, "from") ?: return
+            val chatId = from.split("/").firstOrNull() ?: return
+            
+            // Check if room already exists
+            val existingRoom = com.ethora.chat.core.store.RoomStore.getRoomByJid(chatId)
+            if (existingRoom != null) {
+                Log.d(TAG, "📥 Chat invite received but room already exists: $chatId")
+                return
+            }
+            
+            // Extract invite element
+            val inviteStart = xml.indexOf("<invite")
+            if (inviteStart == -1) return
+            
+            Log.d(TAG, "📥 Chat invite received for: $chatId")
+            // TODO: Send presence to room and fetch rooms from API
+            // For now, just log it
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing chat invite stanza", e)
+        }
+    }
+    
+    /**
+     * Parse and handle reaction history from MAM
+     * Matches web: onReactionHistory in stanzaHandlers.ts
+     */
+    private fun parseAndHandleReactionHistory(xml: String) {
+        try {
+            // Extract reactions from MAM result
+            // Format: <result><forwarded><message><reactions>...</reactions></message></forwarded></result>
+            val reactionsStart = xml.indexOf("<reactions")
+            if (reactionsStart == -1) return
+            
+            val reactionsEnd = xml.indexOf("</reactions>", reactionsStart)
+            if (reactionsEnd == -1) return
+            
+            val reactionsXml = xml.substring(reactionsStart, reactionsEnd + "</reactions>".length)
+            val messageId = extractAttribute(reactionsXml, "id") ?: return
+            val from = extractAttribute(reactionsXml, "from") ?: return
+            
+            // Extract reaction emojis
+            val reactionElements = mutableListOf<String>()
+            var searchStart = reactionsEnd + 1
+            while (true) {
+                val reactionStart = xml.indexOf("<reaction>", searchStart)
+                if (reactionStart == -1) break
+                val reactionEnd = xml.indexOf("</reaction>", reactionStart)
+                if (reactionEnd == -1) break
+                val reactionText = xml.substring(reactionStart + "<reaction>".length, reactionEnd)
+                reactionElements.add(reactionText)
+                searchStart = reactionEnd + "</reaction>".length
+            }
+            
+            // Extract data element
+            val dataStart = xml.indexOf("<data")
+            val dataEnd = xml.indexOf("/>", dataStart)
+            val dataXml = if (dataStart != -1 && dataEnd != -1) {
+                xml.substring(dataStart, dataEnd + 2)
+            } else ""
+            
+            val senderFirstName = extractAttribute(dataXml, "senderFirstName") ?: ""
+            val senderLastName = extractAttribute(dataXml, "senderLastName") ?: ""
+            val data = mapOf(
+                "senderFirstName" to senderFirstName,
+                "senderLastName" to senderLastName
+            )
+            
+            // Extract room JID from stanza-id
+            val stanzaIdStart = xml.indexOf("<stanza-id")
+            val stanzaIdEnd = xml.indexOf(">", stanzaIdStart)
+            val stanzaIdXml = if (stanzaIdStart != -1 && stanzaIdEnd != -1) {
+                xml.substring(stanzaIdStart, stanzaIdEnd + 1)
+            } else ""
+            
+            val roomJid = extractAttribute(stanzaIdXml, "by") 
+                ?: extractAttribute(xml, "from")?.split("/")?.firstOrNull()
+                ?: return
+            
+            Log.d(TAG, "😀 Reaction history received: room=$roomJid, messageId=$messageId, from=$from, reactions=$reactionElements")
+            
+            // Notify delegate (same as real-time reaction)
+            clientWrapper?.let { client ->
+                delegate?.onReactionReceived(client, roomJid, messageId, from, reactionElements, data)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing reaction history", e)
+        }
+    }
+    
+    /**
+     * Escape XML special characters
+     */
+    private fun escapeXml(text: String): String {
+        return text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&apos;")
+    }
+    
+    /**
+     * Send presence in room
+     * Matches web: presenceInRoom.xmpp.ts
+     */
+    suspend fun sendPresenceInRoom(roomJid: String): Boolean {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot send presence: not authenticated")
+            return false
+        }
+        
+        // Ensure room JID has @conference domain
+        val fixedRoomJid = if (roomJid.contains("@")) {
+            roomJid
+        } else {
+            "$roomJid@conference.xmpp.ethoradev.com"
+        }
+        
+        // Get current user's local part (username without domain)
+        val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
+        val localPart = currentUser?.xmppUsername?.split("@")?.firstOrNull() 
+            ?: username.split("@").firstOrNull() 
+            ?: "user"
+        
+        // Get full JID for from attribute
+        val fromJid = "${currentUser?.xmppUsername ?: username}@$host"
+        
+        val presence = """<presence from="$fromJid" to="$fixedRoomJid/$localPart" id="presenceInRoom"><x xmlns="http://jabber.org/protocol/muc"/></presence>"""
+        sendRaw(presence)
+        Log.d(TAG, "📤 Sent presence to $fixedRoomJid")
+        return true
+    }
+    
+    /**
+     * Get rooms
+     * Matches web: getRooms.xmpp.ts
+     */
+    suspend fun getRooms(): Boolean {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot get rooms: not authenticated")
+            return false
+        }
+        
+        val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
+        val fromJid = "${currentUser?.xmppUsername ?: username}@$host"
+        
+        val iq = """<iq type="get" from="$fromJid" id="getUserRooms"><query xmlns="ns:getrooms"/></iq>"""
+        sendRaw(iq)
+        Log.d(TAG, "📤 Sent getRooms IQ")
+        return true
+    }
+    
+    /**
+     * Get last message archive
+     * Matches web: getLastMessageArchive.xmpp.ts
+     */
+    suspend fun getLastMessageArchive(roomJid: String): Boolean {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot get last message archive: not authenticated")
+            return false
+        }
+        
+        // Ensure room JID has @conference domain
+        val fixedRoomJid = if (roomJid.contains("@")) {
+            roomJid
+        } else {
+            "$roomJid@conference.xmpp.ethoradev.com"
+        }
+        
+        val iq = """<iq type="set" to="$fixedRoomJid" id="GetArchive"><query xmlns="urn:xmpp:mam:2"><set xmlns="http://jabber.org/protocol/rsm"><max>1</max><before></before></set></query></iq>"""
+        sendRaw(iq)
+        Log.d(TAG, "📤 Sent getLastMessageArchive IQ for $fixedRoomJid")
+        return true
+    }
+    
+    /**
+     * Send ping
+     * Matches web: sendPing.xmpp.ts
+     */
+    suspend fun sendPing(customId: String? = null): String? {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot send ping: not authenticated")
+            return null
+        }
+        
+        val pingId = customId ?: "ping-${System.currentTimeMillis()}-${(0..9999).random()}"
+        val pingStanza = """<iq type="get" to="$host" id="$pingId"><ping xmlns="urn:xmpp:ping"/></iq>"""
+        sendRaw(pingStanza)
+        Log.d(TAG, "🏓 Sent ping (ID: $pingId)")
+        return pingId
     }
     
     /**

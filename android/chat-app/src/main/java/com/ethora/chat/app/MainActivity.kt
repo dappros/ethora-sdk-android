@@ -19,7 +19,14 @@ import com.ethora.chat.core.models.User
 import com.ethora.chat.core.networking.AuthAPIHelper
 import com.ethora.chat.core.networking.ApiClient
 import com.ethora.chat.core.networking.RoomsAPIHelper
+import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
+import com.ethora.chat.core.store.MessageStore
+import com.ethora.chat.core.store.ScrollPositionStore
+import com.ethora.chat.core.persistence.ChatPersistenceManager
+import com.ethora.chat.core.persistence.MessageCache
+import com.ethora.chat.core.persistence.ChatDatabase
+import com.ethora.chat.core.service.LogoutService
 import com.ethora.chat.core.xmpp.XMPPClient
 import com.ethora.chat.core.xmpp.XMPPClientDelegate
 import com.ethora.chat.core.xmpp.ConnectionStatus
@@ -27,6 +34,7 @@ import com.ethora.chat.ui.styling.ChatTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val TAG = "MainActivity"
@@ -58,34 +66,93 @@ class MainActivity : ComponentActivity() {
                             Log.d(TAG, "🚀 Starting XMPP Chat Test App")
                             Log.d(TAG, "📧 Email: $email")
                             
-                            // Step 1: Login
-                            connectionStatus = "Step 1: Logging in..."
-                            Log.d(TAG, "🔐 Step 1: Logging in with email...")
+                            // Initialize persistence managers
+                            Log.d(TAG, "💾 Initializing persistence...")
+                            val persistenceManager = ChatPersistenceManager(this@MainActivity)
+                            val chatDatabase = ChatDatabase.getDatabase(this@MainActivity)
+                            val messageCache = MessageCache(chatDatabase)
                             
-                            val loginResponse = AuthAPIHelper.loginWithEmail(email, password)
+                            // Initialize stores with persistence
+                            RoomStore.initialize(persistenceManager)
+                            UserStore.initialize(persistenceManager)
+                            MessageStore.initialize(messageCache)
+                            ScrollPositionStore.initialize(this@MainActivity)
                             
-                            // Save to UserStore
-                            UserStore.setUser(loginResponse)
+                            Log.d(TAG, "✅ Persistence initialized")
                             
-                            // Set token in API client
-                            ApiClient.setUserToken(loginResponse.token)
+                            // Load persisted data
+                            Log.d(TAG, "📂 Loading persisted data...")
+                            withContext(Dispatchers.IO) {
+                                // Load user
+                                val persistedUser = UserStore.loadUserFromPersistence()
+                                if (persistedUser != null) {
+                                    Log.d(TAG, "📂 Found persisted user, using it")
+                                    withContext(Dispatchers.Main) {
+                                        UserStore.setUser(persistedUser)
+                                        ApiClient.setUserToken(persistedUser.token ?: "")
+                                    }
+                                }
+                                
+                                // Load rooms
+                                val persistedRooms = RoomStore.loadRoomsFromPersistence()
+                                if (persistedRooms.isNotEmpty()) {
+                                    Log.d(TAG, "📂 Found ${persistedRooms.size} persisted rooms")
+                                    withContext(Dispatchers.Main) {
+                                        RoomStore.setRooms(persistedRooms)
+                                        roomsCount = persistedRooms.size
+                                        
+                                        // Load messages for each room from persistence
+                                        persistedRooms.forEach { room ->
+                                            val messages = MessageStore.loadMessagesFromPersistence(room.jid)
+                                            if (messages.isNotEmpty()) {
+                                                MessageStore.setMessagesForRoom(room.jid, messages)
+                                                Log.d(TAG, "📂 Loaded ${messages.size} persisted messages for ${room.jid}")
+                                            }
+                                        }
+                                        
+                                        // Load current room JID
+                                        val currentRoomJid = RoomStore.loadCurrentRoomJidFromPersistence()
+                                        if (currentRoomJid != null) {
+                                            val currentRoom = persistedRooms.firstOrNull { it.jid == currentRoomJid }
+                                            if (currentRoom != null) {
+                                                RoomStore.setCurrentRoom(currentRoom)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             
-                            // Save to UserStore
-                            UserStore.setUser(loginResponse)
-                            
-                            Log.d(TAG, "✅ Login successful! User stored in UserStore")
-                            connectionStatus = "Login successful!"
+                            // Step 1: Login (only if no persisted user)
+                            val currentUser = UserStore.currentUser.value
+                            if (currentUser == null) {
+                                connectionStatus = "Step 1: Logging in..."
+                                Log.d(TAG, "🔐 Step 1: Logging in with email...")
+                                
+                                val loginResponse = AuthAPIHelper.loginWithEmail(email, password)
+                                
+                                // Save to UserStore
+                                UserStore.setUser(loginResponse)
+                                
+                                // Set token in API client
+                                ApiClient.setUserToken(loginResponse.token)
+                                
+                                Log.d(TAG, "✅ Login successful! User stored in UserStore")
+                                connectionStatus = "Login successful!"
+                            } else {
+                                Log.d(TAG, "✅ Using persisted user, skipping login")
+                                connectionStatus = "Using persisted user"
+                            }
                             
                             // Step 2: Connect XMPP
                             connectionStatus = "Step 2: Connecting to XMPP server..."
                             Log.d(TAG, "🔐 Step 2: Connecting to XMPP server...")
                             
-                            val currentUser = UserStore.currentUser.value
-                            if (currentUser == null) {
+                            val userForXmpp = UserStore.currentUser.value
+                            if (userForXmpp == null) {
                                 throw Exception("User not found in store")
                             }
-                            val xmppUsername = currentUser.xmppUsername ?: email
-                            val xmppPassword = currentUser.xmppPassword ?: password
+                            val xmppUsername = userForXmpp.xmppUsername ?: email
+                            val xmppPassword = userForXmpp.xmppPassword ?: password
                             
                             val settings = XMPPSettings(
                                 devServer = "wss://xmpp.ethoradev.com:5443/ws",
@@ -98,6 +165,9 @@ class MainActivity : ComponentActivity() {
                                 password = xmppPassword,
                                 settings = settings
                             )
+                            
+                            // Set XMPP client in LogoutService so external apps can logout
+                            LogoutService.setXMPPClient(xmppClient)
                             
                             // Set delegate
                             xmppClient?.setDelegate(object : XMPPClientDelegate {
@@ -145,6 +215,39 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 }
+                                
+                                override fun onComposingReceived(
+                                    client: XMPPClient,
+                                    roomJid: String,
+                                    isComposing: Boolean,
+                                    composingList: List<String>
+                                ) {
+                                    Log.d(TAG, "📝 Composing received: room=$roomJid, composing=$isComposing, users=$composingList")
+                                    // Update RoomStore with composing state (matches web: setComposing)
+                                    RoomStore.setComposing(roomJid, isComposing, composingList)
+                                }
+                                
+                                override fun onMessageEdited(
+                                    client: XMPPClient,
+                                    roomJid: String,
+                                    messageId: String,
+                                    newText: String
+                                ) {
+                                    Log.d(TAG, "✏️ Message edited received for $roomJid, ID: $messageId, newText: ${newText.take(50)}")
+                                    com.ethora.chat.core.store.MessageStore.editMessage(roomJid, messageId, newText)
+                                }
+                                
+                                override fun onReactionReceived(
+                                    client: XMPPClient,
+                                    roomJid: String,
+                                    messageId: String,
+                                    from: String,
+                                    reactions: List<String>,
+                                    data: Map<String, String>
+                                ) {
+                                    Log.d(TAG, "😀 Reaction received for $roomJid, messageId: $messageId, from: $from, reactions: $reactions")
+                                    com.ethora.chat.core.store.MessageStore.updateReaction(roomJid, messageId, from, reactions, data)
+                                }
                             })
                             
                             // Initialize XMPP client (async)
@@ -157,33 +260,55 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                             
-                            // Step 3: Test loading rooms
-                            connectionStatus = "Step 3: Loading rooms..."
-                            Log.d(TAG, "📋 Step 3: Testing room loading...")
-                            
-                            scope.launch(Dispatchers.IO) {
-                                try {
-                                    val rooms = RoomsAPIHelper.getRooms()
-                                    roomsCount = rooms.size
-                                    Log.d(TAG, "✅ Loaded ${rooms.size} rooms!")
-                                    rooms.forEach { room ->
-                                        Log.d(TAG, "   - ${room.title} (${room.jid})")
-                                    }
-                                    connectionStatus = "Loaded ${rooms.size} rooms!"
-                                    
-                                    // Show chat UI after rooms are loaded (don't wait for XMPP)
-                                    // XMPP connection can happen in background
-                                    scope.launch(Dispatchers.Main) {
-                                        isLoading = false
-                                        showChat = true
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "❌ Failed to load rooms: ${e.message}", e)
-                                    errorMessage = "Failed to load rooms: ${e.message}"
-                                    scope.launch(Dispatchers.Main) {
-                                        isLoading = false
+                            // Step 3: Load rooms (only if not already loaded from persistence)
+                            val existingRooms = RoomStore.rooms.value
+                            if (existingRooms.isEmpty()) {
+                                connectionStatus = "Step 3: Loading rooms..."
+                                Log.d(TAG, "📋 Step 3: Loading rooms from API...")
+                                
+                                scope.launch(Dispatchers.IO) {
+                                    try {
+                                        val rooms = RoomsAPIHelper.getRooms()
+                                        roomsCount = rooms.size
+                                        Log.d(TAG, "✅ Loaded ${rooms.size} rooms!")
+                                        rooms.forEach { room ->
+                                            Log.d(TAG, "   - ${room.title} (${room.jid})")
+                                        }
+                                        connectionStatus = "Loaded ${rooms.size} rooms!"
+                                        
+                                        // Save to RoomStore (will persist automatically)
+                                        withContext(Dispatchers.Main) {
+                                            RoomStore.setRooms(rooms)
+                                            
+                                            // Load persisted messages for each room
+                                            rooms.forEach { room ->
+                                                val messages = MessageStore.loadMessagesFromPersistence(room.jid)
+                                                if (messages.isNotEmpty()) {
+                                                    MessageStore.setMessagesForRoom(room.jid, messages)
+                                                    Log.d(TAG, "📂 Loaded ${messages.size} persisted messages for ${room.jid}")
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Show chat UI after rooms are loaded
+                                        scope.launch(Dispatchers.Main) {
+                                            isLoading = false
+                                            showChat = true
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "❌ Failed to load rooms: ${e.message}", e)
+                                        errorMessage = "Failed to load rooms: ${e.message}"
+                                        scope.launch(Dispatchers.Main) {
+                                            isLoading = false
+                                        }
                                     }
                                 }
+                            } else {
+                                Log.d(TAG, "✅ Using ${existingRooms.size} persisted rooms")
+                                roomsCount = existingRooms.size
+                                connectionStatus = "Using persisted rooms"
+                                isLoading = false
+                                showChat = true
                             }
                             
                         } catch (e: Exception) {

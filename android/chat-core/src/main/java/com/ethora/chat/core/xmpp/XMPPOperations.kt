@@ -10,12 +10,13 @@ import kotlinx.coroutines.withContext
 object XMPPOperations {
     /**
      * Send text message
+     * Returns the message ID if successful, null otherwise
      */
     suspend fun sendTextMessage(
         client: XMPPClient,
         roomJID: String,
         messageBody: String
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): String? = withContext(Dispatchers.IO) {
         client.sendMessage(roomJID, messageBody)
     }
 
@@ -46,8 +47,13 @@ object XMPPOperations {
     suspend fun sendTypingIndicator(
         client: XMPPClient,
         roomJID: String,
+        fullName: String,
         isTyping: Boolean
     ) = withContext(Dispatchers.IO) {
-        client.sendTypingIndicator(roomJID, isTyping)
+        val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
+        val userFullName = fullName.ifBlank { 
+            "${currentUser?.firstName ?: ""} ${currentUser?.lastName ?: ""}".trim()
+        }
+        client.sendTypingIndicator(roomJID, userFullName, isTyping)
     }
 }

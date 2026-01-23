@@ -195,6 +195,18 @@ class XMPPClient(
                         setStatus(status)
                         delegate?.onStatusChanged(this@XMPPClient, status)
                     }
+                    
+                    override fun onComposingReceived(client: XMPPClient, roomJid: String, isComposing: Boolean, composingList: List<String>) {
+                        delegate?.onComposingReceived(this@XMPPClient, roomJid, isComposing, composingList)
+                    }
+                    
+                    override fun onMessageEdited(client: XMPPClient, roomJid: String, messageId: String, newText: String) {
+                        delegate?.onMessageEdited(this@XMPPClient, roomJid, messageId, newText)
+                    }
+                    
+                    override fun onReactionReceived(client: XMPPClient, roomJid: String, messageId: String, from: String, reactions: List<String>, data: Map<String, String>) {
+                        delegate?.onReactionReceived(this@XMPPClient, roomJid, messageId, from, reactions, data)
+                    }
                 })
                 
                 Log.d(TAG, "🔗 Attempting WebSocket connection...")
@@ -314,37 +326,103 @@ class XMPPClient(
 
     /**
      * Send a message to a room
+     * Matches web: sendMessage
+     * Returns the message ID that was sent, or null if failed
+     * Ensures presence is sent before sending message (XMPP requirement)
      */
-    suspend fun sendMessage(roomJID: String, messageBody: String): Boolean {
+    suspend fun sendMessage(
+        roomJID: String, 
+        messageBody: String,
+        firstName: String? = null,
+        lastName: String? = null,
+        photo: String? = null,
+        walletAddress: String? = null,
+        isReply: Boolean = false,
+        showInChannel: Boolean = false,
+        mainMessage: String? = null,
+        customId: String? = null
+    ): String? {
         return try {
             if (!isFullyConnected()) {
                 Log.e(TAG, "Cannot send message: not fully connected")
-                return false
+                return null
+            }
+            
+            // Ensure presence is sent to room before sending message (XMPP requirement)
+            // Check if we've already sent presence to this room
+            if (!hasPresenceResponseForRoom(roomJID)) {
+                Log.d(TAG, "📤 Sending presence to room before message: $roomJID")
+                sendPresenceInRoom(roomJID)
+                // Wait a bit for presence to be processed
+                kotlinx.coroutines.delay(200)
             }
             
             if (useWebSocket && webSocketConnection != null) {
                 Log.d(TAG, "📤 Sending message via WebSocket to $roomJID")
-                webSocketConnection?.sendMessage(roomJID, messageBody)
-                return true
+                val wsConnection = webSocketConnection
+                if (wsConnection != null) {
+                    return wsConnection.sendMessage(
+                        roomJID, 
+                        messageBody,
+                        firstName,
+                        lastName,
+                        photo,
+                        walletAddress,
+                        isReply,
+                        showInChannel,
+                        mainMessage,
+                        customId
+                    )
+                }
             } else if (connection != null) {
                 val muc = getOrCreateMUC(roomJID)
+                val messageId = customId ?: "msg_${System.currentTimeMillis()}"
                 muc.sendMessage(messageBody)
                 Log.d(TAG, "📤 Message sent via TCP to $roomJID: $messageBody")
-                return true
+                return messageId
+            }
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send message", e)
+            null
+        }
+    }
+    
+    /**
+     * Send media message
+     */
+    suspend fun sendMediaMessage(roomJID: String, mediaData: Map<String, Any>, messageId: String): Boolean {
+        return try {
+            if (!isFullyConnected()) {
+                Log.e(TAG, "Cannot send media message: not fully connected")
+                return false
+            }
+            
+            if (useWebSocket && webSocketConnection != null) {
+                Log.d(TAG, "📤 Sending media message via WebSocket to $roomJID")
+                val wsConnection = webSocketConnection
+                if (wsConnection != null) {
+                    return wsConnection.sendMediaMessage(roomJID, mediaData, messageId)
+                }
+            } else {
+                Log.e(TAG, "Media messages not supported for TCP connection")
+                return false
             }
             false
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to send message", e)
+            Log.e(TAG, "❌ Failed to send media message", e)
             false
         }
     }
 
     /**
      * Get message history using MAM (Message Archive Management)
+     * Matches web: getHistoryStanza
+     * Note: before parameter is timestamp (Long), not message ID
      */
-    suspend fun getHistory(roomJID: String, max: Int = 30, before: Long? = null): List<Message> {
+    suspend fun getHistory(roomJID: String, max: Int = 30, beforeTimestamp: Long? = null): List<Message> {
         return try {
-            Log.d(TAG, "📜 getHistory called for $roomJID (max: $max)")
+            Log.d(TAG, "📜 getHistory called for $roomJID (max: $max, beforeTimestamp: $beforeTimestamp)")
             
             if (!isFullyConnected()) {
                 Log.e(TAG, "❌ Cannot get history: not fully connected")
@@ -353,7 +431,7 @@ class XMPPClient(
                 return emptyList()
             }
             
-            Log.d(TAG, "📜 Requesting history for $roomJID (max: $max, before: $before)")
+            Log.d(TAG, "📜 Requesting history for $roomJID (max: $max, beforeTimestamp: $beforeTimestamp)")
             
             if (useWebSocket && webSocketConnection != null) {
                 Log.d(TAG, "📡 Using WebSocket for MAM query")
@@ -380,8 +458,8 @@ class XMPPClient(
                 
                 webSocketConnection?.registerMAMCollector(queryId, collector)
                 
-                // Send MAM query
-                val sent = webSocketConnection?.sendMAMQuery(roomJID, max, before, queryId) ?: false
+                // Send MAM query with timestamp (matches web version)
+                val sent = webSocketConnection?.sendMAMQuery(roomJID, max, beforeTimestamp, queryId) ?: false
                 if (!sent) {
                     Log.e(TAG, "❌ Failed to send MAM query")
                     webSocketConnection?.unregisterMAMCollector(queryId)
@@ -440,6 +518,9 @@ class XMPPClient(
                 Log.e(TAG, "❌ WebSocket connection not available for MAM query")
                 emptyList()
             }
+        } catch (e: CancellationException) {
+            // Re-throw cancellation exceptions (expected when coroutine scope is cancelled)
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to get history", e)
             emptyList()
@@ -658,6 +739,10 @@ class XMPPClient(
             
             Log.d(TAG, "   User: ${user.fullName}, profileImage: ${user.profileImage?.take(50)}")
             
+            // Check if message is deleted (has <deleted> element)
+            val isDeleted = messageXml.contains("<deleted") || messageXml.contains("<deleted>") || 
+                           forwardedXml.contains("<deleted") || forwardedXml.contains("<deleted>")
+            
             // Create Message object
             val message = Message(
                 id = finalMessageId,
@@ -667,7 +752,8 @@ class XMPPClient(
                 roomJid = roomJID,
                 timestamp = timestamp,
                 xmppId = finalMessageId,
-                xmppFrom = from
+                xmppFrom = from,
+                isDeleted = isDeleted
             )
             
             messages.add(message)
@@ -740,19 +826,177 @@ class XMPPClient(
     }
 
     /**
-     * Send typing indicator
+     * Send presence in room
+     * Matches web: presenceInRoomStanza
      */
-    suspend fun sendTypingIndicator(roomJID: String, isTyping: Boolean) {
-        try {
-            val muc = activeMUCs[roomJID]
-            if (isTyping && muc != null) {
-                // Send available presence to indicate typing
-                val presence = Presence(Presence.Type.available)
-                connection?.sendStanza(presence)
+    suspend fun sendPresenceInRoom(roomJID: String): Boolean {
+        return try {
+            if (!isFullyConnected()) {
+                Log.e(TAG, "Cannot send presence: not fully connected")
+                return false
             }
-            // Typing indicator implementation simplified
+            
+            if (useWebSocket && webSocketConnection != null) {
+                webSocketConnection?.sendPresenceInRoom(roomJID)
+                return true
+            } else {
+                Log.e(TAG, "Presence in room not supported for TCP connection")
+                return false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send presence", e)
+            false
+        }
+    }
+    
+    /**
+     * Get rooms
+     * Matches web: getRoomsStanza
+     */
+    suspend fun getRooms(): Boolean {
+        return try {
+            if (!isFullyConnected()) {
+                Log.e(TAG, "Cannot get rooms: not fully connected")
+                return false
+            }
+            
+            if (useWebSocket && webSocketConnection != null) {
+                webSocketConnection?.getRooms()
+                return true
+            } else {
+                Log.e(TAG, "Get rooms not supported for TCP connection")
+                return false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to get rooms", e)
+            false
+        }
+    }
+    
+    /**
+     * Get last message archive
+     * Matches web: getLastMessageArchiveStanza
+     */
+    suspend fun getLastMessageArchive(roomJID: String): Boolean {
+        return try {
+            if (!isFullyConnected()) {
+                Log.e(TAG, "Cannot get last message archive: not fully connected")
+                return false
+            }
+            
+            if (useWebSocket && webSocketConnection != null) {
+                webSocketConnection?.getLastMessageArchive(roomJID)
+                return true
+            } else {
+                Log.e(TAG, "Get last message archive not supported for TCP connection")
+                return false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to get last message archive", e)
+            false
+        }
+    }
+    
+    /**
+     * Send ping
+     * Matches web: sendPingStanza
+     */
+    suspend fun sendPing(customId: String? = null): String? {
+        return try {
+            if (!isFullyConnected()) {
+                Log.e(TAG, "Cannot send ping: not fully connected")
+                return null
+            }
+            
+            if (useWebSocket && webSocketConnection != null) {
+                return webSocketConnection?.sendPing(customId)
+            } else {
+                Log.e(TAG, "Ping not supported for TCP connection")
+                return null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to send ping", e)
+            null
+        }
+    }
+    
+    /**
+     * Send typing indicator (composing/paused)
+     * Matches web: useComposing hook
+     */
+    suspend fun sendTypingIndicator(roomJID: String, fullName: String, isTyping: Boolean) {
+        try {
+            if (useWebSocket && webSocketConnection != null) {
+                val wsConnection = webSocketConnection
+                if (wsConnection != null) {
+                    wsConnection.sendTypingIndicator(roomJID, fullName, isTyping)
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send typing indicator", e)
+        }
+    }
+
+    /**
+     * Edit message
+     * Matches web: editMessageStanza
+     */
+    suspend fun editMessage(roomJID: String, messageId: String, newText: String) {
+        try {
+            if (!isFullyConnected()) {
+                Log.e(TAG, "Cannot edit message: not fully connected")
+                return
+            }
+            
+            if (useWebSocket && webSocketConnection != null) {
+                webSocketConnection?.editMessage(roomJID, messageId, newText)
+            } else {
+                Log.e(TAG, "Edit message not supported for TCP connection")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to edit message", e)
+        }
+    }
+
+    /**
+     * Delete message
+     * Matches web: deleteMessageStanza
+     */
+    suspend fun deleteMessage(roomJID: String, messageId: String) {
+        try {
+            if (!isFullyConnected()) {
+                Log.e(TAG, "Cannot delete message: not fully connected")
+                return
+            }
+            
+            if (useWebSocket && webSocketConnection != null) {
+                webSocketConnection?.deleteMessage(roomJID, messageId)
+            } else {
+                Log.e(TAG, "Delete message not supported for TCP connection")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to delete message", e)
+        }
+    }
+
+    /**
+     * Send message reaction
+     * Matches web: sendMessageReactionStanza
+     */
+    suspend fun sendMessageReaction(roomJID: String, messageId: String, reactions: List<String>) {
+        try {
+            if (!isFullyConnected()) {
+                Log.e(TAG, "Cannot send reaction: not fully connected")
+                return
+            }
+            
+            if (useWebSocket && webSocketConnection != null) {
+                webSocketConnection?.sendMessageReaction(roomJID, messageId, reactions)
+            } else {
+                Log.e(TAG, "Reactions not supported for TCP connection")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send reaction", e)
         }
     }
 

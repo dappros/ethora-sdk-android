@@ -67,6 +67,10 @@ dependencies {
     // Image Loading
     implementation(libs.coil.compose)
 
+    // Media Viewers
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.ui)
+
     // Dependency Injection
     implementation(libs.hilt.android)
     kapt(libs.hilt.compiler)

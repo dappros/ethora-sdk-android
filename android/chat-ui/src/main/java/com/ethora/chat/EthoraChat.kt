@@ -12,15 +12,20 @@ import com.ethora.chat.core.config.ChatConfig
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.networking.ApiClient
 import com.ethora.chat.core.networking.AuthAPIHelper
+import com.ethora.chat.core.networking.RoomsAPIHelper
+import com.ethora.chat.core.service.LogoutService
+import com.ethora.chat.core.xmpp.XMPPClient
 import com.ethora.chat.core.store.ChatStore
+import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
-import com.ethora.chat.core.xmpp.XMPPClient
 import com.ethora.chat.ui.components.ChatRoomView
 import com.ethora.chat.ui.components.RoomListView
 import com.ethora.chat.ui.styling.ChatTheme
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -85,22 +90,74 @@ fun Chat(
     // Get current user from store
     val currentUser by UserStore.currentUser.collectAsState()
     
+    // Load rooms once globally (similar to web: if (roomsList && Object.keys(roomsList).length > 0))
+    LaunchedEffect(currentUser) {
+        val existingRooms = RoomStore.rooms.value
+        if (existingRooms.isEmpty() && currentUser != null) {
+            // No rooms loaded yet, load them
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    val rooms = RoomsAPIHelper.getRooms()
+                    RoomStore.setRooms(rooms)
+                    android.util.Log.d("EthoraChat", "✅ Loaded ${rooms.size} rooms globally")
+                } catch (e: Exception) {
+                    android.util.Log.e("EthoraChat", "❌ Failed to load rooms", e)
+                }
+            }
+        } else if (existingRooms.isNotEmpty()) {
+            android.util.Log.d("EthoraChat", "⏭️ Rooms already loaded (${existingRooms.size} rooms), skipping API request")
+        }
+    }
+    
     ChatTheme(colors = config.colors) {
         // Initialize XMPP client if user is available
         val xmppClient = remember(currentUser) {
             currentUser?.let { user ->
                 user.xmppUsername?.let { username ->
                     user.xmppPassword?.let { password ->
-                        XMPPClient(
+                        val client = XMPPClient(
                             username = username,
                             password = password,
                             settings = config.xmppSettings
-                        ).apply {
-                            CoroutineScope(Dispatchers.IO).launch {
-                                initializeClient()
-                            }
+                        )
+                        
+                        // Set XMPP client in LogoutService so external apps can logout
+                        LogoutService.setXMPPClient(client)
+                        
+                        CoroutineScope(Dispatchers.IO).launch {
+                            client.initializeClient()
                         }
+                        
+                        client
                     }
+                }
+            }
+        }
+        
+        // Load initial messages for all rooms once after XMPP client is initialized and rooms are loaded
+        // Similar to updateMessagesTillLast in web version
+        LaunchedEffect(xmppClient, RoomStore.rooms.value) {
+            val rooms = RoomStore.rooms.value
+            val client = xmppClient
+            
+            // Wait for XMPP client to be fully connected and rooms to be loaded
+            if (client != null && rooms.isNotEmpty()) {
+                try {
+                    // Small delay to ensure XMPP is fully connected
+                    delay(1000)
+                    
+                    // Load initial messages for all rooms (only once)
+                    MessageLoader.loadInitialMessagesForAllRooms(
+                        xmppClient = client,
+                        batchSize = 5,
+                        messagesPerRoom = 30
+                    )
+                } catch (e: CancellationException) {
+                    // Expected when composable leaves composition - don't log as error
+                    // Re-throw to allow proper coroutine cancellation
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.e("EthoraChat", "Error loading initial messages", e)
                 }
             }
         }

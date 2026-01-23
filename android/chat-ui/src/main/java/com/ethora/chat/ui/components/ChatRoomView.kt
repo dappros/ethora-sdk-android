@@ -5,14 +5,22 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.launch
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.store.ScrollPositionStore
 import com.ethora.chat.core.store.UserStore
@@ -35,6 +43,44 @@ fun ChatRoomView(
     val hasMoreMessages by viewModel.hasMoreMessages.collectAsState()
     val composingUsers by viewModel.composingUsers.collectAsState()
     
+    // Update lastViewedTimestamp when room is opened (set to 0 to mark all as read)
+    LaunchedEffect(room.jid) {
+        com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, 0)
+        android.util.Log.d("ChatRoomView", "📅 Room opened: $room.jid, set lastViewedTimestamp to 0")
+    }
+    
+    // Update lastViewedTimestamp when room is closed (set to current time)
+    DisposableEffect(room.jid) {
+        onDispose {
+            val currentTime = System.currentTimeMillis()
+            com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, currentTime)
+            android.util.Log.d("ChatRoomView", "📅 Room closed: $room.jid, set lastViewedTimestamp to $currentTime")
+        }
+    }
+    
+    // Coroutine scope for scroll animations
+    val coroutineScope = rememberCoroutineScope()
+    
+    // Clipboard manager
+    val clipboardManager = LocalClipboardManager.current
+    
+    // State for file preview dialog
+    var previewMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
+    
+    // State for context menu
+    var contextMenuMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
+    var contextMenuPosition by remember { mutableStateOf(Pair(0f, 0f)) }
+    
+    // State for edit mode
+    var editMessageId by remember { mutableStateOf<String?>(null) }
+    var editMessageText by remember { mutableStateOf("") }
+    
+    // State for chat info screen
+    var showChatInfo by remember { mutableStateOf(false) }
+    
+    // Selected user for profile view
+    val selectedUser by UserStore.selectedUser.collectAsState()
+    
     // Get saved scroll position or default to 0 (bottom in reverse layout)
     val savedScrollPosition = remember(room.jid) { 
         ScrollPositionStore.getScrollPosition(room.jid) 
@@ -45,8 +91,20 @@ fun ChatRoomView(
         initialFirstVisibleItemIndex = savedScrollPosition ?: 0
     )
     
-    val density = LocalDensity.current
-    val scrollThresholdPx = with(density) { 150.dp.toPx() }
+    // Track if scroll to bottom button should be shown
+    // In reverseLayout, we're at bottom when firstVisibleItemIndex is 0 and scrollOffset is small
+    var showScrollToBottom by remember { mutableStateOf(false) }
+    
+    // Check scroll position to show/hide scroll to bottom button
+    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
+        // In reverseLayout: index 0 = oldest messages (top), higher indices = newer messages (bottom)
+        // We're at bottom when firstVisibleItemIndex is 0 and scrollOffset is small (< 100px)
+        val isAtBottom = listState.firstVisibleItemIndex == 0 && 
+                         listState.firstVisibleItemScrollOffset < 100
+        
+        // Show button if we're not at bottom and have messages
+        showScrollToBottom = !isAtBottom && messages.isNotEmpty()
+    }
     
     // Debug logging
     LaunchedEffect(messages.size, isLoading) {
@@ -89,86 +147,111 @@ fun ChatRoomView(
         }
     }
     
-    // Detect scroll to top with 150px threshold (for reverse layout, top = oldest messages)
-    // In reverse layout, scrolling from bottom to top means scrolling up to older messages
-    LaunchedEffect(listState.firstVisibleItemScrollOffset, listState.firstVisibleItemIndex, listState.layoutInfo, isLoadingMore, isLoading, hasMoreMessages) {
-        val layoutInfo = listState.layoutInfo
-        if (layoutInfo.visibleItemsInfo.isEmpty() || messages.isEmpty()) return@LaunchedEffect
-        
-        val firstVisibleItem = layoutInfo.visibleItemsInfo.firstOrNull() ?: return@LaunchedEffect
-        val firstVisibleIndex = firstVisibleItem.index
-        val scrollOffset = listState.firstVisibleItemScrollOffset
-        
-        // In reverse layout, index 0 is the oldest message (at the "top")
-        // When scrolling from bottom to top, we're moving towards index 0
-        // Calculate distance from top using actual item size
-        val distanceFromTop = if (firstVisibleIndex == 0) {
-            // We're at the top item, use the scroll offset
-            scrollOffset.toFloat()
-        } else {
-            // Calculate distance: sum of heights of items before firstVisibleIndex + scrollOffset
-            var totalHeight = 0f
-            for (i in 0 until firstVisibleIndex) {
-                val item = layoutInfo.visibleItemsInfo.find { it.index == i }
-                if (item != null) {
-                    totalHeight += item.size.toFloat()
-                } else {
-                    // Estimate if item not visible (roughly 80px per message)
-                    totalHeight += 80f
-                }
-            }
-            totalHeight + scrollOffset.toFloat()
+    // Detect when user scrolls near the visual top (older messages) using pixel-based detection
+    // User wants: when scroll position reaches 1050px (150px from top of 1200px area), trigger loading
+    var lastLoadTrigger by remember { mutableStateOf(0L) }
+    
+    // Use snapshotFlow to observe scroll changes more reliably - don't restart on state changes
+    // In reverseLayout: index 0 = newest (bottom), higher indices = older (top)
+    // Trigger when scrolling up and reaching near the top (oldest messages)
+    LaunchedEffect(Unit) {
+        snapshotFlow { 
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
         }
-        
-        android.util.Log.d("ChatRoomView", "📜 Scroll: index=$firstVisibleIndex, offset=$scrollOffset, distanceFromTop=$distanceFromTop, threshold=$scrollThresholdPx")
-        
-        // Load more when scrolled within 150px of the top (oldest messages)
-        // Only trigger if we have messages, aren't already loading, and have more messages available
-        if (distanceFromTop <= scrollThresholdPx && !isLoadingMore && !isLoading && hasMoreMessages) {
-            android.util.Log.d("ChatRoomView", "📜 Within threshold (${distanceFromTop}px <= ${scrollThresholdPx}px), triggering loadMore...")
-            viewModel.loadMoreMessages()
+        .collect { (firstIndex, scrollOffset) ->
+            // Read current state values inside collect to avoid restarting the flow
+            val currentIsLoadingMore = isLoadingMore
+            val currentIsLoading = isLoading
+            val currentHasMore = hasMoreMessages
+            val currentMessagesSize = messages.size
+            
+            val layoutInfo = listState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            if (totalItems == 0 || currentMessagesSize == 0) return@collect
+
+            // In reverseLayout: when firstIndex is close to totalItems - 1, we're near the top (oldest messages)
+            // Use a threshold of 3 items from the top to trigger loading
+            // Also check scroll offset: when scrollOffset is small, we're at the top
+            val itemThreshold = 3
+            val topItemThreshold = (totalItems - itemThreshold).coerceAtLeast(0)
+            val nearTopByItems = firstIndex >= topItemThreshold
+            
+            // Also check if scroll offset is small (near top of scrollable area)
+            val scrollThreshold = 50 // Small scroll offset means we're at top
+            val nearTopByScroll = scrollOffset < scrollThreshold
+            
+            val nearTop = nearTopByItems || nearTopByScroll
+
+            android.util.Log.d(
+                "ChatRoomView",
+                "📜 Scroll: firstIndex=$firstIndex, total=$totalItems, scrollOffset=$scrollOffset, topItemThreshold=$topItemThreshold, nearTopByItems=$nearTopByItems, nearTopByScroll=$nearTopByScroll, nearTop=$nearTop, isLoadingMore=$currentIsLoadingMore, isLoading=$currentIsLoading, hasMore=$currentHasMore"
+            )
+
+            // Debounce: only trigger if at least 200ms have passed since last trigger
+            val now = System.currentTimeMillis()
+            val shouldTrigger = nearTop && 
+                              !currentIsLoadingMore && 
+                              !currentIsLoading && 
+                              currentHasMore &&
+                              (now - lastLoadTrigger) > 200
+
+            if (shouldTrigger) {
+                android.util.Log.d("ChatRoomView", "📜 ✅ Reached top threshold (index=$firstIndex >= $topItemThreshold or scrollOffset=$scrollOffset < $scrollThreshold), triggering loadMoreMessages()")
+                lastLoadTrigger = now
+                viewModel.loadMoreMessages()
+            }
         }
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        // Header
-        ChatRoomHeader(
-            room = room,
-            onBack = {
-                // Save scroll position before navigating back
-                val currentIndex = listState.firstVisibleItemIndex
-                ScrollPositionStore.saveScrollPosition(room.jid, currentIndex)
-                android.util.Log.d("ChatRoomView", "💾 Saved scroll position on back: $currentIndex")
-                onBack()
-            }
-        )
+        // Show user profile screen if user is selected
+        selectedUser?.let { user ->
+            UserProfileScreen(
+                user = user,
+                onBack = {
+                    UserStore.clearSelectedUser()
+                },
+                onCreateChat = { newRoom: Room ->
+                    UserStore.clearSelectedUser()
+                    onBack() // Go back to room list
+                    // The room will be selected automatically via RoomStore.setCurrentRoom
+                }
+            )
+            return@Column
+        }
+        
+        // Show chat info screen if requested, otherwise show chat room
+        if (showChatInfo) {
+            ChatInfoScreen(
+                room = room,
+                onBack = { showChatInfo = false }
+            )
+        } else {
+            // Header
+            ChatRoomHeader(
+                room = room,
+                onBack = {
+                    // Save scroll position before navigating back
+                    val currentIndex = listState.firstVisibleItemIndex
+                    ScrollPositionStore.saveScrollPosition(room.jid, currentIndex)
+                    android.util.Log.d("ChatRoomView", "💾 Saved scroll position on back: $currentIndex")
+                    onBack()
+                },
+                onInfoClick = { showChatInfo = true }
+            )
         
         // Messages list
         Box(modifier = Modifier.weight(1f)) {
             when {
                 messages.isNotEmpty() -> {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        // Loading indicator above the list - only when loading more
-                        if (isLoadingMore) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
-                                contentAlignment = androidx.compose.ui.Alignment.Center
-                            ) {
-                                CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                            }
-                        }
-                        
-                        // Show messages
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 12.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                            reverseLayout = true
-                        ) {
-                        
+                    // Show messages
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        reverseLayout = true
+                    ) {
                         items(
                             count = messages.size,
                             key = { index -> 
@@ -184,79 +267,181 @@ fun ChatRoomView(
                                 return@items
                             }
                             
-                            // Check if this message is from the current user
-                            // Compare by checking if senderJID/xmppUsername contains the current user's xmppUsername
-                            val currentUserXmppUsername = viewModel.currentUserXmppUsername
-                            val messageXmppUsername = message.user.xmppUsername
-                            val messageUserJID = message.user.userJID
-                            
-                            val isUser = when {
-                                // First check: if current user's xmppUsername is not null, check if message's xmppUsername or userJID contains it
-                                !currentUserXmppUsername.isNullOrBlank() -> {
-                                    val containsXmppUsername = !messageXmppUsername.isNullOrBlank() && 
-                                            messageXmppUsername.contains(currentUserXmppUsername, ignoreCase = false)
-                                    val containsUserJID = !messageUserJID.isNullOrBlank() && 
-                                            messageUserJID.contains(currentUserXmppUsername, ignoreCase = false)
-                                    containsXmppUsername || containsUserJID
-                                }
-                                // Fallback: compare by user ID
-                                else -> {
-                                    val currentUserId = viewModel.currentUserId
-                                    val messageUserId = message.user.id
-                                    !currentUserId.isNullOrBlank() && !messageUserId.isNullOrBlank() && 
-                                            currentUserId == messageUserId
-                                }
-                            }
-                            
-                            android.util.Log.d("ChatRoomView", "   Message from: xmppUsername=$messageXmppUsername, userJID=$messageUserJID, isUser=$isUser (current: xmppUsername=$currentUserXmppUsername)")
-                            
-                            // Determine if this is the first message in a group
-                            // Group messages from the same user that are within 5 minutes of each other
+                            // Calculate if we should show date separator
+                            // Compare this message's date with the previous message's date
                             val prevMessage = if (reversedIndex > 0) messages[reversedIndex - 1] else null
-                            val nextMessage = if (reversedIndex < messages.size - 1) messages[reversedIndex + 1] else null
-                            
-                            val isFirstInGroup = when {
-                                // First message overall
-                                prevMessage == null -> true
-                                // Different user
-                                prevMessage.user.id != message.user.id -> true
-                                // More than 5 minutes apart
-                                else -> {
-                                    val timeDiff = (message.timestamp ?: message.date.time) - (prevMessage.timestamp ?: prevMessage.date.time)
-                                    timeDiff > 5 * 60 * 1000 // 5 minutes in milliseconds
+                            val showDateSeparator = prevMessage?.let { prev ->
+                                val currentDate = java.util.Calendar.getInstance().apply {
+                                    time = message.date
+                                    set(java.util.Calendar.HOUR_OF_DAY, 0)
+                                    set(java.util.Calendar.MINUTE, 0)
+                                    set(java.util.Calendar.SECOND, 0)
+                                    set(java.util.Calendar.MILLISECOND, 0)
                                 }
-                            }
-                            
-                            val isLastInGroup = when {
-                                // Last message overall
-                                nextMessage == null -> true
-                                // Different user
-                                nextMessage.user.id != message.user.id -> true
-                                // More than 5 minutes apart
-                                else -> {
-                                    val timeDiff = (nextMessage.timestamp ?: nextMessage.date.time) - (message.timestamp ?: message.date.time)
-                                    timeDiff > 5 * 60 * 1000 // 5 minutes in milliseconds
+                                val prevDate = java.util.Calendar.getInstance().apply {
+                                    time = prev.date
+                                    set(java.util.Calendar.HOUR_OF_DAY, 0)
+                                    set(java.util.Calendar.MINUTE, 0)
+                                    set(java.util.Calendar.SECOND, 0)
+                                    set(java.util.Calendar.MILLISECOND, 0)
                                 }
-                            }
+                                // Show separator if dates are different
+                                currentDate.get(java.util.Calendar.YEAR) != prevDate.get(java.util.Calendar.YEAR) ||
+                                currentDate.get(java.util.Calendar.DAY_OF_YEAR) != prevDate.get(java.util.Calendar.DAY_OF_YEAR)
+                            } ?: true // Show separator for first message
                             
-                            // Add spacing between different users (add extra top padding if first in group and different user)
-                            val topPadding = if (isFirstInGroup && prevMessage != null && prevMessage.user.id != message.user.id) {
-                                12.dp
-                            } else {
-                                0.dp
-                            }
-                            
-                            Box(modifier = Modifier.padding(top = topPadding)) {
-                                MessageBubble(
-                                    message = message,
-                                    isUser = isUser,
-                                    showAvatar = isFirstInGroup, // Show avatar on first message in group
-                                    showUsername = isFirstInGroup, // Only show username on first message
-                                    showTimestamp = isLastInGroup // Only show timestamp on last message in group
-                                )
+                            // Show date separator if needed, then the message
+                            Column {
+                                if (showDateSeparator) {
+                                    DateSeparator(date = message.date)
+                                }
+                                
+                                // Check if this message is from the current user
+                                // Compare by checking if senderJID/xmppUsername contains the current user's xmppUsername
+                                val currentUserXmppUsername = viewModel.currentUserXmppUsername
+                                val messageXmppUsername = message.user.xmppUsername ?: ""
+                                val messageUserJID = message.user.userJID ?: ""
+                                
+                                val isUser = when {
+                                    // First check: if current user's xmppUsername is not null, check if message's xmppUsername or userJID contains it
+                                    !currentUserXmppUsername.isNullOrBlank() -> {
+                                        val containsXmppUsername = messageXmppUsername.isNotBlank() &&
+                                                messageXmppUsername.contains(currentUserXmppUsername, ignoreCase = false)
+                                        val containsUserJID = messageUserJID.isNotBlank() &&
+                                                messageUserJID.contains(currentUserXmppUsername, ignoreCase = false)
+                                        containsXmppUsername || containsUserJID
+                                    }
+                                    // Fallback: compare by user ID
+                                    else -> {
+                                        val currentUserId = viewModel.currentUserId
+                                        val messageUserId = message.user.id
+                                        !currentUserId.isNullOrBlank() && !messageUserId.isNullOrBlank() &&
+                                                currentUserId == messageUserId
+                                    }
+                                }
+                                
+                                android.util.Log.d("ChatRoomView", "   Message from: xmppUsername=$messageXmppUsername, userJID=$messageUserJID, isUser=$isUser (current: xmppUsername=$currentUserXmppUsername)")
+                                
+                                // Determine if this is the first message in a group
+                                // Group messages from the same user that are within 5 minutes of each other
+                                val prevMessageForGroup = if (reversedIndex > 0) messages[reversedIndex - 1] else null
+                                val nextMessage = if (reversedIndex < messages.size - 1) messages[reversedIndex + 1] else null
+                                
+                                val isFirstInGroup = when {
+                                    // First message overall
+                                    prevMessageForGroup == null -> true
+                                    // Different user
+                                    prevMessageForGroup.user.id != message.user.id -> true
+                                    // More than 5 minutes apart
+                                    else -> {
+                                        val timeDiff = (message.timestamp ?: message.date.time) - (prevMessageForGroup.timestamp ?: prevMessageForGroup.date.time)
+                                        timeDiff > 5 * 60 * 1000 // 5 minutes in milliseconds
+                                    }
+                                }
+                                
+                                val isLastInGroup = when {
+                                    // Last message overall
+                                    nextMessage == null -> true
+                                    // Different user
+                                    nextMessage.user.id != message.user.id -> true
+                                    // More than 5 minutes apart
+                                    else -> {
+                                        val timeDiff = (nextMessage.timestamp ?: nextMessage.date.time) - (message.timestamp ?: message.date.time)
+                                        timeDiff > 5 * 60 * 1000 // 5 minutes in milliseconds
+                                    }
+                                }
+                                
+                                // Add spacing between different users (add extra top padding if first in group and different user)
+                                val topPadding = if (isFirstInGroup && prevMessageForGroup != null && prevMessageForGroup.user.id != message.user.id) {
+                                    12.dp
+                                } else {
+                                    0.dp
+                                }
+                                
+                                Box(modifier = Modifier.padding(top = topPadding)) {
+                                    MessageBubble(
+                                        message = message,
+                                        isUser = isUser,
+                                        showAvatar = isFirstInGroup, // Show avatar on first message in group
+                                        showUsername = isFirstInGroup, // Only show username on first message
+                                        showTimestamp = true, // Show timestamp for all messages (matches web)
+                                        onMediaClick = { msg -> previewMessage = msg },
+                                        onLongPress = { x, y ->
+                                            contextMenuMessage = message
+                                            contextMenuPosition = Pair(x, y)
+                                        },
+                                        onAvatarClick = { user ->
+                                            // Don't show profile for deleted users
+                                            if (user.name != "Deleted User") {
+                                                UserStore.setSelectedUser(user)
+                                            }
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
+                    
+                    // History loader overlayed at the top of the messages list when loading more
+                    // Positioned over the oldest messages (top of the list in reverseLayout)
+                    if (isLoadingMore) {
+                        Box(
+                            modifier = Modifier
+                                .align(androidx.compose.ui.Alignment.TopCenter)
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            contentAlignment = androidx.compose.ui.Alignment.Center
+                        ) {
+                            Card(
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+                                ),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Text(
+                                        text = "Loading older messages...",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Scroll to bottom button (floating action button)
+                    if (showScrollToBottom) {
+                        FloatingActionButton(
+                            onClick = {
+                                // Scroll to bottom (index 0 in reverseLayout = newest messages)
+                                coroutineScope.launch {
+                                    listState.animateScrollToItem(0)
+                                    showScrollToBottom = false
+                                }
+                            },
+                            modifier = Modifier
+                                .align(androidx.compose.ui.Alignment.BottomEnd)
+                                .padding(16.dp)
+                                .size(40.dp), // 30% smaller: 56dp * 0.7 ≈ 40dp
+                            shape = CircleShape, // Fully rounded
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowDown,
+                                contentDescription = "Scroll to bottom",
+                                modifier = Modifier.size(20.dp) // Smaller icon to match button size
+                            )
+                        }
                     }
                 }
                 isLoading && messages.isEmpty() -> {
@@ -304,9 +489,95 @@ fun ChatRoomView(
         // Input
         ChatInput(
             onSendMessage = { text ->
-                viewModel.sendMessage(text)
+                if (editMessageId != null) {
+                    // Edit mode: edit existing message
+                    viewModel.editMessage(editMessageId!!, text)
+                    editMessageId = null
+                    editMessageText = ""
+                } else {
+                    // Normal mode: send new message
+                    viewModel.sendMessage(text)
+                }
+                // Stop typing when message is sent
+                viewModel.sendStopTyping()
+            },
+            onSendMedia = { file, mimeType ->
+                viewModel.sendMedia(file, mimeType)
+                // Stop typing when media is sent
+                viewModel.sendStopTyping()
+            },
+            onStartTyping = {
+                viewModel.sendStartTyping()
+            },
+            onStopTyping = {
+                viewModel.sendStopTyping()
+            },
+            editText = if (editMessageId != null) editMessageText else null,
+            onEditCancel = {
+                editMessageId = null
+                editMessageText = ""
             }
         )
+        
+        // File preview dialog
+        FilePreviewDialog(
+            message = previewMessage,
+            onDismiss = { previewMessage = null }
+        )
+        
+        // Context menu
+        contextMenuMessage?.let { msg ->
+            val isUserMessage = msg.user.xmppUsername?.let { 
+                viewModel.currentUserXmppUsername?.contains(it) == true 
+            } ?: false
+            
+            val isReply = msg.isReply == true
+            
+            MessageContextMenu(
+                message = msg,
+                isUser = isUserMessage,
+                isReply = isReply,
+                visible = true,
+                x = contextMenuPosition.first,
+                y = contextMenuPosition.second,
+                onDismiss = { 
+                    contextMenuMessage = null
+                    contextMenuPosition = Pair(0f, 0f)
+                },
+                onReply = {
+                    // TODO: Implement reply
+                    android.util.Log.d("ChatRoomView", "Reply to message: ${msg.id}")
+                },
+                onCopy = {
+                    // Copy message text to clipboard
+                    clipboardManager.setText(AnnotatedString(msg.body))
+                },
+                onEdit = {
+                    // Implement edit - set edit action and show edit input
+                    val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
+                    if (currentUser != null && msg.user.id == currentUser.id) {
+                        // Set edit mode in input
+                        editMessageId = msg.id
+                        editMessageText = msg.body
+                        android.util.Log.d("ChatRoomView", "✏️ Edit message: ${msg.id}")
+                    }
+                },
+                onDelete = {
+                    // Implement delete
+                    val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
+                    if (currentUser != null && msg.user.id == currentUser.id) {
+                        viewModel.deleteMessage(msg.id)
+                        android.util.Log.d("ChatRoomView", "🗑️ Delete message: ${msg.id}")
+                    }
+                },
+                onReaction = { emoji ->
+                    // Implement reaction
+                    viewModel.sendReaction(msg.id, emoji)
+                    android.util.Log.d("ChatRoomView", "😀 Add reaction $emoji to message: ${msg.id}")
+                }
+            )
+        }
+        } // End of else block - closes the else that starts at line 148
     }
 }
 
@@ -314,7 +585,8 @@ fun ChatRoomView(
 @OptIn(ExperimentalMaterial3Api::class)
 private fun ChatRoomHeader(
     room: Room,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onInfoClick: () -> Unit
 ) {
     TopAppBar(
         title = { 
@@ -330,6 +602,14 @@ private fun ChatRoomHeader(
                 Icon(
                     imageVector = androidx.compose.material.icons.Icons.Default.ArrowBack,
                     contentDescription = "Back"
+                )
+            }
+        },
+        actions = {
+            IconButton(onClick = onInfoClick) {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = "Chat info"
                 )
             }
         },

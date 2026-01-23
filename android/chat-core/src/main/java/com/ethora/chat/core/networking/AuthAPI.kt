@@ -2,6 +2,9 @@ package com.ethora.chat.core.networking
 
 import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.models.User
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.RequestBody
 import retrofit2.Response
 import retrofit2.http.*
 
@@ -23,6 +26,13 @@ interface AuthAPI {
     suspend fun refreshToken(
         @Body body: RefreshTokenRequest
     ): Response<RefreshTokenResponse>
+    
+    @Multipart
+    @POST("files/")
+    suspend fun uploadFile(
+        @Header("Authorization") token: String,
+        @Part file: MultipartBody.Part
+    ): Response<FileUploadResponse>
 }
 
 /**
@@ -126,6 +136,35 @@ data class RefreshTokenResponse(
 )
 
 /**
+ * File upload response
+ */
+data class FileUploadResponse(
+    val data: FileUploadData
+)
+
+data class FileUploadData(
+    val results: List<FileUploadResult>
+)
+
+data class FileUploadResult(
+    val filename: String,
+    val location: String,
+    val locationPreview: String? = null,
+    val mimetype: String,
+    val originalName: String,
+    val size: String,
+    val createdAt: String,
+    val expiresAt: String? = null,
+    val isVisible: Boolean? = null,
+    val ownerKey: String? = null,
+    val updatedAt: String? = null,
+    val userId: String? = null,
+    val duration: String? = null,
+    val waveForm: String? = null,
+    val attachmentId: String? = null
+)
+
+/**
  * Auth API helper functions
  */
 object AuthAPIHelper {
@@ -179,6 +218,41 @@ object AuthAPIHelper {
             }
         } catch (e: Exception) {
             android.util.Log.e("AuthAPIHelper", "JWT login failed", e)
+            null
+        }
+    }
+    
+    /**
+     * Upload file
+     */
+    suspend fun uploadFile(
+        file: java.io.File,
+        mimeType: String,
+        token: String,
+        baseUrl: String = AppConfig.defaultBaseURL
+    ): FileUploadResult? {
+        return try {
+            val api = ApiClient.createService<AuthAPI>(baseUrl)
+            
+            val requestFile = RequestBody.create(
+                mimeType.toMediaType(),
+                file
+            )
+            val multipartBody = MultipartBody.Part.createFormData(
+                "files",
+                file.name,
+                requestFile
+            )
+            
+            val response = api.uploadFile("Bearer $token", multipartBody)
+            if (response.isSuccessful && response.body() != null) {
+                response.body()!!.data.results.firstOrNull()
+            } else {
+                android.util.Log.e("AuthAPIHelper", "File upload failed: ${response.code()} ${response.message()}")
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("AuthAPIHelper", "File upload exception", e)
             null
         }
     }

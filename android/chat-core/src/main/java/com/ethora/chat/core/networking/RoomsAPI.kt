@@ -30,6 +30,13 @@ interface RoomsAPI {
         @Path("chatName") chatName: String,
         @Body body: ReportMessageRequest
     ): Response<Unit>
+
+    @POST("chats/private")
+    @Headers("x-app-id: ${AppConfig.defaultAppId}")
+    suspend fun createPrivateRoom(
+        @Header("x-app-id") appId: String = AppConfig.defaultAppId,
+        @Body body: CreatePrivateRoomRequest
+    ): Response<ApiRoom>
 }
 
 /**
@@ -57,6 +64,13 @@ data class ReportMessageRequest(
     val messageId: String,
     val category: String,
     val text: String? = null
+)
+
+/**
+ * Create private room request
+ */
+data class CreatePrivateRoomRequest(
+    val username: String
 )
 
 /**
@@ -130,6 +144,26 @@ object RoomsAPIHelper {
         )
         if (!response.isSuccessful) {
             throw Exception("Failed to report message: ${response.code()} ${response.message()}")
+        }
+    }
+
+    /**
+     * Create private room (1v1 chat)
+     */
+    suspend fun createPrivateRoom(
+        username: String,
+        baseUrl: String = AppConfig.defaultBaseURL,
+        appId: String = AppConfig.defaultAppId
+    ): ApiRoom {
+        val api = ApiClient.createService<RoomsAPI>(baseUrl)
+        val response = api.createPrivateRoom(
+            appId,
+            CreatePrivateRoomRequest(username = username)
+        )
+        if (response.isSuccessful) {
+            return response.body()!!
+        } else {
+            throw Exception("Failed to create private room: ${response.code()} ${response.message()}")
         }
     }
 }
