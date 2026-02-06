@@ -167,6 +167,15 @@ class XMPPWebSocketConnection(
     }
     
     /**
+     * Send raw XML stanza (public wrapper for sendRaw)
+     */
+    fun send(xml: String) {
+        scope.launch {
+            sendRaw(xml)
+        }
+    }
+    
+    /**
      * Send stream open (RFC 7395 format: <open> element for WebSocket)
      */
     private suspend fun sendStreamOpen() {

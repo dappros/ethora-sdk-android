@@ -74,8 +74,11 @@ class MessagePriorityQueue(
                     val currentRoom = rooms[room.jid]
                     if (room.messageCount < 30 && currentRoom?.historyComplete != true) {
                         try {
-                            xmppClient?.sendPresenceInRoom(room.jid)
-                            kotlinx.coroutines.delay(100)
+                            // Only send presence if fully connected, but continue with message loading regardless
+                            if (xmppClient?.isFullyConnected() == true) {
+                                xmppClient.sendPresenceInRoom(room.jid)
+                                kotlinx.coroutines.delay(100)
+                            }
                         } catch (e: Exception) {
                             Log.w(TAG, "Failed to send presence to ${room.jid}", e)
                         }

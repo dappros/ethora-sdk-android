@@ -42,9 +42,15 @@ object RoomsPresenceInitializer {
                 rooms.map { room ->
                     async {
                         try {
-                            val success = xmppClient.sendPresenceInRoom(room.jid)
-                            if (!success) {
-                                Log.w(TAG, "Failed to send presence to ${room.jid}")
+                            // Check connection status first
+                            if (xmppClient.isFullyConnected()) {
+                                val success = xmppClient.sendPresenceInRoom(room.jid)
+                                if (!success) {
+                                    Log.w(TAG, "Failed to send presence to ${room.jid}")
+                                }
+                            } else {
+                                // Silent return or debug log - avoid spamming errors during initial connection
+                                // The presence will be sent when connection is established via XMPPClientDelegate
                             }
                             Unit
                         } catch (e: Exception) {

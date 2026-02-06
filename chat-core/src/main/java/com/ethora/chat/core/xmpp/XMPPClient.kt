@@ -879,6 +879,12 @@ class XMPPClient(
      */
     suspend fun sendAllPresencesToRooms(): Boolean {
         return try {
+            // Check if client is connected before sending presence
+            if (!isFullyConnected()) {
+                Log.w(TAG, "Cannot send presence to rooms: not fully connected")
+                return false
+            }
+            
             val rooms = RoomStore.rooms.value
             if (rooms.isEmpty()) {
                 return true
@@ -1075,6 +1081,38 @@ class XMPPClient(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to delete message", e)
+        }
+    }
+
+    /**
+     * Send typing request (Chat State Notification)
+     * Matches web: sendTypingRequestStanza
+     */
+    fun sendTypingRequest(roomJid: String, fullName: String, isTyping: Boolean) {
+        try {
+            if (useWebSocket && webSocketConnection != null) {
+                // Determine whether to send 'composing' (start) or 'paused' (stop)
+                // Note: 'active' state is often used to stop typing, but web uses 'paused' or implies stop by absence
+                // Web implementation sends <composing/> or <paused/> inside <message>
+                
+                val type = if (isTyping) "composing" else "paused"
+                val id = if (isTyping) "typing-${System.currentTimeMillis()}" else "stop-typing-${System.currentTimeMillis()}"
+                
+                // Construct XML stanza manually since we need custom chatstates namespace
+                // Matches web: sendTypingRequest.xmpp.ts
+                val xml = """
+                    <message to='$roomJid' id='$id' type='groupchat'>
+                        <$type xmlns='http://jabber.org/protocol/chatstates'/>
+                        <data fullName='$fullName'/>
+                    </message>
+                """.trimIndent()
+                
+                webSocketConnection?.send(xml)
+            } else {
+                Log.d(TAG, "Typing notifications not supported for TCP connection")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send typing request", e)
         }
     }
 

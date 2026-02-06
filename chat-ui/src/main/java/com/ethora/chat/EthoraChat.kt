@@ -194,14 +194,14 @@ fun Chat(
                                                 xmppClient = client,
                                                 activeRoomJid = activeRoomJid,
                                                 batchSize = 5, // Match web: batchSize = 5
-                                                messagesPerRoom = 30 // Match web: 30 messages per room
+                                                messagesPerRoom = 10 // Match web: 10 messages per room (optimized)
                                             )
                                         } else {
                                             // Incremental sync after reconnect
                                             MessageLoader.syncMessagesSince(
                                                 xmppClient = client,
                                                 batchSize = 5,
-                                                messagesPerRoom = 30
+                                                messagesPerRoom = 10
                                             )
                                         }
                                     } catch (e: Exception) {
@@ -282,7 +282,7 @@ fun Chat(
                         xmppClient = client,
                         activeRoomJid = activeRoomJid,
                         batchSize = 5,
-                        messagesPerRoom = 30
+                        messagesPerRoom = 10
                     )
                     
                     messageLoaderQueue?.start()

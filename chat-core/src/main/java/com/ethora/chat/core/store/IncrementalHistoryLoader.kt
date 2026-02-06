@@ -56,8 +56,11 @@ object IncrementalHistoryLoader {
                         }
                         
                         try {
-                            xmppClient.sendPresenceInRoom(room.jid)
-                            delay(100)
+                            // Only send presence if fully connected, but continue with message loading regardless
+                            if (xmppClient.isFullyConnected()) {
+                                xmppClient.sendPresenceInRoom(room.jid)
+                                delay(100)
+                            }
                         } catch (e: Exception) {
                             Log.w(TAG, "Failed to send presence to ${room.jid}", e)
                         }

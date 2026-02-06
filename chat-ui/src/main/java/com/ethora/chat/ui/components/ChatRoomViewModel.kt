@@ -134,7 +134,7 @@ class ChatRoomViewModel(
             val currentUser = UserStore.currentUser.value
             val fullName = "${currentUser?.firstName ?: ""} ${currentUser?.lastName ?: ""}".trim()
             if (fullName.isNotBlank()) {
-                xmppClient?.sendTypingIndicator(room.jid, fullName, true)
+                xmppClient?.sendTypingRequest(room.jid, fullName, true)
             }
         }
     }
@@ -147,7 +147,7 @@ class ChatRoomViewModel(
             val currentUser = UserStore.currentUser.value
             val fullName = "${currentUser?.firstName ?: ""} ${currentUser?.lastName ?: ""}".trim()
             if (fullName.isNotBlank()) {
-                xmppClient?.sendTypingIndicator(room.jid, fullName, false)
+                xmppClient?.sendTypingRequest(room.jid, fullName, false)
             }
         }
     }
@@ -226,8 +226,11 @@ class ChatRoomViewModel(
                 
                 xmppClient?.let { client ->
                     try {
-                        client.sendPresenceInRoom(room.jid)
-                        kotlinx.coroutines.delay(200)
+                        // Only send presence if fully connected
+                        if (client.isFullyConnected()) {
+                            client.sendPresenceInRoom(room.jid)
+                            kotlinx.coroutines.delay(200)
+                        }
                     } catch (e: Exception) {
                         android.util.Log.w("ChatRoomViewModel", "Failed to send presence to ${room.jid}", e)
                     }
