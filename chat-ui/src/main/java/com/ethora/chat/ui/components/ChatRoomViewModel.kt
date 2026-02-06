@@ -14,7 +14,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileOutputStream
 import java.util.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * ViewModel for chat room
@@ -205,8 +208,27 @@ class ChatRoomViewModel(
     /**
      * Send media
      */
+    /**
+     * Send media
+     */
     fun sendMedia(data: ByteArray, mimeType: String) {
-        // Implementation for media sending
+        viewModelScope.launch {
+            try {
+                // Create temp file
+                val file = withContext(Dispatchers.IO) {
+                    val tempFile = File.createTempFile("upload_${System.currentTimeMillis()}", ".tmp")
+                    val fos = FileOutputStream(tempFile)
+                    fos.write(data)
+                    fos.close()
+                    tempFile
+                }
+                
+                // Delegate to sendMedia(File) with default retry count
+                sendMedia(file, mimeType)
+            } catch (e: Exception) {
+                android.util.Log.e("ChatRoomViewModel", "Error processing media data", e)
+            }
+        }
     }
 
     /**
@@ -437,7 +459,8 @@ class ChatRoomViewModel(
         viewModelScope.launch {
             try {
                 val currentUser = UserStore.currentUser.value
-                val token = UserStore.token.value
+                // Fix token check: check both store token and user token
+                val token = UserStore.token.value ?: currentUser?.token
                 
                 if (currentUser == null || token == null) {
                     android.util.Log.e("ChatRoomViewModel", "Cannot send media: user or token is null")

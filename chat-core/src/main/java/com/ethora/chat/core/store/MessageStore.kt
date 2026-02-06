@@ -40,7 +40,8 @@ object MessageStore {
                 // Load last 50 messages (matches web: limitMessagesTransform)
                 val persistedMessages = cache.getLatestMessages(roomJid, 50)
                 android.util.Log.d("MessageStore", "📂 Loaded ${persistedMessages.size} messages from persistence for $roomJid")
-                persistedMessages
+                // Sort by timestamp (oldest first) to match store expectations and ensure takeLast() works correctly
+                persistedMessages.sortedBy { it.timestamp ?: it.date.time }
             } else {
                 android.util.Log.w("MessageStore", "⚠️ MessageCache not initialized, cannot load from persistence")
                 emptyList()

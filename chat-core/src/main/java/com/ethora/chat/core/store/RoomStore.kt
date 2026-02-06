@@ -9,6 +9,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 
 /**
  * Room store for managing rooms state
@@ -29,6 +31,10 @@ object RoomStore {
     // Global loading state (matches web: state.isLoading)
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+    
+    // Typing timeout tracking (5 seconds)
+    private val typingTimeouts = mutableMapOf<String, MutableMap<String, Job>>()
+    private val typingTimeoutDuration = 5000L // 5 seconds
     
     // Persistence manager
     private var persistenceManager: ChatPersistenceManager? = null
@@ -212,13 +218,54 @@ object RoomStore {
 
     /**
      * Set composing state for a room (matches web: setComposing)
+     * Tracks multiple users typing by adding/removing them from the composingList
+     * Auto-clears typing indicators after 5 seconds if no update received
      */
     fun setComposing(roomJid: String, isComposing: Boolean, composingList: List<String>) {
         val room = getRoomByJid(roomJid)
         room?.let {
+            // Get the current composing list
+            val currentList = it.composingList?.toMutableList() ?: mutableListOf()
+            
+            // Ensure room has an entry in typingTimeouts map
+            if (!typingTimeouts.containsKey(roomJid)) {
+                typingTimeouts[roomJid] = mutableMapOf()
+            }
+            
+            // Add or remove users from the list
+            composingList.forEach { userName ->
+                if (isComposing) {
+                    // Add user if not already in the list
+                    if (!currentList.contains(userName)) {
+                        currentList.add(userName)
+                    }
+                    
+                    // Cancel existing timeout for this user
+                    typingTimeouts[roomJid]?.get(userName)?.cancel()
+                    
+                    // Start a new timeout to auto-remove this user after 5 seconds
+                    val timeoutJob = persistenceScope.launch {
+                        delay(typingTimeoutDuration)
+                        // Auto-remove user from typing list after timeout
+                        setComposing(roomJid, false, listOf(userName))
+                        android.util.Log.d("RoomStore", "⏱️ Auto-cleared typing indicator for $userName in $roomJid")
+                    }
+                    typingTimeouts[roomJid]?.put(userName, timeoutJob)
+                    
+                } else {
+                    // Remove user from the list
+                    currentList.remove(userName)
+                    
+                    // Cancel the timeout for this user
+                    typingTimeouts[roomJid]?.get(userName)?.cancel()
+                    typingTimeouts[roomJid]?.remove(userName)
+                }
+            }
+            
+            // Update the room with the new composing state
             val updatedRoom = it.copy(
-                composing = isComposing,
-                composingList = if (isComposing) composingList else emptyList()
+                composing = currentList.isNotEmpty(),
+                composingList = currentList.toList()
             )
             updateRoom(updatedRoom)
         }

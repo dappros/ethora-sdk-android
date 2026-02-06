@@ -15,7 +15,8 @@ private data class QueuedRoom(
     var priority: Int,
     val lastMessageId: String?,
     var messageCount: Int,
-    val messages: MutableList<com.ethora.chat.core.models.Message> = mutableListOf()
+    val messages: MutableList<com.ethora.chat.core.models.Message> = mutableListOf(),
+    var retryCount: Int = 0
 )
 
 /**
@@ -85,11 +86,19 @@ class MessagePriorityQueue(
                         
                         RoomStore.setRoomLoading(room.jid, true)
                         
-                        val lastMsgId = room.lastMessageId?.toLongOrNull()
+                        // CRITICAL: For initial load (messageCount == 0), use beforeMessageId = null 
+                        // to get LATEST messages (matches web: empty <before/> tag)
+                        // For subsequent loads, use lastMessageId to paginate older messages
+                        val beforeMessageId = if (room.messageCount == 0) {
+                            null  // Get latest messages
+                        } else {
+                            room.lastMessageId?.toLongOrNull()  // Paginate older messages
+                        }
+                        
                         val newMessages = xmppClient?.getHistory(
                             room.jid,
                             max = 20,
-                            beforeMessageId = lastMsgId
+                            beforeMessageId = beforeMessageId
                         ) ?: emptyList()
                         
                         room.messages.addAll(newMessages)
@@ -113,15 +122,24 @@ class MessagePriorityQueue(
                     
                     addRoomToProcessed(room, rooms)
                 } catch (error: Exception) {
-                    Log.e(TAG, "Error processing room: ${room.jid}", error)
-                    val retryRoom = QueuedRoom(
-                        jid = room.jid,
-                        priority = (room.priority - 1).coerceAtLeast(1),
-                        lastMessageId = room.lastMessageId,
-                        messageCount = room.messageCount,
-                        messages = room.messages
-                    )
-                    messageQueue.offer(retryRoom)
+                    Log.e(TAG, "Error processing room: ${room.jid} (retry ${room.retryCount + 1}/3)", error)
+                    
+                    // Only retry up to 3 times to prevent infinite loops
+                    if (room.retryCount < 3) {
+                        val retryRoom = QueuedRoom(
+                            jid = room.jid,
+                            priority = (room.priority - 1).coerceAtLeast(1),
+                            lastMessageId = room.lastMessageId,
+                            messageCount = room.messageCount,
+                            messages = room.messages,
+                            retryCount = room.retryCount + 1
+                        )
+                        messageQueue.offer(retryRoom)
+                    } else {
+                        Log.e(TAG, "❌ Max retries reached for room ${room.jid}, giving up")
+                        // Mark as processed to prevent further attempts
+                        addRoomToProcessed(room, rooms)
+                    }
                 } finally {
                     RoomStore.setRoomLoading(room.jid, false)
                 }
