@@ -209,6 +209,45 @@ class ChatPersistenceManager(private val context: Context) {
     }
     
     /**
+     * Clear JWT token (encrypted storage)
+     */
+    fun clearJWTToken() {
+        try {
+            val localStorage = LocalStorage(context)
+            localStorage.clearJWTToken()
+            android.util.Log.d("ChatPersistenceManager", "🗑️ Cleared JWT token")
+        } catch (e: Exception) {
+            android.util.Log.e("ChatPersistenceManager", "❌ Error clearing JWT token", e)
+        }
+    }
+    
+    /**
+     * Save JWT token (encrypted storage)
+     */
+    fun saveJWTToken(token: String) {
+        try {
+            val localStorage = LocalStorage(context)
+            localStorage.saveJWTToken(token)
+            android.util.Log.d("ChatPersistenceManager", "💾 Saved JWT token")
+        } catch (e: Exception) {
+            android.util.Log.e("ChatPersistenceManager", "❌ Error saving JWT token", e)
+        }
+    }
+    
+    /**
+     * Get JWT token (encrypted storage)
+     */
+    fun getJWTToken(): String? {
+        return try {
+            val localStorage = LocalStorage(context)
+            localStorage.getJWTToken()
+        } catch (e: Exception) {
+            android.util.Log.e("ChatPersistenceManager", "❌ Error getting JWT token", e)
+            null
+        }
+    }
+    
+    /**
      * Clear all persisted data
      */
     suspend fun clearAll() {
@@ -218,6 +257,8 @@ class ChatPersistenceManager(private val context: Context) {
             }
             val prefs = context.getSharedPreferences(SCROLL_POSITIONS_PREFS, Context.MODE_PRIVATE)
             prefs.edit().clear().apply()
+            // Clear JWT token
+            clearJWTToken()
             android.util.Log.d("ChatPersistenceManager", "🗑️ Cleared all persisted data")
         } catch (e: Exception) {
             android.util.Log.e("ChatPersistenceManager", "❌ Error clearing persisted data", e)

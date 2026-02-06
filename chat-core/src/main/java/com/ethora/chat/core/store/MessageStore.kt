@@ -112,78 +112,173 @@ object MessageStore {
 
     /**
      * Add message to room
-     * If a pending message with matching ID exists, it will be updated instead of adding a duplicate
+     * Matches web: bidirectional ID matching (msg.id === message.id || message.xmppId === msg.id || msg.xmppId === message.id)
+     * Returns true if a pending message was matched and updated, false otherwise
      */
-    fun addMessage(roomJid: String, message: Message) {
+    fun addMessage(roomJid: String, message: Message): Boolean {
         val currentMessages = _messages.value.toMutableMap()
         val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
         
-        // Check if there's a pending message with the same ID
-        val pendingIndex = roomMessages.indexOfFirst { it.id == message.id && it.pending == true }
-        if (pendingIndex >= 0) {
-            // Update pending message with real message data (set pending to false)
-            val updatedMessage = message.copy(pending = false)
-            roomMessages[pendingIndex] = updatedMessage
-            android.util.Log.d("MessageStore", "✅ Updated pending message ${message.id} with real message data")
-        } else if (!roomMessages.any { it.id == message.id }) {
-            // No existing message with this ID, add it
-            roomMessages.add(message)
-            android.util.Log.d("MessageStore", "✅ Added new message ${message.id}")
-        } else {
-            android.util.Log.d("MessageStore", "⚠️ Message ${message.id} already exists, skipping")
-            return
+        // Match web: bidirectional ID matching for pending messages
+        // Check: msg.id === message.id || (message.xmppId && msg.id === message.xmppId) || (msg.xmppId && msg.xmppId === message.id)
+        val existingIndex = roomMessages.indexOfFirst { existing ->
+            val exactIdMatch = existing.id == message.id
+            val incomingXmppIdMatchesExistingId = message.xmppId != null && existing.id == message.xmppId
+            val existingXmppIdMatchesIncomingId = existing.xmppId != null && existing.xmppId == message.id
+            
+            exactIdMatch || incomingXmppIdMatchesExistingId || existingXmppIdMatchesIncomingId
         }
+        
+        if (existingIndex >= 0) {
+            val existingMessage = roomMessages[existingIndex]
+            
+            // If it's a pending message, update it and clear pending state
+            if (existingMessage.pending == true) {
+                // Deep merge: keep existing values but update with new message and set pending: false
+                val updatedMessage = message.copy(
+                    id = existingMessage.id, // Keep original optimistic ID
+                    pending = false, // Always set pending to false when confirmed
+                    // Preserve upload metadata for media messages
+                    location = message.location ?: existingMessage.location,
+                    locationPreview = message.locationPreview ?: existingMessage.locationPreview,
+                    fileName = message.fileName ?: existingMessage.fileName,
+                    mimetype = message.mimetype ?: existingMessage.mimetype,
+                    size = message.size ?: existingMessage.size
+                )
+                roomMessages[existingIndex] = updatedMessage
+                android.util.Log.d("MessageStore", "✅ Updated pending message ${existingMessage.id} (matched by ID/xmppId)")
+                
+                val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
+                currentMessages[roomJid] = sorted
+                _messages.value = currentMessages
+                
+                persistMessage(roomJid, updatedMessage)
+                updateRoomLastMessage(roomJid, sorted)
+                com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
+                return true
+            } else {
+                // Message already exists and is not pending - skip duplicate
+                android.util.Log.d("MessageStore", "⚠️ Message ${message.id} already exists (not pending), skipping")
+                return false
+            }
+        }
+        
+        // No match, add as new message
+        roomMessages.add(message)
+        android.util.Log.d("MessageStore", "✅ Added new message ${message.id}")
         
         val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
         currentMessages[roomJid] = sorted
         _messages.value = currentMessages
         
-        // Persist to Room Database (background)
         persistMessage(roomJid, message)
-        
-        // Update room's last message
         updateRoomLastMessage(roomJid, sorted)
+        com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
+        return false
     }
     
     /**
      * Find and update pending message by matching content and user
-     * Used when we receive a message that might match a pending one by content
+     * Matches Swift: aggressive matching for messages from current user
+     * - For text: match by body + user + timestamp window
+     * - For media: match by location/fileName + user + timestamp window
+     * Returns true if a pending message was matched and updated, false otherwise
      */
-    fun updatePendingMessage(roomJid: String, receivedMessage: Message) {
+    fun updatePendingMessage(roomJid: String, receivedMessage: Message): Boolean {
         val currentMessages = _messages.value.toMutableMap()
         val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
         
-        // Find pending message with matching body and user (within last 10 seconds)
         val now = System.currentTimeMillis()
+        val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
+        val isFromCurrentUser = currentUser != null && (
+            receivedMessage.user.id == currentUser.id ||
+            receivedMessage.user.xmppUsername == currentUser.xmppUsername ||
+            receivedMessage.user.id == currentUser.xmppUsername ||
+            receivedMessage.user.xmppUsername == currentUser.id
+        )
+        
+        // Find pending message - match by content (text or media)
         val pendingIndex = roomMessages.indexOfFirst { existing ->
-            existing.pending == true &&
-            existing.body == receivedMessage.body &&
-            existing.user.id == receivedMessage.user.id &&
-            (now - existing.date.time) < 10000 // Within 10 seconds
+            if (existing.pending != true) return@indexOfFirst false
+            if ((now - existing.date.time) > 30000) return@indexOfFirst false // Within 30 seconds (increased for media uploads)
+            
+            // Match by user (more flexible matching)
+            val existingUserId = existing.user.id.lowercase()
+            val receivedUserId = receivedMessage.user.id.lowercase()
+            val existingXmpp = existing.user.xmppUsername?.split("@")?.firstOrNull()?.lowercase()
+            val receivedXmpp = receivedMessage.user.xmppUsername?.split("@")?.firstOrNull()?.lowercase()
+            
+            val userMatch = existingUserId == receivedUserId ||
+                          (existingXmpp != null && existingXmpp == receivedXmpp) ||
+                          (existingXmpp != null && existingXmpp == receivedUserId) ||
+                          (receivedXmpp != null && receivedXmpp == existingUserId)
+            
+            if (!userMatch) return@indexOfFirst false
+            
+            // For media messages: match by location or fileName
+            val isMedia = existing.isMediafile == "true" || existing.location != null || existing.fileName != null || existing.body == "media"
+            val receivedIsMedia = receivedMessage.isMediafile == "true" || receivedMessage.location != null || receivedMessage.fileName != null || receivedMessage.body == "media"
+            
+            if (isMedia || receivedIsMedia) {
+                // Media matching: check location, locationPreview, or fileName
+                // Also match if both have "media" body and same user
+                val locationMatch = existing.location != null && 
+                                   receivedMessage.location != null && 
+                                   existing.location == receivedMessage.location
+                val locationPreviewMatch = existing.locationPreview != null && 
+                                          receivedMessage.locationPreview != null && 
+                                          existing.locationPreview == receivedMessage.locationPreview
+                val fileNameMatch = existing.fileName != null && 
+                                   receivedMessage.fileName != null && 
+                                   existing.fileName == receivedMessage.fileName
+                val mediaBodyMatch = existing.body == "media" && receivedMessage.body == "media"
+                
+                locationMatch || locationPreviewMatch || fileNameMatch || mediaBodyMatch
+            } else {
+                // Text matching: match by body content
+                existing.body == receivedMessage.body
+            }
         }
         
         if (pendingIndex >= 0) {
             val pendingMessage = roomMessages[pendingIndex]
+            
+            // Check if receivedMessage was already added by addMessage (different ID)
+            // If so, remove it to avoid duplicate
+            val duplicateIndex = roomMessages.indexOfFirst { it.id == receivedMessage.id && it.id != pendingMessage.id }
+            if (duplicateIndex >= 0) {
+                android.util.Log.d("MessageStore", "🗑️ Removing duplicate message ${receivedMessage.id} that was added before matching pending message")
+                roomMessages.removeAt(duplicateIndex)
+            }
+            
             // Update pending message with received message data, keeping the original ID
+            // Deep merge: keep existing values but update with new message and set pending: false
             val updatedMessage = receivedMessage.copy(
                 id = pendingMessage.id, // Keep original optimistic ID
-                pending = false
+                pending = false,
+                // Preserve upload metadata if present
+                location = receivedMessage.location ?: pendingMessage.location,
+                locationPreview = receivedMessage.locationPreview ?: pendingMessage.locationPreview,
+                fileName = receivedMessage.fileName ?: pendingMessage.fileName,
+                mimetype = receivedMessage.mimetype ?: pendingMessage.mimetype
             )
             roomMessages[pendingIndex] = updatedMessage
-            android.util.Log.d("MessageStore", "✅ Matched pending message ${pendingMessage.id} with received message ${receivedMessage.id}")
+            android.util.Log.d("MessageStore", "✅ Matched pending message ${pendingMessage.id} with received message ${receivedMessage.id} (${if (isFromCurrentUser) "current user" else "content match"})")
             
             val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
             
-            // Persist to Room Database (background)
             persistMessage(roomJid, updatedMessage)
-            
-            // Update room's last message
             updateRoomLastMessage(roomJid, sorted)
+            com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
+            return true
         } else {
-            // No matching pending message, add as new
-            addMessage(roomJid, receivedMessage)
+            // No matching pending message found
+            // Don't add as new here - addMessage should have already handled that
+            // This prevents duplicates when addMessage adds the message but matching fails
+            android.util.Log.d("MessageStore", "⚠️ No pending message matched for ${receivedMessage.id}, message should have been added by addMessage")
+            return false
         }
     }
 
@@ -212,6 +307,9 @@ object MessageStore {
             
             // Update room's last message
             updateRoomLastMessage(roomJid, sorted)
+            
+            // Update pending count
+            com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
         } else {
             android.util.Log.d("MessageStore", "   ⚠️ No new messages to add (all duplicates)")
         }

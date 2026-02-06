@@ -80,6 +80,7 @@ dependencies {
     implementation(libs.room.ktx)
     kapt(libs.room.compiler)
     implementation(libs.datastore.preferences)
+    implementation(libs.security.crypto)
 
     // Dependency Injection
     implementation(libs.hilt.android)

@@ -1,5 +1,7 @@
 package com.ethora.chat.ui.components
 
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -9,12 +11,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
@@ -36,7 +40,7 @@ fun ChatRoomView(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val viewModel = remember { ChatRoomViewModel(room, xmppClient) }
+    val viewModel = remember(room.jid, xmppClient) { ChatRoomViewModel(room, xmppClient) }
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
@@ -46,7 +50,7 @@ fun ChatRoomView(
     // Update lastViewedTimestamp when room is opened (set to 0 to mark all as read)
     LaunchedEffect(room.jid) {
         com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, 0)
-        android.util.Log.d("ChatRoomView", "📅 Room opened: $room.jid, set lastViewedTimestamp to 0")
+        android.util.Log.d("ChatRoomView", "Room opened: $room.jid, set lastViewedTimestamp to 0")
     }
     
     // Update lastViewedTimestamp when room is closed (set to current time)
@@ -54,7 +58,7 @@ fun ChatRoomView(
         onDispose {
             val currentTime = System.currentTimeMillis()
             com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, currentTime)
-            android.util.Log.d("ChatRoomView", "📅 Room closed: $room.jid, set lastViewedTimestamp to $currentTime")
+            android.util.Log.d("ChatRoomView", "Room closed: $room.jid, set lastViewedTimestamp to $currentTime")
         }
     }
     
@@ -95,6 +99,10 @@ fun ChatRoomView(
     // In reverseLayout, we're at bottom when firstVisibleItemIndex is 0 and scrollOffset is small
     var showScrollToBottom by remember { mutableStateOf(false) }
     
+    // Track unread count (messages that arrived while scrolled up)
+    var unreadCount by remember { mutableStateOf(0) }
+    var lastMessageCount by remember { mutableStateOf(messages.size) }
+    
     // Check scroll position to show/hide scroll to bottom button
     LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
         // In reverseLayout: index 0 = oldest messages (top), higher indices = newer messages (bottom)
@@ -103,21 +111,42 @@ fun ChatRoomView(
                          listState.firstVisibleItemScrollOffset < 100
         
         // Show button if we're not at bottom and have messages
-        showScrollToBottom = !isAtBottom && messages.isNotEmpty()
+        val shouldShow = !isAtBottom && messages.isNotEmpty()
+        
+        // If user scrolled to bottom, reset unread count
+        if (isAtBottom) {
+            unreadCount = 0
+        }
+        
+        showScrollToBottom = shouldShow
+    }
+    
+    // Track new messages when scrolled up
+    LaunchedEffect(messages.size) {
+        if (messages.size > lastMessageCount && !showScrollToBottom) {
+            // New messages arrived but we're scrolled up
+            // Don't increment if we're already at bottom (will be handled by scroll effect)
+            val isAtBottom = listState.firstVisibleItemIndex == 0 && 
+                             listState.firstVisibleItemScrollOffset < 100
+            if (!isAtBottom) {
+                unreadCount += (messages.size - lastMessageCount)
+            }
+        }
+        lastMessageCount = messages.size
     }
     
     // Debug logging
     LaunchedEffect(messages.size, isLoading) {
-        android.util.Log.d("ChatRoomView", "📱 Messages in UI: ${messages.size}, isLoading: $isLoading")
+        android.util.Log.d("ChatRoomView", "Messages in UI: ${messages.size}, isLoading: $isLoading")
         if (messages.isEmpty() && !isLoading) {
-            android.util.Log.w("ChatRoomView", "⚠️ No messages displayed but not loading!")
+            android.util.Log.w("ChatRoomView", "No messages displayed but not loading!")
         }
     }
     
     // Log message details for debugging
     LaunchedEffect(messages) {
         if (messages.isNotEmpty()) {
-            android.util.Log.d("ChatRoomView", "📱 First message: ${messages.first().body.take(50)}, Last: ${messages.last().body.take(50)}")
+            android.util.Log.d("ChatRoomView", "First message: ${messages.first().body.take(50)}, Last: ${messages.last().body.take(50)}")
         }
     }
     
@@ -128,12 +157,12 @@ fun ChatRoomView(
                 // No saved position, scroll to bottom (index 0 in reverse layout = newest messages at bottom)
                 kotlinx.coroutines.delay(100) // Small delay to ensure layout is ready
                 listState.animateScrollToItem(0)
-                android.util.Log.d("ChatRoomView", "📍 Auto-scrolled to bottom (newest messages)")
+                android.util.Log.d("ChatRoomView", "Auto-scrolled to bottom (newest messages)")
             } else {
                 // Restore saved position
                 kotlinx.coroutines.delay(100)
                 listState.scrollToItem(savedScrollPosition)
-                android.util.Log.d("ChatRoomView", "📍 Restored scroll position: $savedScrollPosition")
+                android.util.Log.d("ChatRoomView", "Restored scroll position: $savedScrollPosition")
             }
         }
     }
@@ -143,9 +172,13 @@ fun ChatRoomView(
         onDispose {
             val currentIndex = listState.firstVisibleItemIndex
             ScrollPositionStore.saveScrollPosition(room.jid, currentIndex)
-            android.util.Log.d("ChatRoomView", "💾 Saved scroll position on dispose: $currentIndex")
+            android.util.Log.d("ChatRoomView", "Saved scroll position on dispose: $currentIndex")
         }
     }
+    
+    // Scroll position restoration
+    // Save scroll position before loading older messages, restore after loading
+    var savedScrollParams by remember { mutableStateOf<Pair<Int, Int>?>(null) } // (firstVisibleItemIndex, totalItemsCount)
     
     // Detect when user scrolls near the visual top (older messages) using pixel-based detection
     // User wants: when scroll position reaches 1050px (150px from top of 1200px area), trigger loading
@@ -170,21 +203,23 @@ fun ChatRoomView(
             if (totalItems == 0 || currentMessagesSize == 0) return@collect
 
             // In reverseLayout: when firstIndex is close to totalItems - 1, we're near the top (oldest messages)
-            // Use a threshold of 3 items from the top to trigger loading
-            // Also check scroll offset: when scrollOffset is small, we're at the top
-            val itemThreshold = 3
+            // Match Swift: triggers when scrollTop < 150px (small scroll threshold)
+            // Use a threshold of 5 items from the top to trigger loading (more aggressive)
+            val itemThreshold = 5
             val topItemThreshold = (totalItems - itemThreshold).coerceAtLeast(0)
             val nearTopByItems = firstIndex >= topItemThreshold
             
             // Also check if scroll offset is small (near top of scrollable area)
-            val scrollThreshold = 50 // Small scroll offset means we're at top
+            // Match Swift: scrollTop < 150px threshold (converted to dp: ~150dp)
+            // Match web: scrollTop < 150
+            val scrollThreshold = 150 // Match web's 150px threshold for small scroll
             val nearTopByScroll = scrollOffset < scrollThreshold
             
             val nearTop = nearTopByItems || nearTopByScroll
 
             android.util.Log.d(
                 "ChatRoomView",
-                "📜 Scroll: firstIndex=$firstIndex, total=$totalItems, scrollOffset=$scrollOffset, topItemThreshold=$topItemThreshold, nearTopByItems=$nearTopByItems, nearTopByScroll=$nearTopByScroll, nearTop=$nearTop, isLoadingMore=$currentIsLoadingMore, isLoading=$currentIsLoading, hasMore=$currentHasMore"
+                " Scroll: firstIndex=$firstIndex, total=$totalItems, scrollOffset=$scrollOffset, topItemThreshold=$topItemThreshold, nearTopByItems=$nearTopByItems, nearTopByScroll=$nearTopByScroll, nearTop=$nearTop, isLoadingMore=$currentIsLoadingMore, isLoading=$currentIsLoading, hasMore=$currentHasMore"
             )
 
             // Debounce: only trigger if at least 200ms have passed since last trigger
@@ -196,9 +231,29 @@ fun ChatRoomView(
                               (now - lastLoadTrigger) > 200
 
             if (shouldTrigger) {
-                android.util.Log.d("ChatRoomView", "📜 ✅ Reached top threshold (index=$firstIndex >= $topItemThreshold or scrollOffset=$scrollOffset < $scrollThreshold), triggering loadMoreMessages()")
+                savedScrollParams = Pair(firstIndex, totalItems)
                 lastLoadTrigger = now
                 viewModel.loadMoreMessages()
+            }
+        }
+    }
+    
+    LaunchedEffect(messages.size, isLoadingMore) {
+        if (savedScrollParams != null && !isLoadingMore && messages.isNotEmpty()) {
+            val (savedIndex, savedTotal) = savedScrollParams!!
+            val currentTotal = listState.layoutInfo.totalItemsCount
+            
+            if (currentTotal > savedTotal) {
+                val itemsAdded = currentTotal - savedTotal
+                val newIndex = savedIndex + itemsAdded
+                
+                kotlinx.coroutines.delay(100)
+                
+                coroutineScope.launch {
+                    listState.scrollToItem(newIndex.coerceAtMost(currentTotal - 1))
+                }
+                
+                savedScrollParams = null
             }
         }
     }
@@ -234,7 +289,7 @@ fun ChatRoomView(
                     // Save scroll position before navigating back
                     val currentIndex = listState.firstVisibleItemIndex
                     ScrollPositionStore.saveScrollPosition(room.jid, currentIndex)
-                    android.util.Log.d("ChatRoomView", "💾 Saved scroll position on back: $currentIndex")
+                    android.util.Log.d("ChatRoomView", "Saved scroll position on back: $currentIndex")
                     onBack()
                 },
                 onInfoClick = { showChatInfo = true }
@@ -263,7 +318,7 @@ fun ChatRoomView(
                             val message = messages.getOrNull(reversedIndex)
                             
                             if (message == null) {
-                                android.util.Log.e("ChatRoomView", "❌ Message is null at index $index (reversed: $reversedIndex)")
+                                android.util.Log.e("ChatRoomView", "Message is null at index $index (reversed: $reversedIndex)")
                                 return@items
                             }
                             
@@ -320,7 +375,7 @@ fun ChatRoomView(
                                     }
                                 }
                                 
-                                android.util.Log.d("ChatRoomView", "   Message from: xmppUsername=$messageXmppUsername, userJID=$messageUserJID, isUser=$isUser (current: xmppUsername=$currentUserXmppUsername)")
+                                android.util.Log.d("ChatRoomView", "  Message from: xmppUsername=$messageXmppUsername, userJID=$messageUserJID, isUser=$isUser (current: xmppUsername=$currentUserXmppUsername)")
                                 
                                 // Determine if this is the first message in a group
                                 // Group messages from the same user that are within 5 minutes of each other
@@ -364,7 +419,7 @@ fun ChatRoomView(
                                         isUser = isUser,
                                         showAvatar = isFirstInGroup, // Show avatar on first message in group
                                         showUsername = isFirstInGroup, // Only show username on first message
-                                        showTimestamp = true, // Show timestamp for all messages (matches web)
+                                        showTimestamp = true,
                                         onMediaClick = { msg -> previewMessage = msg },
                                         onLongPress = { x, y ->
                                             contextMenuMessage = message
@@ -418,29 +473,76 @@ fun ChatRoomView(
                         }
                     }
                     
-                    // Scroll to bottom button (floating action button)
-                    if (showScrollToBottom) {
-                        FloatingActionButton(
-                            onClick = {
-                                // Scroll to bottom (index 0 in reverseLayout = newest messages)
-                                coroutineScope.launch {
-                                    listState.animateScrollToItem(0)
-                                    showScrollToBottom = false
-                                }
-                            },
-                            modifier = Modifier
-                                .align(androidx.compose.ui.Alignment.BottomEnd)
-                                .padding(16.dp)
-                                .size(40.dp), // 30% smaller: 56dp * 0.7 ≈ 40dp
-                            shape = CircleShape, // Fully rounded
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
+                    // Scroll to bottom button (floating action button) with animation
+                    Box(
+                        modifier = Modifier
+                            .align(androidx.compose.ui.Alignment.BottomEnd)
+                            .padding(16.dp)
+                    ) {
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = showScrollToBottom,
+                            enter = fadeIn(animationSpec = tween(300)) + 
+                                    slideInVertically(
+                                        initialOffsetY = { it },
+                                        animationSpec = tween(300, easing = FastOutSlowInEasing)
+                                    ),
+                            exit = fadeOut(animationSpec = tween(200)) + 
+                                   slideOutVertically(
+                                       targetOffsetY = { it },
+                                       animationSpec = tween(200)
+                                   )
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.KeyboardArrowDown,
-                                contentDescription = "Scroll to bottom",
-                                modifier = Modifier.size(20.dp) // Smaller icon to match button size
-                            )
+                            Box {
+                                FloatingActionButton(
+                                    onClick = {
+                                        // Scroll to bottom (index 0 in reverseLayout = newest messages)
+                                        coroutineScope.launch {
+                                            listState.animateScrollToItem(0)
+                                            unreadCount = 0 // Reset unread count when scrolling to bottom
+                                        }
+                                    },
+                                    modifier = Modifier.size(48.dp),
+                                    shape = CircleShape,
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                                    elevation = FloatingActionButtonDefaults.elevation(
+                                        defaultElevation = 6.dp,
+                                        pressedElevation = 8.dp
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.KeyboardArrowDown,
+                                        contentDescription = "Scroll to bottom",
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                
+                                // Unread count badge
+                                if (unreadCount > 0) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier
+                                            .size(20.dp)
+                                            .align(androidx.compose.ui.Alignment.TopEnd)
+                                            .offset(x = 4.dp, y = (-4).dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentAlignment = androidx.compose.ui.Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = if (unreadCount > 99) "99+" else unreadCount.toString(),
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    fontWeight = FontWeight.Bold
+                                                ),
+                                                color = MaterialTheme.colorScheme.onError,
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -559,7 +661,7 @@ fun ChatRoomView(
                         // Set edit mode in input
                         editMessageId = msg.id
                         editMessageText = msg.body
-                        android.util.Log.d("ChatRoomView", "✏️ Edit message: ${msg.id}")
+                        android.util.Log.d("ChatRoomView", "Edit message: ${msg.id}")
                     }
                 },
                 onDelete = {
@@ -567,13 +669,13 @@ fun ChatRoomView(
                     val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
                     if (currentUser != null && msg.user.id == currentUser.id) {
                         viewModel.deleteMessage(msg.id)
-                        android.util.Log.d("ChatRoomView", "🗑️ Delete message: ${msg.id}")
+                        android.util.Log.d("ChatRoomView", "Delete message: ${msg.id}")
                     }
                 },
                 onReaction = { emoji ->
                     // Implement reaction
                     viewModel.sendReaction(msg.id, emoji)
-                    android.util.Log.d("ChatRoomView", "😀 Add reaction $emoji to message: ${msg.id}")
+                    android.util.Log.d("ChatRoomView", "Add reaction $emoji to message: ${msg.id}")
                 }
             )
         }

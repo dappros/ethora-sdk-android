@@ -4,6 +4,7 @@ import android.util.Log
 import com.ethora.chat.core.config.XMPPSettings
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.store.RoomStore
 import kotlinx.coroutines.*
 import org.jivesoftware.smack.*
 import org.jivesoftware.smack.chat2.Chat
@@ -95,10 +96,14 @@ class XMPPClient(
      * Check if client is fully connected and ready to send messages
      */
     fun isFullyConnected(): Boolean {
+        val isOnline = status == ConnectionStatus.ONLINE
+        val isWsConnected = if (useWebSocket) webSocketConnection?.isFullyConnected() == true else false
+        val isTcpConnected = if (!useWebSocket) connection?.isConnected == true else false
+        
         return if (useWebSocket) {
-            status == ConnectionStatus.ONLINE && presencesReady && webSocketConnection?.isFullyConnected() == true
+            isOnline && isWsConnected
         } else {
-            status == ConnectionStatus.ONLINE && presencesReady && connection?.isConnected == true
+            isOnline && isTcpConnected
         }
     }
 
@@ -139,16 +144,16 @@ class XMPPClient(
      */
     suspend fun initializeClient() {
         if (status == ConnectionStatus.ONLINE || status == ConnectionStatus.CONNECTING) {
-            Log.w(TAG, "⚠️ Already connected or connecting, skipping initializeClient")
+            Log.w(TAG, "Already connected or connecting, skipping initializeClient")
             return
         }
 
-        Log.d(TAG, "🚀 Starting XMPP client initialization...")
-        Log.d(TAG, "📋 Connection details:")
-        Log.d(TAG, "   - WebSocket URL: $devServer")
-        Log.d(TAG, "   - Host: $host")
-        Log.d(TAG, "   - Conference: $conference")
-        Log.d(TAG, "   - Username: $username")
+        Log.d(TAG, "Starting XMPP client initialization...")
+        Log.d(TAG, "Connection details:")
+        Log.d(TAG, "  - WebSocket URL: $devServer")
+        Log.d(TAG, "  - Host: $host")
+        Log.d(TAG, "  - Conference: $conference")
+        Log.d(TAG, "  - Username: $username")
         
         setStatus(ConnectionStatus.CONNECTING)
 
@@ -156,11 +161,11 @@ class XMPPClient(
             // Disconnect existing connections if any
             connection?.disconnect()
             webSocketConnection?.disconnect()
-            Log.d(TAG, "🔌 Disconnected any existing connections")
+            Log.d(TAG, "Disconnected any existing connections")
 
             if (useWebSocket) {
                 // Use WebSocket connection
-                Log.d(TAG, "🌐 Using WebSocket connection")
+                Log.d(TAG, "Using WebSocket connection")
                 webSocketConnection = XMPPWebSocketConnection(
                     wsUrl = devServer,
                     username = username,
@@ -172,8 +177,14 @@ class XMPPClient(
                 webSocketConnection?.setDelegate(object : XMPPClientDelegate {
                     override fun onXMPPClientConnected(client: XMPPClient) {
                         setStatus(ConnectionStatus.ONLINE)
-                        presencesReady = true
-                        Log.d(TAG, "🎉 WebSocket XMPP client fully connected and ready!")
+                        scope.launch {
+                            try {
+                                sendAllPresencesAndMarkReady()
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error sending presences on connect", e)
+                                presencesReady = true
+                            }
+                        }
                         delegate?.onXMPPClientConnected(this@XMPPClient)
                     }
                     
@@ -209,13 +220,13 @@ class XMPPClient(
                     }
                 })
                 
-                Log.d(TAG, "🔗 Attempting WebSocket connection...")
+                Log.d(TAG, "Attempting WebSocket connection...")
                 webSocketConnection?.connect()
                 
             } else {
                 // Use TCP connection (fallback)
-                Log.d(TAG, "📡 Using TCP connection (fallback)")
-                Log.d(TAG, "📡 Attempting TCP connection to XMPP server...")
+                Log.d(TAG, "Using TCP connection (fallback)")
+                Log.d(TAG, "Attempting TCP connection to XMPP server...")
                 
                 // Parse URL to get host and port
                 val url = devServer.replace("wss://", "").replace("ws://", "")
@@ -223,9 +234,9 @@ class XMPPClient(
                 val serverHost = parts[0]
                 val serverPort = parts.getOrNull(1)?.toIntOrNull() ?: 5222
 
-                Log.d(TAG, "⚙️ Creating XMPP connection configuration...")
-                Log.d(TAG, "   - Server: $serverHost:$serverPort")
-                Log.d(TAG, "   - Domain: $host")
+                Log.d(TAG, "Creating XMPP connection configuration...")
+                Log.d(TAG, "  - Server: $serverHost:$serverPort")
+                Log.d(TAG, "  - Domain: $host")
                 
                 val config = XMPPTCPConnectionConfiguration.builder()
                     .setHost(serverHost)
@@ -238,21 +249,21 @@ class XMPPClient(
 
                 connection = XMPPTCPConnection(config)
                 connection?.addConnectionListener(createConnectionListener())
-                Log.d(TAG, "✅ Connection configuration created")
+                Log.d(TAG, "Connection configuration created")
 
                 // Connect
-                Log.d(TAG, "🔗 Attempting to connect...")
+                Log.d(TAG, "Attempting to connect...")
                 withContext(Dispatchers.IO) {
                     try {
-                        Log.d(TAG, "📡 Calling connection.connect()...")
+                        Log.d(TAG, "Calling connection.connect()...")
                         connection?.connect()
-                        Log.d(TAG, "✅ TCP connection established!")
+                        Log.d(TAG, "TCP connection established!")
                         
-                        Log.d(TAG, "🔐 Attempting to login...")
+                        Log.d(TAG, "Attempting to login...")
                         connection?.login()
-                        Log.d(TAG, "✅ Login successful!")
+                        Log.d(TAG, "Login successful!")
                     } catch (e: Exception) {
-                        Log.e(TAG, "❌ Connection error during connect/login: ${e.message}", e)
+                        Log.e(TAG, "Connection error during connect/login: ${e.message}", e)
                         throw e
                     }
                 }
@@ -261,38 +272,44 @@ class XMPPClient(
                 Log.d(TAG, "🔧 Initializing managers...")
                 chatManager = ChatManager.getInstanceFor(connection)
                 mucManager = MultiUserChatManager.getInstanceFor(connection)
-                Log.d(TAG, "✅ Managers initialized")
+                Log.d(TAG, "Managers initialized")
 
                 // Set up chat listener
-                Log.d(TAG, "👂 Setting up message listeners...")
-                chatManager?.addIncomingListener { from, message, chat ->
-                    Log.d(TAG, "📨 Incoming message from: $from")
+                Log.d(TAG, "Setting up message listeners...")
+                chatManager?.addIncomingListener { from, message, _ ->
+                    Log.d(TAG, "Incoming message from: $from")
                     handleIncomingMessage(message, from)
                 }
 
                 // Set up presence listener
                 setupPresenceListener()
-                Log.d(TAG, "✅ Listeners set up")
+                Log.d(TAG, "Listeners set up")
 
                 // Start ping
-                Log.d(TAG, "🏓 Starting ping manager...")
+                Log.d(TAG, "Starting ping manager...")
                 val pingManager = PingManager.getInstanceFor(connection)
                 if (pingManager != null) {
                     startPing()
-                    Log.d(TAG, "✅ Ping manager started")
+                    Log.d(TAG, "Ping manager started")
                 } else {
-                    Log.w(TAG, "⚠️ Ping manager not available")
+                    Log.w(TAG, "Ping manager not available")
                 }
 
                 setStatus(ConnectionStatus.ONLINE)
-                presencesReady = true
-                Log.d(TAG, "🎉 XMPP client fully connected and ready!")
+                scope.launch {
+                    try {
+                        sendAllPresencesAndMarkReady()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error sending presences on connect", e)
+                        presencesReady = true
+                    }
+                }
                 delegate?.onXMPPClientConnected(this)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to connect XMPP client", e)
-            Log.e(TAG, "   Error type: ${e.javaClass.simpleName}")
-            Log.e(TAG, "   Error message: ${e.message}")
+            Log.e(TAG, "Failed to connect XMPP client", e)
+            Log.e(TAG, "  Error type: ${e.javaClass.simpleName}")
+            Log.e(TAG, "  Error message: ${e.message}")
             e.printStackTrace()
             setStatus(ConnectionStatus.ERROR)
             // Don't auto-reconnect for testing - let user see the error
@@ -348,17 +365,12 @@ class XMPPClient(
                 return null
             }
             
-            // Ensure presence is sent to room before sending message (XMPP requirement)
-            // Check if we've already sent presence to this room
             if (!hasPresenceResponseForRoom(roomJID)) {
-                Log.d(TAG, "📤 Sending presence to room before message: $roomJID")
                 sendPresenceInRoom(roomJID)
-                // Wait a bit for presence to be processed
                 kotlinx.coroutines.delay(200)
             }
             
             if (useWebSocket && webSocketConnection != null) {
-                Log.d(TAG, "📤 Sending message via WebSocket to $roomJID")
                 val wsConnection = webSocketConnection
                 if (wsConnection != null) {
                     return wsConnection.sendMessage(
@@ -378,12 +390,11 @@ class XMPPClient(
                 val muc = getOrCreateMUC(roomJID)
                 val messageId = customId ?: "msg_${System.currentTimeMillis()}"
                 muc.sendMessage(messageBody)
-                Log.d(TAG, "📤 Message sent via TCP to $roomJID: $messageBody")
                 return messageId
             }
             null
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to send message", e)
+            Log.e(TAG, "Failed to send message", e)
             null
         }
     }
@@ -398,8 +409,12 @@ class XMPPClient(
                 return false
             }
             
+            if (!hasPresenceResponseForRoom(roomJID)) {
+                sendPresenceInRoom(roomJID)
+                kotlinx.coroutines.delay(200)
+            }
+            
             if (useWebSocket && webSocketConnection != null) {
-                Log.d(TAG, "📤 Sending media message via WebSocket to $roomJID")
                 val wsConnection = webSocketConnection
                 if (wsConnection != null) {
                     return wsConnection.sendMediaMessage(roomJID, mediaData, messageId)
@@ -410,45 +425,43 @@ class XMPPClient(
             }
             false
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to send media message", e)
+            Log.e(TAG, "Failed to send media message", e)
             false
         }
     }
 
     /**
      * Get message history using MAM (Message Archive Management)
-     * Matches web: getHistoryStanza
-     * Note: before parameter is timestamp (Long), not message ID
+     * Matches Swift: SendGetHistory.swift
+     * - When beforeMessageId is null: requests newest messages (RSM <before/>)
+     * - When beforeMessageId is provided: requests older messages before that ID
+     * Note: Swift uses message ID (Int64) converted from message.id string using Number()
      */
-    suspend fun getHistory(roomJID: String, max: Int = 30, beforeTimestamp: Long? = null): List<Message> {
+    suspend fun getHistory(roomJID: String, max: Int = 30, beforeMessageId: Long? = null): List<Message> {
         return try {
-            Log.d(TAG, "📜 getHistory called for $roomJID (max: $max, beforeTimestamp: $beforeTimestamp)")
-            
             if (!isFullyConnected()) {
-                Log.e(TAG, "❌ Cannot get history: not fully connected")
-                Log.d(TAG, "   Status: $status, presencesReady: $presencesReady")
-                Log.d(TAG, "   useWebSocket: $useWebSocket, webSocketConnection: ${webSocketConnection != null}")
+                Log.e(TAG, "Cannot get history: not fully connected")
                 return emptyList()
             }
             
-            Log.d(TAG, "📜 Requesting history for $roomJID (max: $max, beforeTimestamp: $beforeTimestamp)")
+            val isInitialLoad = beforeMessageId == null
             
             if (useWebSocket && webSocketConnection != null) {
-                Log.d(TAG, "📡 Using WebSocket for MAM query")
                 val queryId = "get-history:${System.currentTimeMillis()}"
                 val messages = mutableListOf<Message>()
                 val latch = kotlinx.coroutines.sync.Mutex()
                 var queryComplete = false
                 
-                // Register MAM result collector
                 val collector: (XMPPStanza) -> Unit = { stanza ->
                     scope.launch {
                         latch.lock()
                         try {
                             if (!queryComplete) {
                                 val parsedMessages = parseMAMResult(stanza, roomJID)
-                                messages.addAll(parsedMessages)
-                                Log.d(TAG, "📨 Collected ${parsedMessages.size} messages from MAM (total: ${messages.size})")
+                                val filteredMessages = parsedMessages.filter { message ->
+                                    message.roomJid == roomJID
+                                }
+                                messages.addAll(filteredMessages)
                             }
                         } finally {
                             latch.unlock()
@@ -458,30 +471,24 @@ class XMPPClient(
                 
                 webSocketConnection?.registerMAMCollector(queryId, collector)
                 
-                // Send MAM query with timestamp (matches web version)
-                val sent = webSocketConnection?.sendMAMQuery(roomJID, max, beforeTimestamp, queryId) ?: false
+                val sent = webSocketConnection?.sendMAMQuery(roomJID, max, beforeMessageId, queryId) ?: false
                 if (!sent) {
-                    Log.e(TAG, "❌ Failed to send MAM query")
+                    Log.e(TAG, "Failed to send MAM query")
                     webSocketConnection?.unregisterMAMCollector(queryId)
                     return emptyList()
                 }
                 
-                // Wait for IQ result (completion) with timeout
-                val timeout = 15000L // 15 seconds
+                val timeout = 15000L
                 val startTime = System.currentTimeMillis()
                 
                 while (!queryComplete && (System.currentTimeMillis() - startTime) < timeout) {
                     kotlinx.coroutines.delay(200)
-                    // Check if we received the final IQ result
                     if (webSocketConnection?.isMAMQueryComplete(queryId) == true) {
                         queryComplete = true
-                        Log.d(TAG, "✅ MAM query completed (IQ result received)")
                     }
-                    // Also check if we've collected enough messages (max)
                     latch.lock()
                     try {
                         if (messages.size >= max) {
-                            Log.d(TAG, "✅ MAM query completed (collected ${messages.size} messages, max: $max)")
                             queryComplete = true
                         }
                     } finally {
@@ -492,7 +499,7 @@ class XMPPClient(
                 if (!queryComplete) {
                     latch.lock()
                     try {
-                        Log.w(TAG, "⚠️ MAM query timeout after ${timeout}ms, but collected ${messages.size} messages")
+                        Log.w(TAG, "MAM query timeout after ${timeout}ms, but collected ${messages.size} messages")
                     } finally {
                         latch.unlock()
                     }
@@ -503,27 +510,36 @@ class XMPPClient(
                 
                 latch.lock()
                 try {
-                    // Sort by timestamp (oldest first) - important for proper display order
-                    val sortedMessages = messages.sortedBy { it.timestamp ?: it.date.time }
-                    Log.d(TAG, "📚 Returning ${sortedMessages.size} messages from history")
-                    if (sortedMessages.isNotEmpty()) {
-                        Log.d(TAG, "   First message: ${sortedMessages.first().id} (${sortedMessages.first().body.take(30)}...), timestamp: ${sortedMessages.first().timestamp}")
-                        Log.d(TAG, "   Last message: ${sortedMessages.last().id} (${sortedMessages.last().body.take(30)}...), timestamp: ${sortedMessages.last().timestamp}")
+                    val sortedMessages = if (isInitialLoad) {
+                        messages.sortedByDescending { it.timestamp ?: it.date.time }
+                    } else {
+                        messages.sortedBy { it.timestamp ?: it.date.time }
                     }
                     return sortedMessages
                 } finally {
                     latch.unlock()
                 }
             } else {
-                Log.e(TAG, "❌ WebSocket connection not available for MAM query")
+                Log.e(TAG, "WebSocket connection not available for MAM query")
                 emptyList()
             }
         } catch (e: CancellationException) {
-            // Re-throw cancellation exceptions (expected when coroutine scope is cancelled)
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to get history", e)
+            Log.e(TAG, "Failed to get history", e)
             emptyList()
+        }
+    }
+    
+    /**
+     * Helper function to convert message ID string to Long (for pagination)
+     * Returns null if message ID is not numeric
+     */
+    private fun messageIdToLong(messageId: String): Long? {
+        return try {
+            messageId.toLongOrNull()
+        } catch (e: Exception) {
+            null
         }
     }
     
@@ -540,7 +556,7 @@ class XMPPClient(
             // Check if this is a MAM result message
             // Format: <message><result xmlns='urn:xmpp:mam:2'><forwarded><message>...</message></forwarded></result></message>
             if (!xml.contains("urn:xmpp:mam:2") || !xml.contains("<result")) {
-                Log.d(TAG, "   Not a MAM result message")
+                Log.d(TAG, "  Not a MAM result message")
                 return emptyList()
             }
             
@@ -552,7 +568,7 @@ class XMPPClient(
             // Pattern: <result ...><forwarded><message ...>...</message></forwarded></result>
             val forwardedStart = xml.indexOf("<forwarded")
             if (forwardedStart == -1) {
-                Log.d(TAG, "   No <forwarded> element found")
+                Log.d(TAG, "  No <forwarded> element found")
                 return emptyList()
             }
             
@@ -580,7 +596,7 @@ class XMPPClient(
                 // Fallback: find first </forwarded>
                 forwardedEnd = xml.indexOf("</forwarded>", forwardedStart)
                 if (forwardedEnd == -1) {
-                    Log.d(TAG, "   Could not find </forwarded> end tag")
+                    Log.d(TAG, "  Could not find </forwarded> end tag")
                     return emptyList()
                 }
                 forwardedEnd += "</forwarded>".length
@@ -601,7 +617,7 @@ class XMPPClient(
                     // Parse XEP-0082 timestamp format: 2024-10-03T15:30:10.723554Z
                     java.time.Instant.parse(it).toEpochMilli()
                 } catch (e: Exception) {
-                    Log.w(TAG, "   Failed to parse timestamp: $it", e)
+                    Log.w(TAG, "  Failed to parse timestamp: $it", e)
                     System.currentTimeMillis()
                 }
             } ?: System.currentTimeMillis()
@@ -609,7 +625,7 @@ class XMPPClient(
             // Extract inner message element
             val messageStart = forwardedXml.indexOf("<message")
             if (messageStart == -1) {
-                Log.d(TAG, "   No <message> element in forwarded")
+                Log.d(TAG, "  No <message> element in forwarded")
                 return emptyList()
             }
             
@@ -637,7 +653,7 @@ class XMPPClient(
                 // Fallback: find first </message>
                 messageEnd = forwardedXml.indexOf("</message>", messageStart)
                 if (messageEnd == -1) {
-                    Log.d(TAG, "   Could not find </message> end tag")
+                    Log.d(TAG, "  Could not find </message> end tag")
                     return emptyList()
                 }
                 messageEnd += "</message>".length
@@ -650,8 +666,12 @@ class XMPPClient(
             val messageId = extractAttribute(messageXml, "id") ?: ""
             val type = extractAttribute(messageXml, "type") ?: "groupchat"
             
-            Log.d(TAG, "   Extracted - ID: $messageId, From: $from, Type: $type")
-            Log.d(TAG, "   Message XML length: ${messageXml.length}, contains <data: ${messageXml.contains("<data")}")
+            // Extract room JID from 'from' attribute (format: room@conference.domain/user@domain/resource)
+            // This prevents messages from going to wrong chats when multiple rooms load history simultaneously
+            val actualRoomJid = from.split("/").firstOrNull() ?: roomJID
+            
+            Log.d(TAG, "  Extracted - ID: $messageId, From: $from, Type: $type, Room: $actualRoomJid")
+            Log.d(TAG, "  Message XML length: ${messageXml.length}, contains <data: ${messageXml.contains("<data")}")
             
             // Extract body - handle multiline and nested content
             val bodyStart = messageXml.indexOf("<body>")
@@ -669,7 +689,7 @@ class XMPPClient(
             
             // Skip if no body (might be presence or other non-chat message)
             if (body.isBlank()) {
-                Log.d(TAG, "   Skipping message with no body")
+                Log.d(TAG, "  Skipping message with no body")
                 return emptyList()
             }
             
@@ -696,26 +716,21 @@ class XMPPClient(
                 else -> ""
             }
             
-            Log.d(TAG, "   Data XML found: ${dataXml.isNotEmpty()}, length: ${dataXml.length}")
+            Log.d(TAG, "  Data XML found: ${dataXml.isNotEmpty()}, length: ${dataXml.length}")
             if (dataXml.isNotEmpty()) {
-                Log.d(TAG, "   Data XML preview: ${dataXml.take(300)}")
+                Log.d(TAG, "  Data XML preview: ${dataXml.take(300)}")
             }
             
             // Extract attributes - try both quoted and unquoted formats
-            val senderFirstName = extractAttribute(dataXml, "senderFirstName") 
-                ?: extractAttribute(dataXml, "senderFirstName", useSingleQuotes = true)
+            val senderFirstName = extractAttribute(dataXml, "senderFirstName")
             val senderLastName = extractAttribute(dataXml, "senderLastName")
-                ?: extractAttribute(dataXml, "senderLastName", useSingleQuotes = true)
             val photoURL = extractAttribute(dataXml, "photoURL")
-                ?: extractAttribute(dataXml, "photoURL", useSingleQuotes = true)
             val fullName = extractAttribute(dataXml, "fullName")
-                ?: extractAttribute(dataXml, "fullName", useSingleQuotes = true)
             val senderJID = extractAttribute(dataXml, "senderJID")
-                ?: extractAttribute(dataXml, "senderJID", useSingleQuotes = true)
             
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
-            Log.d(TAG, "   Extracted user data: firstName=$senderFirstName, lastName=$senderLastName, photoURL=${cleanPhotoURL?.take(50)}, fullName=$fullName, senderJID=$senderJID")
+            Log.d(TAG, "  Extracted user data: firstName=$senderFirstName, lastName=$senderLastName, photoURL=${cleanPhotoURL?.take(50)}, fullName=$fullName, senderJID=$senderJID")
             
             // Use result ID as message ID if message ID is empty
             val finalMessageId = if (messageId.isBlank()) resultId else messageId
@@ -737,19 +752,19 @@ class XMPPClient(
                 userJID = senderJID ?: userJid
             )
             
-            Log.d(TAG, "   User: ${user.fullName}, profileImage: ${user.profileImage?.take(50)}")
+            Log.d(TAG, "  User: ${user.fullName}, profileImage: ${user.profileImage?.take(50)}")
             
             // Check if message is deleted (has <deleted> element)
             val isDeleted = messageXml.contains("<deleted") || messageXml.contains("<deleted>") || 
                            forwardedXml.contains("<deleted") || forwardedXml.contains("<deleted>")
             
-            // Create Message object
+            // Create Message object - use actual room JID from stanza
             val message = Message(
                 id = finalMessageId,
                 user = user,
                 date = java.util.Date(timestamp),
                 body = body,
-                roomJid = roomJID,
+                roomJid = actualRoomJid, // Use room JID extracted from stanza, not parameter
                 timestamp = timestamp,
                 xmppId = finalMessageId,
                 xmppFrom = from,
@@ -757,17 +772,16 @@ class XMPPClient(
             )
             
             messages.add(message)
-            Log.d(TAG, "📝 Parsed MAM message: ID=$finalMessageId, From=$from, Body=${body.take(50)}...")
             
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Error parsing MAM result", e)
+            Log.e(TAG, "Error parsing MAM result", e)
             e.printStackTrace()
         }
         
         return messages
     }
     
-    private fun extractAttribute(xml: String, attr: String, useSingleQuotes: Boolean = false): String? {
+    private fun extractAttribute(xml: String, attr: String): String? {
         if (xml.isEmpty()) return null
         
         // Try double quotes first (default)
@@ -826,25 +840,105 @@ class XMPPClient(
     }
 
     /**
+     * Send general presence (available)
+     */
+    suspend fun sendGeneralPresence(): Boolean {
+        com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendGeneralPresence()")
+        return try {
+            if (status != ConnectionStatus.ONLINE) {
+                com.ethora.chat.core.store.LogStore.error(TAG, "Cannot send general presence: not online")
+                Log.e(TAG, "Cannot send general presence: not online")
+                return false
+            }
+            
+            if (useWebSocket && webSocketConnection != null) {
+                com.ethora.chat.core.store.LogStore.send(TAG, "Sending general presence via WebSocket")
+                webSocketConnection?.sendGeneralPresence()
+                return true
+            } else {
+                try {
+                    com.ethora.chat.core.store.LogStore.send(TAG, "Sending general presence via TCP")
+                    val presence = Presence(Presence.Type.available)
+                    connection?.sendStanza(presence)
+                    return true
+                } catch (e: Exception) {
+                    com.ethora.chat.core.store.LogStore.error(TAG, "Failed to send general presence via TCP: ${e.message}")
+                    Log.e(TAG, "Failed to send general presence via TCP", e)
+                    return false
+                }
+            }
+        } catch (e: Exception) {
+            com.ethora.chat.core.store.LogStore.error(TAG, "Failed to send general presence: ${e.message}")
+            Log.e(TAG, "Failed to send general presence", e)
+            false
+        }
+    }
+    
+    /**
+     * Send presence to all rooms
+     */
+    suspend fun sendAllPresencesToRooms(): Boolean {
+        return try {
+            val rooms = RoomStore.rooms.value
+            if (rooms.isEmpty()) {
+                return true
+            }
+            
+            rooms.forEach { room ->
+                try {
+                    sendPresenceInRoom(room.jid)
+                    kotlinx.coroutines.delay(50)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to send presence to ${room.jid}", e)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send presence to all rooms", e)
+            false
+        }
+    }
+    
+    /**
+     * Send general presence and then presence to all rooms
+     */
+    suspend fun sendAllPresencesAndMarkReady() {
+        presencesReady = false
+        try {
+            sendGeneralPresence()
+            kotlinx.coroutines.delay(200)
+            sendAllPresencesToRooms()
+            presencesReady = true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in sendAllPresencesAndMarkReady", e)
+            presencesReady = true
+        }
+    }
+    
+    /**
      * Send presence in room
-     * Matches web: presenceInRoomStanza
      */
     suspend fun sendPresenceInRoom(roomJID: String): Boolean {
+        com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendPresenceInRoom($roomJID)")
         return try {
             if (!isFullyConnected()) {
+                com.ethora.chat.core.store.LogStore.error(TAG, "Cannot send presence in room: not fully connected")
                 Log.e(TAG, "Cannot send presence: not fully connected")
                 return false
             }
             
             if (useWebSocket && webSocketConnection != null) {
+                com.ethora.chat.core.store.LogStore.send(TAG, "Sending presence in room: $roomJID")
                 webSocketConnection?.sendPresenceInRoom(roomJID)
                 return true
             } else {
+                com.ethora.chat.core.store.LogStore.error(TAG, "Presence in room not supported for TCP connection")
                 Log.e(TAG, "Presence in room not supported for TCP connection")
                 return false
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to send presence", e)
+            com.ethora.chat.core.store.LogStore.error(TAG, "Failed to send presence in room: ${e.message}")
+            Log.e(TAG, "Failed to send presence", e)
             false
         }
     }
@@ -854,21 +948,26 @@ class XMPPClient(
      * Matches web: getRoomsStanza
      */
     suspend fun getRooms(): Boolean {
+        com.ethora.chat.core.store.LogStore.info(TAG, "Executing getRooms()")
         return try {
             if (!isFullyConnected()) {
+                com.ethora.chat.core.store.LogStore.error(TAG, "Cannot get rooms: not fully connected")
                 Log.e(TAG, "Cannot get rooms: not fully connected")
                 return false
             }
             
             if (useWebSocket && webSocketConnection != null) {
+                com.ethora.chat.core.store.LogStore.send(TAG, "Sending getRooms request via WebSocket")
                 webSocketConnection?.getRooms()
                 return true
             } else {
+                com.ethora.chat.core.store.LogStore.error(TAG, "Get rooms not supported for TCP connection")
                 Log.e(TAG, "Get rooms not supported for TCP connection")
                 return false
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to get rooms", e)
+            com.ethora.chat.core.store.LogStore.error(TAG, "Failed to get rooms: ${e.message}")
+            Log.e(TAG, "Failed to get rooms", e)
             false
         }
     }
@@ -892,7 +991,7 @@ class XMPPClient(
                 return false
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to get last message archive", e)
+            Log.e(TAG, "Failed to get last message archive", e)
             false
         }
     }
@@ -915,7 +1014,7 @@ class XMPPClient(
                 return null
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to send ping", e)
+            Log.e(TAG, "Failed to send ping", e)
             null
         }
     }

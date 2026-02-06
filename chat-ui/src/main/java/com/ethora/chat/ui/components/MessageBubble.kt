@@ -19,12 +19,18 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import coil.compose.AsyncImage
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
+import java.util.regex.Pattern
 
 /**
  * Message bubble component with user avatars and grouping
@@ -80,7 +86,7 @@ fun MessageBubble(
         Column(
             modifier = Modifier
                 .weight(1f, fill = false)
-                .widthIn(max = 300.dp),
+                .widthIn(max = 280.dp), // Slightly reduced for better wrapping
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
         ) {
             // Username - only show if showUsername is true and not from user
@@ -152,16 +158,15 @@ fun MessageBubble(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
                     )
                 } else {
-                    // Show text message
-                    Text(
+                    // Show text message with formatting
+                    FormattedMessageText(
                         text = message.body,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (isUser) 
+                        textColor = if (isUser) 
                             MaterialTheme.colorScheme.onPrimary 
                         else 
                             MaterialTheme.colorScheme.onSurfaceVariant,
-                        lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.25
+                        lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4
                     )
                 }
             }
@@ -272,6 +277,169 @@ fun UserAvatar(
                     }
                 )
             }
+        }
+    }
+}
+
+/**
+ * Formatted message text with Markdown and autolink support
+ */
+@Composable
+private fun FormattedMessageText(
+    text: String,
+    modifier: Modifier = Modifier,
+    textColor: androidx.compose.ui.graphics.Color,
+    lineHeight: androidx.compose.ui.unit.TextUnit
+) {
+    val annotatedText = remember(text) {
+        buildFormattedText(text, textColor)
+    }
+    
+    Text(
+        text = annotatedText,
+        modifier = modifier,
+        style = MaterialTheme.typography.bodyMedium.copy(
+            lineHeight = lineHeight
+        ),
+        color = textColor
+    )
+}
+
+/**
+ * Data class for text formatting matches
+ */
+private data class TextMatch(val start: Int, val end: Int, val type: String)
+
+/**
+ * Build formatted text with Markdown and autolink
+ */
+private fun buildFormattedText(text: String, defaultColor: androidx.compose.ui.graphics.Color): AnnotatedString {
+    return buildAnnotatedString {
+        // URL pattern (http, https, www)
+        val urlPattern = Pattern.compile(
+            "(?i)\\b(https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=%]+|www\\.[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=%]+)",
+            Pattern.CASE_INSENSITIVE
+        )
+        
+        // Markdown patterns
+        val boldPattern = Pattern.compile("\\*\\*(.+?)\\*\\*")
+        val italicPattern = Pattern.compile("\\*(.+?)\\*")
+        val codePattern = Pattern.compile("`(.+?)`")
+        
+        val matches = mutableListOf<TextMatch>()
+        
+        // Find all URLs
+        val urlMatcher = urlPattern.matcher(text)
+        while (urlMatcher.find()) {
+            matches.add(TextMatch(urlMatcher.start(), urlMatcher.end(), "url"))
+        }
+        
+        // Find Markdown formatting (avoid overlapping with URLs)
+        val boldMatcher = boldPattern.matcher(text)
+        while (boldMatcher.find()) {
+            val start = boldMatcher.start()
+            val end = boldMatcher.end()
+            // Check if this overlaps with a URL
+            val overlapsUrl = matches.any { it.start < end && it.end > start }
+            if (!overlapsUrl) {
+                matches.add(TextMatch(start, end, "bold"))
+            }
+        }
+        
+        val italicMatcher = italicPattern.matcher(text)
+        while (italicMatcher.find()) {
+            val start = italicMatcher.start()
+            val end = italicMatcher.end()
+            val overlapsUrl = matches.any { it.start < end && it.end > start }
+            val overlapsBold = matches.any { it.start < end && it.end > start && it.type == "bold" }
+            if (!overlapsUrl && !overlapsBold) {
+                matches.add(TextMatch(start, end, "italic"))
+            }
+        }
+        
+        val codeMatcher = codePattern.matcher(text)
+        while (codeMatcher.find()) {
+            val start = codeMatcher.start()
+            val end = codeMatcher.end()
+            val overlapsUrl = matches.any { it.start < end && it.end > start }
+            if (!overlapsUrl) {
+                matches.add(TextMatch(start, end, "code"))
+            }
+        }
+        
+        // Sort matches by start position
+        matches.sortBy { it.start }
+        
+        // Build annotated string
+        var currentIndex = 0
+        for (match in matches) {
+            val start = match.start
+            val end = match.end
+            val type = match.type
+            // Add text before match
+            if (start > currentIndex) {
+                append(text.substring(currentIndex, start))
+            }
+            
+            // Add formatted text
+            when (type) {
+                "url" -> {
+                    val url = text.substring(start, end)
+                    val fullUrl = if (url.startsWith("www.")) "https://$url" else url
+                    withStyle(
+                        style = SpanStyle(
+                            color = defaultColor.copy(alpha = 0.8f),
+                            textDecoration = TextDecoration.Underline
+                        )
+                    ) {
+                        append(url)
+                    }
+                    addStringAnnotation(
+                        tag = "URL",
+                        annotation = fullUrl,
+                        start = length - (end - start),
+                        end = length
+                    )
+                }
+                "bold" -> {
+                    val content = text.substring(start + 2, end - 2) // Remove ** markers
+                    withStyle(
+                        style = SpanStyle(
+                            fontWeight = FontWeight.Bold
+                        )
+                    ) {
+                        append(content)
+                    }
+                }
+                "italic" -> {
+                    val content = text.substring(start + 1, end - 1) // Remove * marker
+                    withStyle(
+                        style = SpanStyle(
+                            fontStyle = FontStyle.Italic
+                        )
+                    ) {
+                        append(content)
+                    }
+                }
+                "code" -> {
+                    val content = text.substring(start + 1, end - 1) // Remove ` markers
+                    withStyle(
+                        style = SpanStyle(
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            background = defaultColor.copy(alpha = 0.2f)
+                        )
+                    ) {
+                        append(content)
+                    }
+                }
+            }
+            
+            currentIndex = end
+        }
+        
+        // Add remaining text
+        if (currentIndex < text.length) {
+            append(text.substring(currentIndex))
         }
     }
 }

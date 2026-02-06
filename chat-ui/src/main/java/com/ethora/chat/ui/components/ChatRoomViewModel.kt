@@ -6,6 +6,7 @@ import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.networking.AuthAPIHelper
 import com.ethora.chat.core.store.MessageStore
+import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.xmpp.XMPPClient
@@ -25,7 +26,7 @@ class ChatRoomViewModel(
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
     val messages: StateFlow<List<Message>> = _messages.asStateFlow()
 
-    // Loading state comes from store (matches web: rooms[chatJID].isLoading)
+    // Loading state comes from store
     val isLoading: StateFlow<Boolean> = RoomStore.roomLoadingStates
         .map { it[room.jid] ?: false }
         .stateIn(
@@ -53,22 +54,22 @@ class ChatRoomViewModel(
     
     // Observe composing state from RoomStore (matches web: useSelector)
     init {
-        // Observe messages from store (matches web: useSelector)
+        // Observe messages from store
         viewModelScope.launch {
             MessageStore.messages
                 .map { 
                     val roomMessages = it[room.jid] ?: emptyList()
-                    android.util.Log.d("ChatRoomViewModel", "🔄 Store updated, messages for ${room.jid}: ${roomMessages.size}")
+                    android.util.Log.d("ChatRoomViewModel", "Store updated, messages for ${room.jid}: ${roomMessages.size}")
                     roomMessages
                 }
                 .distinctUntilChanged()
                 .collect { 
-                    android.util.Log.d("ChatRoomViewModel", "📥 Collected ${it.size} messages from store")
+                    android.util.Log.d("ChatRoomViewModel", "Collected ${it.size} messages from store")
                     _messages.value = it
                 }
         }
         
-        // Observe composing state from RoomStore (matches web: useSelector)
+        // Observe composing state from RoomStore
         viewModelScope.launch {
             RoomStore.rooms
                 .map { rooms ->
@@ -78,11 +79,11 @@ class ChatRoomViewModel(
                 .distinctUntilChanged()
                 .collect { composingList ->
                     _composingUsers.value = composingList
-                    android.util.Log.d("ChatRoomViewModel", "📝 Composing users updated: $composingList")
+                    android.util.Log.d("ChatRoomViewModel", "Composing users updated: $composingList")
                 }
         }
         
-        // Check if messages exist in store - only load if they don't (matches web pattern)
+        // Check if messages exist in store - only load if they don't
         val storedMessages = MessageStore.messages.value[room.jid] ?: emptyList()
         if (storedMessages.isEmpty()) {
             // Try loading from persistence first
@@ -92,9 +93,28 @@ class ChatRoomViewModel(
                     // Load from persistence
                     MessageStore.setMessagesForRoom(room.jid, persistedMessages)
                     _messages.value = persistedMessages
-                    android.util.Log.d("ChatRoomViewModel", "✅ Loaded ${persistedMessages.size} messages from persistence")
+                    android.util.Log.d("ChatRoomViewModel", "Loaded ${persistedMessages.size} messages from persistence")
                 } else {
-                    // No messages in store or persistence, load them (matches web: setIsLoading({ chatJID, loading: true }))
+                    // Avoid racing the global MessageLoader (which runs shortly after rooms load).
+                    // If global sync is in progress (or hasn't finished yet), wait briefly for it to populate the store,
+                    // then fall back to per-room load if still empty.
+                    val shouldWaitForGlobalLoader =
+                        xmppClient != null &&
+                        RoomStore.rooms.value.isNotEmpty() &&
+                        (MessageLoader.isSyncInProgress() || !MessageLoader.isSynced())
+
+                    if (shouldWaitForGlobalLoader) {
+                        android.util.Log.d("ChatRoomViewModel", "⏳ Waiting for global history sync before per-room load: ${room.jid}")
+                        kotlinx.coroutines.delay(1500)
+                        val afterWaitMessages = MessageStore.messages.value[room.jid] ?: emptyList()
+                        if (afterWaitMessages.isNotEmpty()) {
+                            _messages.value = afterWaitMessages
+                            android.util.Log.d("ChatRoomViewModel", "Global loader filled messages (${afterWaitMessages.size}), skipping per-room load")
+                            return@launch
+                        }
+                    }
+
+                    // No messages in store or persistence, load them
                     RoomStore.setRoomLoading(room.jid, true)
                     loadMessages()
                 }
@@ -102,7 +122,7 @@ class ChatRoomViewModel(
         } else {
             // Messages already loaded globally, just use them (no loader)
             _messages.value = storedMessages
-            android.util.Log.d("ChatRoomViewModel", "✅ Using pre-loaded messages (${storedMessages.size} messages)")
+            android.util.Log.d("ChatRoomViewModel", "Using pre-loaded messages (${storedMessages.size} messages)")
         }
     }
     
@@ -148,9 +168,9 @@ class ChatRoomViewModel(
                 return@launch
             }
             
-            android.util.Log.d("ChatRoomViewModel", "📤 Attempting to send message: '$text' to room: ${room.jid}")
-            android.util.Log.d("ChatRoomViewModel", "   User: ${currentUser.firstName} ${currentUser.lastName}, xmppUsername: ${currentUser.xmppUsername}")
-            android.util.Log.d("ChatRoomViewModel", "   XMPP Client: ${xmppClient != null}, isFullyConnected: ${xmppClient?.isFullyConnected()}")
+            android.util.Log.d("ChatRoomViewModel", "Attempting to send message: '$text' to room: ${room.jid}")
+            android.util.Log.d("ChatRoomViewModel", "  User: ${currentUser.firstName} ${currentUser.lastName}, xmppUsername: ${currentUser.xmppUsername}")
+            android.util.Log.d("ChatRoomViewModel", "  XMPP Client: ${xmppClient != null}, isFullyConnected: ${xmppClient?.isFullyConnected()}")
             
             val messageId = xmppClient?.sendMessage(
                 roomJID = room.jid,
@@ -163,6 +183,7 @@ class ChatRoomViewModel(
             
             if (messageId != null) {
                 // Create optimistic message with pending state
+                // Set both id and xmppId to messageId for proper matching when server echo arrives
                 val optimisticMessage = Message(
                     id = messageId,
                     body = text,
@@ -170,13 +191,13 @@ class ChatRoomViewModel(
                     date = java.util.Date(),
                     roomJid = room.jid,
                     pending = true,
-                    xmppId = messageId,
+                    xmppId = messageId, // Set xmppId for bidirectional matching
                     xmppFrom = "${room.jid}/${currentUser.id}"
                 )
                 MessageStore.addMessage(room.jid, optimisticMessage)
-                android.util.Log.d("ChatRoomViewModel", "✅ Created optimistic message with pending=true, ID: $messageId")
+                android.util.Log.d("ChatRoomViewModel", "Created optimistic message with pending=true, ID: $messageId, xmppId: $messageId")
             } else {
-                android.util.Log.e("ChatRoomViewModel", "❌ Failed to send message - sendMessage returned null")
+                android.util.Log.e("ChatRoomViewModel", "Failed to send message - sendMessage returned null")
             }
         }
     }
@@ -191,51 +212,84 @@ class ChatRoomViewModel(
     /**
      * Load messages (initial load)
      * Only called when messages don't exist in store
-     * Matches web: useRoomInitialization hook
+     * Matches web: useRoomInitialization hook exactly
+     * 
+     * Web logic:
+     * 1. Load 30 messages initially
+     * 2. Check for undefined/empty text messages (countUndefinedText)
+     * 3. If undefined texts found, load additional 20 + countUndefinedText messages before the first message ID
      */
     fun loadMessages() {
         viewModelScope.launch {
             try {
-                android.util.Log.d("ChatRoomViewModel", "📥 Loading messages for room: ${room.jid}")
-                
-                // Set loading state in store (matches web: dispatch(setIsLoading({ chatJID, loading: true })))
                 RoomStore.setRoomLoading(room.jid, true)
                 
-                // Load history from XMPP if client is available
                 xmppClient?.let { client ->
-                    android.util.Log.d("ChatRoomViewModel", "   Requesting history from XMPP...")
-                    val history = client.getHistory(room.jid, max = 30)
-                    android.util.Log.d("ChatRoomViewModel", "   Received ${history.size} messages from history")
+                    try {
+                        client.sendPresenceInRoom(room.jid)
+                        kotlinx.coroutines.delay(200)
+                    } catch (e: Exception) {
+                        android.util.Log.w("ChatRoomViewModel", "Failed to send presence to ${room.jid}", e)
+                    }
                     
-                    if (history.isNotEmpty()) {
-                        // Add to message store - this will trigger the flow observer and update last message
-                        MessageStore.addMessages(room.jid, history)
-                        android.util.Log.d("ChatRoomViewModel", "   ✅ Added ${history.size} messages to store")
+                    val initialHistory = client.getHistory(room.jid, max = 30, beforeMessageId = null)
+                    
+                    val undefinedTextCount = initialHistory.count { 
+                        it.body == null || it.body.isEmpty() || it.body == "undefined"
+                    }
+                    
+                    if (undefinedTextCount > 0 && initialHistory.isNotEmpty()) {
+                        val firstMessageId = initialHistory.firstOrNull()?.id?.toLongOrNull()
                         
-                        // Update hasMoreMessages based on result and historyComplete
-                        val updatedRoom = RoomStore.getRoomByJid(room.jid)
-                        val historyComplete = updatedRoom?.historyComplete == true
-                        _hasMoreMessages.value = !historyComplete && history.size >= 30
-                        
-                        // If history is complete, set hasMoreMessages to false
-                        if (historyComplete) {
-                            android.util.Log.d("ChatRoomViewModel", "   ✅ History is complete")
-                            _hasMoreMessages.value = false
+                        if (firstMessageId != null) {
+                            val additionalHistory = client.getHistory(
+                                room.jid,
+                                max = 20 + undefinedTextCount,
+                                beforeMessageId = firstMessageId
+                            )
+                            
+                            val allMessages = (additionalHistory + initialHistory).distinctBy { it.id }
+                            MessageStore.addMessages(room.jid, allMessages)
+                            
+                            val updatedRoom = RoomStore.getRoomByJid(room.jid)
+                            val historyComplete = updatedRoom?.historyComplete == true
+                            _hasMoreMessages.value = !historyComplete && allMessages.size >= 30
+                            
+                            if (historyComplete) {
+                                _hasMoreMessages.value = false
+                            }
+                        } else {
+                            MessageStore.addMessages(room.jid, initialHistory)
+                            
+                            val updatedRoom = RoomStore.getRoomByJid(room.jid)
+                            val historyComplete = updatedRoom?.historyComplete == true
+                            _hasMoreMessages.value = !historyComplete && initialHistory.size >= 30
+                            
+                            if (historyComplete) {
+                                _hasMoreMessages.value = false
+                            }
                         }
                     } else {
-                        android.util.Log.w("ChatRoomViewModel", "   ⚠️ History is empty")
-                        _hasMoreMessages.value = false
+                        if (initialHistory.isNotEmpty()) {
+                            MessageStore.addMessages(room.jid, initialHistory)
+                            
+                            val updatedRoom = RoomStore.getRoomByJid(room.jid)
+                            val historyComplete = updatedRoom?.historyComplete == true
+                            _hasMoreMessages.value = !historyComplete && initialHistory.size >= 30
+                            
+                            if (historyComplete) {
+                                _hasMoreMessages.value = false
+                            }
+                        } else {
+                            _hasMoreMessages.value = false
+                        }
                     }
-                } ?: run {
-                    android.util.Log.w("ChatRoomViewModel", "   ⚠️ XMPP client is null")
                 }
             } catch (e: CancellationException) {
-                // Expected when coroutine is cancelled - don't log as error
                 throw e
             } catch (e: Exception) {
-                android.util.Log.e("ChatRoomViewModel", "❌ Error loading messages", e)
+                android.util.Log.e("ChatRoomViewModel", "Error loading messages", e)
             } finally {
-                // Clear loading state in store (matches web: dispatch(setIsLoading({ chatJID, loading: false })))
                 RoomStore.setRoomLoading(room.jid, false)
             }
         }
@@ -248,19 +302,20 @@ class ChatRoomViewModel(
         viewModelScope.launch {
             try {
                 xmppClient?.let { client ->
-                    val history = client.getHistory(room.jid, max = 30)
+                    // Pass null to get newest messages (RSM <before/>)
+                    val history = client.getHistory(room.jid, max = 30, beforeMessageId = null)
                     if (history.isNotEmpty()) {
                         // Add messages - this will automatically update last message
                         MessageStore.addMessages(room.jid, history)
                         _hasMoreMessages.value = history.size >= 30
-                        android.util.Log.d("ChatRoomViewModel", "   🔄 Refreshed ${history.size} messages in background")
+                        android.util.Log.d("ChatRoomViewModel", "   Refreshed ${history.size} messages in background")
                     }
                 }
             } catch (e: CancellationException) {
                 // Expected when coroutine is cancelled - don't log as error
                 throw e
             } catch (e: Exception) {
-                android.util.Log.e("ChatRoomViewModel", "❌ Error refreshing messages", e)
+                android.util.Log.e("ChatRoomViewModel", "Error refreshing messages", e)
             }
         }
     }
@@ -278,7 +333,7 @@ class ChatRoomViewModel(
         
         // Don't load if already loading, no more messages, or history is complete
         if (isLoadingMoreInProgress || !currentHasMore || currentIsLoading || historyComplete) {
-            android.util.Log.d("ChatRoomViewModel", "⏭️ Skipping loadMore: isLoadingMore=$isLoadingMoreInProgress, hasMore=$currentHasMore, isLoading=$currentIsLoading, historyComplete=$historyComplete")
+            android.util.Log.d("ChatRoomViewModel", "Skipping loadMore: isLoadingMore=$isLoadingMoreInProgress, hasMore=$currentHasMore, isLoading=$currentIsLoading, historyComplete=$historyComplete")
             return
         }
         
@@ -288,35 +343,49 @@ class ChatRoomViewModel(
             try {
                 val currentMessages = _messages.value
                 if (currentMessages.isEmpty()) {
-                    android.util.Log.d("ChatRoomViewModel", "⏭️ No messages to paginate from")
+                    android.util.Log.d("ChatRoomViewModel", "No messages to paginate from")
                     isLoadingMoreInProgress = false
                     _isLoadingMore.value = false
                     return@launch
                 }
                 
                 // In reverse layout, first message in list is the oldest (at "top")
-                // Get the first message (oldest) for pagination
-                val oldestMessage = currentMessages.firstOrNull()
+                // Get the first message (oldest) for pagination, skipping delimiter-new
+                // Matches web: firstMessage?.id === 'delimiter-new' ? secondMessage?.id : firstMessage?.id
+                val oldestMessage = currentMessages.firstOrNull { it.id != "delimiter-new" } 
+                    ?: currentMessages.firstOrNull()
                 if (oldestMessage == null) {
-                    android.util.Log.d("ChatRoomViewModel", "⏭️ No oldest message found")
+                    android.util.Log.d("ChatRoomViewModel", "No oldest message found")
                     isLoadingMoreInProgress = false
                     _isLoadingMore.value = false
                     return@launch
                 }
                 
-                // Use timestamp for pagination (matches web version)
-                val beforeTimestamp = oldestMessage.timestamp ?: oldestMessage.date.time
+                // Convert message ID to Long for pagination (matches Swift: Number(firstMessageId))
+                // Matches web: numericFirstId = Number(firstMessageId)
+                val beforeMessageId = try {
+                    oldestMessage.id.toLongOrNull()
+                } catch (e: Exception) {
+                    null
+                }
                 
-                android.util.Log.d("ChatRoomViewModel", "📜 Loading more messages before timestamp: $beforeTimestamp (oldest message: ${oldestMessage.id})")
+                if (beforeMessageId == null || beforeMessageId <= 0) {
+                    android.util.Log.w("ChatRoomViewModel", "Cannot paginate: message ID '${oldestMessage.id}' is not numeric")
+                    isLoadingMoreInProgress = false
+                    _isLoadingMore.value = false
+                    return@launch
+                }
+                
+                android.util.Log.d("ChatRoomViewModel", "Loading more messages before message ID: $beforeMessageId (oldest message: ${oldestMessage.id})")
                 
                 xmppClient?.let { client ->
-                    val history = client.getHistory(room.jid, max = 30, beforeTimestamp = beforeTimestamp)
-                    android.util.Log.d("ChatRoomViewModel", "   Received ${history.size} older messages")
+                    val history = client.getHistory(room.jid, max = 30, beforeMessageId = beforeMessageId)
+                    android.util.Log.d("ChatRoomViewModel", "  Received ${history.size} older messages")
                     
                     if (history.isNotEmpty()) {
                         // Add to message store - these will be older messages
                         MessageStore.addMessages(room.jid, history)
-                        android.util.Log.d("ChatRoomViewModel", "   ✅ Added ${history.size} older messages to store")
+                        android.util.Log.d("ChatRoomViewModel", "   Added ${history.size} older messages to store")
                         
                         // Update hasMoreMessages - if we got less than max, we've reached the end
                         val hasMore = history.size >= 30
@@ -326,42 +395,42 @@ class ChatRoomViewModel(
                         val updatedRoom = RoomStore.getRoomByJid(room.jid)
                         if (updatedRoom?.historyComplete == true) {
                             _hasMoreMessages.value = false
-                            android.util.Log.d("ChatRoomViewModel", "   ✅ History is complete, no more messages")
+                            android.util.Log.d("ChatRoomViewModel", "   History is complete, no more messages")
                         }
                         
                         // Force UI update to show new messages
                         kotlinx.coroutines.delay(50)
                         val updatedMessages = MessageStore.messages.value[room.jid] ?: emptyList()
                         _messages.value = updatedMessages
-                        android.util.Log.d("ChatRoomViewModel", "   ✅ Updated UI with ${updatedMessages.size} total messages")
+                        android.util.Log.d("ChatRoomViewModel", "   Updated UI with ${updatedMessages.size} total messages")
                         
                         if (!hasMore) {
-                            android.util.Log.d("ChatRoomViewModel", "   ✅ Reached end of history (got ${history.size} < 30)")
+                            android.util.Log.d("ChatRoomViewModel", "   Reached end of history (got ${history.size} < 30)")
                         }
                     } else {
-                        android.util.Log.d("ChatRoomViewModel", "   ⚠️ No more messages available")
+                        android.util.Log.d("ChatRoomViewModel", "   No more messages available")
                         _hasMoreMessages.value = false
                     }
                 } ?: run {
-                    android.util.Log.w("ChatRoomViewModel", "   ⚠️ XMPP client is null")
+                    android.util.Log.w("ChatRoomViewModel", "   XMPP client is null")
                 }
             } catch (e: CancellationException) {
                 // Expected when coroutine is cancelled - don't log as error
                 throw e
             } catch (e: Exception) {
-                android.util.Log.e("ChatRoomViewModel", "❌ Error loading more messages", e)
+                android.util.Log.e("ChatRoomViewModel", "Error loading more messages", e)
             } finally {
                 isLoadingMoreInProgress = false
                 _isLoadingMore.value = false
-                android.util.Log.d("ChatRoomViewModel", "   Finished loading more, isLoadingMore: false")
+                android.util.Log.d("ChatRoomViewModel", "  Finished loading more, isLoadingMore: false")
             }
         }
     }
     
     /**
-     * Send media
+     * Send media with retry mechanism and error handling
      */
-    fun sendMedia(file: File, mimeType: String) {
+    fun sendMedia(file: File, mimeType: String, retryCount: Int = 0) {
         viewModelScope.launch {
             try {
                 val currentUser = UserStore.currentUser.value
@@ -372,7 +441,22 @@ class ChatRoomViewModel(
                     return@launch
                 }
                 
+                // Validate file exists and is readable
+                if (!file.exists() || !file.canRead()) {
+                    android.util.Log.e("ChatRoomViewModel", "File does not exist or cannot be read: ${file.absolutePath}")
+                    return@launch
+                }
+                
+                // Validate file size (max 50MB)
+                val maxSizeBytes = 50 * 1024 * 1024L // 50MB
+                val fileSize = file.length()
+                if (fileSize > maxSizeBytes) {
+                    android.util.Log.e("ChatRoomViewModel", "File too large: ${fileSize} bytes (max: $maxSizeBytes)")
+                    return@launch
+                }
+                
                 // Create optimistic message
+                // Use timestamp-based ID that will be replaced by server echo
                 val messageId = "send-media-message:${System.currentTimeMillis()}"
                 val optimisticMessage = Message(
                     id = messageId,
@@ -382,31 +466,50 @@ class ChatRoomViewModel(
                     roomJid = room.jid,
                     pending = true,
                     isDeleted = false,
-                    xmppId = messageId,
+                    xmppId = messageId, // Set xmppId for bidirectional matching
                     xmppFrom = "${room.jid}/${currentUser.id}",
                     isSystemMessage = "false",
                     isMediafile = "true",
                     fileName = file.name,
-                    location = "",
+                    location = "", // Will be set after upload
                     locationPreview = "",
                     mimetype = mimeType,
                     originalName = file.name,
                     size = file.length().toString()
                 )
                 MessageStore.addMessage(room.jid, optimisticMessage)
+                android.util.Log.d("ChatRoomViewModel", "Created optimistic media message with pending=true, ID: $messageId")
                 
-                // Upload file
-                android.util.Log.d("ChatRoomViewModel", "📤 Uploading file: ${file.name} (${mimeType})")
-                val uploadResult = AuthAPIHelper.uploadFile(file, mimeType, token)
+                // Upload file with retry
+                android.util.Log.d("ChatRoomViewModel", "Uploading file: ${file.name} (${mimeType}), attempt ${retryCount + 1}")
+                var uploadResult: com.ethora.chat.core.networking.FileUploadResult? = null
+                var uploadError: Exception? = null
+                
+                try {
+                    uploadResult = AuthAPIHelper.uploadFile(file, mimeType, token)
+                } catch (e: Exception) {
+                    uploadError = e
+                    android.util.Log.e("ChatRoomViewModel", "File upload exception", e)
+                }
                 
                 if (uploadResult == null) {
-                    android.util.Log.e("ChatRoomViewModel", "❌ File upload failed")
-                    // Remove optimistic message on failure
-                    // TODO: Mark message as failed
+                    android.util.Log.e("ChatRoomViewModel", "File upload failed")
+                    
+                    // Retry logic (max 2 retries)
+                    if (retryCount < 2) {
+                        android.util.Log.d("ChatRoomViewModel", "Retrying upload in 2 seconds...")
+                        kotlinx.coroutines.delay(2000)
+                        sendMedia(file, mimeType, retryCount + 1)
+                        return@launch
+                    }
+                    
+                    // Max retries reached, remove optimistic message
+                    android.util.Log.e("ChatRoomViewModel", "Max retries reached, removing failed message")
+                    MessageStore.removeMessage(room.jid, messageId)
                     return@launch
                 }
                 
-                android.util.Log.d("ChatRoomViewModel", "✅ File uploaded: ${uploadResult.location}")
+                android.util.Log.d("ChatRoomViewModel", "File uploaded: ${uploadResult.location}")
                 
                 // Prepare media data for XMPP
                 val senderJID = currentUser.xmppUsername?.let { "$it@xmpp.ethoradev.com" } ?: ""
@@ -444,24 +547,37 @@ class ChatRoomViewModel(
                 )
                 
                 // Send media message via XMPP
-                val success = xmppClient?.sendMediaMessage(room.jid, mediaData, messageId) ?: false
+                val success = try {
+                    xmppClient?.sendMediaMessage(room.jid, mediaData, messageId) ?: false
+                } catch (e: Exception) {
+                    android.util.Log.e("ChatRoomViewModel", "Error sending media message via XMPP", e)
+                    false
+                }
                 
                 if (success) {
-                    android.util.Log.d("ChatRoomViewModel", "✅ Media message sent successfully")
-                    // Update optimistic message with real data
-                    val finalMessage = optimisticMessage.copy(
+                    android.util.Log.d("ChatRoomViewModel", "Media message sent successfully via XMPP")
+                    // Update optimistic message with upload data, but keep pending=true
+                    // Server echo will clear pending state via pending reconciliation
+                    // The server echo will match this message by location/fileName and clear pending
+                    val updatedMessage = optimisticMessage.copy(
                         location = uploadResult.location,
                         locationPreview = uploadResult.locationPreview,
-                        pending = false
+                        fileName = uploadResult.filename,
+                        mimetype = uploadResult.mimetype,
+                        size = uploadResult.size.toString(),
+                        // Keep pending=true - server echo will clear it via updatePendingMessage
+                        pending = true
                     )
-                    MessageStore.updateMessage(room.jid, finalMessage)
+                    MessageStore.updateMessage(room.jid, updatedMessage)
+                    android.util.Log.d("ChatRoomViewModel", "Updated optimistic message with upload data (pending=true, waiting for server echo to match by location: ${uploadResult.location})")
                 } else {
-                    android.util.Log.e("ChatRoomViewModel", "❌ Failed to send media message via XMPP")
-                    // TODO: Mark message as failed
+                    android.util.Log.e("ChatRoomViewModel", "Failed to send media message via XMPP")
+                    // Remove failed message
+                    MessageStore.removeMessage(room.jid, messageId)
                 }
             } catch (e: Exception) {
-                android.util.Log.e("ChatRoomViewModel", "❌ Error sending media", e)
-                // TODO: Mark message as failed
+                android.util.Log.e("ChatRoomViewModel", "Error sending media", e)
+                // Message will remain in pending state, will be cleaned up later
             }
         }
     }
@@ -475,7 +591,7 @@ class ChatRoomViewModel(
                 xmppClient?.editMessage(room.jid, messageId, newText)
                 // MessageStore will be updated via delegate callback
             } catch (e: Exception) {
-                android.util.Log.e("ChatRoomViewModel", "❌ Error editing message", e)
+                android.util.Log.e("ChatRoomViewModel", "Error editing message", e)
             }
         }
     }
@@ -489,7 +605,7 @@ class ChatRoomViewModel(
                 xmppClient?.deleteMessage(room.jid, messageId)
                 // MessageStore will be updated via delegate callback
             } catch (e: Exception) {
-                android.util.Log.e("ChatRoomViewModel", "❌ Error deleting message", e)
+                android.util.Log.e("ChatRoomViewModel", "Error deleting message", e)
             }
         }
     }
@@ -521,7 +637,7 @@ class ChatRoomViewModel(
                 xmppClient?.sendMessageReaction(room.jid, messageId, newReactions)
                 // MessageStore will be updated via delegate callback
             } catch (e: Exception) {
-                android.util.Log.e("ChatRoomViewModel", "❌ Error sending reaction", e)
+                android.util.Log.e("ChatRoomViewModel", "Error sending reaction", e)
             }
         }
     }

@@ -1,6 +1,7 @@
 package com.ethora.chat.core.service
 
 import android.util.Log
+import com.ethora.chat.core.networking.TokenManager
 import com.ethora.chat.core.store.*
 import com.ethora.chat.core.xmpp.XMPPClient
 import kotlinx.coroutines.CoroutineScope
@@ -110,6 +111,8 @@ object LogoutService {
                         val userPersistence = UserStore.getPersistenceManager()
                         userPersistence?.saveUser(null)
                         userPersistence?.saveTokens(null, null)
+                        // Clear JWT token
+                        userPersistence?.clearJWTToken()
                         
                         // Clear room persistence
                         val roomPersistence = RoomStore.getPersistenceManager()
@@ -130,12 +133,15 @@ object LogoutService {
                     }
                 }
                 
-                // 4. Reset XMPP client reference
+                // 4. Stop token refresh
+                TokenManager.stopAutoRefresh()
+                
+                // 5. Reset XMPP client reference
                 xmppClient = null
                 
                 Log.d(TAG, "✅ Logout completed successfully")
                 
-                // 5. Call external callback if set
+                // 6. Call external callback if set
                 onLogoutCallback?.invoke()
                 
             } catch (e: Exception) {

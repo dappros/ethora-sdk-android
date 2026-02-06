@@ -21,12 +21,13 @@ enum class NotificationVerticalPosition {
 
 /**
  * Notification offset
+ * Matches web: offset values can be number | string
  */
 data class NotificationOffset(
-    val top: Float? = null,
-    val bottom: Float? = null,
-    val left: Float? = null,
-    val right: Float? = null
+    val top: Any? = null, // Float (number) or String (e.g., "20px", "1rem")
+    val bottom: Any? = null,
+    val left: Any? = null,
+    val right: Any? = null
 )
 
 /**

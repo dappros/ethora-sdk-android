@@ -1,6 +1,7 @@
 package com.ethora.chat
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -8,17 +9,25 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import com.ethora.chat.core.config.ChatConfig
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.networking.ApiClient
 import com.ethora.chat.core.networking.AuthAPIHelper
 import com.ethora.chat.core.networking.RoomsAPIHelper
+import com.ethora.chat.core.networking.TokenManager
+import com.ethora.chat.core.persistence.LocalStorage
 import com.ethora.chat.core.service.LogoutService
 import com.ethora.chat.core.xmpp.XMPPClient
 import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.MessageLoader
+import com.ethora.chat.core.store.MessageLoaderQueue
+import com.ethora.chat.core.store.MessagePriorityQueue
+import com.ethora.chat.core.store.IncrementalHistoryLoader
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
+import com.ethora.chat.core.xmpp.XMPPClientDelegate
+import com.ethora.chat.core.xmpp.ConnectionStatus
 import com.ethora.chat.ui.components.ChatRoomView
 import com.ethora.chat.ui.components.RoomListView
 import com.ethora.chat.ui.styling.ChatTheme
@@ -27,6 +36,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Main chat component entry point
@@ -44,6 +54,9 @@ fun Chat(
     roomJID: String? = null,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val localStorage = remember { LocalStorage(context) }
+    
     ChatStore.setConfig(config)
     
     // Set base URL and app token if provided
@@ -53,7 +66,40 @@ fun Chat(
         }
     }
     
-    // Initialize user - priority: direct user param > config.userLogin.user > JWT login > default login
+    // Auto-login with stored JWT token on app start (if no user provided)
+    LaunchedEffect(Unit) {
+        if (user == null && UserStore.currentUser.value == null) {
+            // Check for stored JWT token
+            val storedJWTToken = localStorage.getJWTToken()
+            if (storedJWTToken != null) {
+                android.util.Log.d("EthoraChat", "🔐 Found stored JWT token, attempting auto-login...")
+                try {
+                    val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
+                    val loginResponse = withContext(Dispatchers.IO) {
+                        AuthAPIHelper.loginViaJWT(storedJWTToken, baseUrl)
+                    }
+                    loginResponse?.let { response ->
+                        UserStore.setUser(response)
+                        // Save JWT token (update if different)
+                        localStorage.saveJWTToken(storedJWTToken)
+                        // Start automatic token refresh
+                        TokenManager.startAutoRefresh(baseUrl)
+                        android.util.Log.d("EthoraChat", "✅ Auto-login successful with stored JWT token")
+                    } ?: run {
+                        // Token invalid, clear it
+                        localStorage.clearJWTToken()
+                        android.util.Log.w("EthoraChat", "⚠️ Stored JWT token invalid, cleared")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("EthoraChat", "❌ Auto-login failed", e)
+                    // Clear invalid token
+                    localStorage.clearJWTToken()
+                }
+            }
+        }
+    }
+    
+    // Initialize user - priority: direct user param > config.userLogin.user > JWT login > stored JWT > default login
     LaunchedEffect(user, config.userLogin, config.jwtLogin, config.defaultLogin) {
         val userLogin = config.userLogin
         val jwtLogin = config.jwtLogin
@@ -70,13 +116,23 @@ fun Chat(
                     UserStore.setUser(loginUser)
                 }
             }
-            // JWT login
+            // JWT login from config
             jwtLogin?.enabled == true -> {
                 val token = jwtLogin.token
                 if (token != null) {
                     val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
-                    val loginResponse = AuthAPIHelper.loginViaJWT(token, baseUrl)
-                    loginResponse?.let { UserStore.setUser(it) }
+                    val loginResponse = withContext(Dispatchers.IO) {
+                        AuthAPIHelper.loginViaJWT(token, baseUrl)
+                    }
+                    loginResponse?.let { response ->
+                        UserStore.setUser(response)
+                        // Save JWT token for future auto-login
+                        localStorage.saveJWTToken(token)
+                        // Start automatic token refresh
+                        val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
+                        TokenManager.startAutoRefresh(baseUrl)
+                        android.util.Log.d("EthoraChat", "✅ JWT login successful, token saved")
+                    }
                 }
             }
             // Default login (if enabled)
@@ -111,26 +167,102 @@ fun Chat(
     
     ChatTheme(colors = config.colors) {
         // Initialize XMPP client if user is available
-        val xmppClient = remember(currentUser) {
+        // Key by essential XMPP credentials to avoid recreation on minor user updates
+        val xmppClient = remember(currentUser?.xmppUsername, currentUser?.xmppPassword, config.xmppSettings) {
             currentUser?.let { user ->
                 user.xmppUsername?.let { username ->
                     user.xmppPassword?.let { password ->
+                        android.util.Log.d("EthoraChat", "🏗️ Creating new XMPPClient for $username")
                         val client = XMPPClient(
                             username = username,
                             password = password,
                             settings = config.xmppSettings
                         )
                         
-                        // Set XMPP client in LogoutService so external apps can logout
+                        // Set delegate to handle reconnection and sync
+                        client.setDelegate(object : XMPPClientDelegate {
+                            override fun onXMPPClientConnected(client: XMPPClient) {
+                                // Sync messages when reconnected (after offline)
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    try {
+                                        delay(2000) // Wait for XMPP to be fully ready
+                                        if (!MessageLoader.isSynced()) {
+                                            // Initial sync
+                                            // Matches web: loads 30 messages per room
+                                            val activeRoomJid = RoomStore.currentRoom.value?.jid
+                                            MessageLoader.loadInitialMessagesForAllRooms(
+                                                xmppClient = client,
+                                                activeRoomJid = activeRoomJid,
+                                                batchSize = 5, // Match web: batchSize = 5
+                                                messagesPerRoom = 30 // Match web: 30 messages per room
+                                            )
+                                        } else {
+                                            // Incremental sync after reconnect
+                                            MessageLoader.syncMessagesSince(
+                                                xmppClient = client,
+                                                batchSize = 5,
+                                                messagesPerRoom = 30
+                                            )
+                                        }
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("EthoraChat", "Error syncing messages on reconnect", e)
+                                    }
+                                }
+                            }
+                            
+                            override fun onXMPPClientDisconnected(client: XMPPClient) {
+                                // Handle disconnection if needed
+                            }
+                            
+                            override fun onStatusChanged(client: XMPPClient, status: ConnectionStatus) {
+                                // Handle status changes if needed
+                            }
+                            
+                            override fun onMessageReceived(client: XMPPClient, message: com.ethora.chat.core.models.Message) {
+                                // Messages are handled automatically by XMPPClient
+                            }
+                            
+                            override fun onStanzaReceived(client: XMPPClient, stanza: com.ethora.chat.core.xmpp.XMPPStanza) {
+                                // Stanzas are handled automatically by XMPPClient
+                            }
+                            
+                            override fun onComposingReceived(client: XMPPClient, roomJid: String, isComposing: Boolean, composingList: List<String>) {
+                                // Update composing state in RoomStore
+                                com.ethora.chat.core.store.RoomStore.setComposing(roomJid, isComposing, composingList)
+                            }
+                            
+                            override fun onMessageEdited(client: XMPPClient, roomJid: String, messageId: String, newText: String) {
+                                // Message editing is handled automatically by XMPPClient
+                            }
+                            
+                            override fun onReactionReceived(client: XMPPClient, roomJid: String, messageId: String, from: String, reactions: List<String>, data: Map<String, String>) {
+                                // Reactions are handled automatically by XMPPClient
+                            }
+                        })
+                        
                         LogoutService.setXMPPClient(client)
-                        
-                        CoroutineScope(Dispatchers.IO).launch {
-                            client.initializeClient()
-                        }
-                        
                         client
                     }
                 }
+            }
+        }
+        
+        // Connect XMPP client
+        LaunchedEffect(xmppClient) {
+            xmppClient?.initializeClient()
+        }
+        
+        // Message loader queue (for background loading after initial load)
+        // Matches web: useMessageLoaderQueue hook
+        val messageLoaderQueue = remember(xmppClient) {
+            xmppClient?.let { MessageLoaderQueue(it) }
+        }
+        
+        // Message priority queue (for prioritized loading)
+        // Matches web: useMessageQueue hook
+        val messagePriorityQueue = remember(xmppClient, RoomStore.currentRoom.value?.jid) {
+            xmppClient?.let { 
+                MessagePriorityQueue(it, RoomStore.currentRoom.value?.jid)
             }
         }
         
@@ -143,21 +275,53 @@ fun Chat(
             // Wait for XMPP client to be fully connected and rooms to be loaded
             if (client != null && rooms.isNotEmpty()) {
                 try {
-                    // Small delay to ensure XMPP is fully connected
                     delay(1000)
                     
-                    // Load initial messages for all rooms (only once)
+                    val activeRoomJid = RoomStore.currentRoom.value?.jid
                     MessageLoader.loadInitialMessagesForAllRooms(
                         xmppClient = client,
+                        activeRoomJid = activeRoomJid,
                         batchSize = 5,
                         messagesPerRoom = 30
                     )
+                    
+                    messageLoaderQueue?.start()
+                    
+                    messagePriorityQueue?.let { queue ->
+                        queue.initialize(rooms)
+                        queue.start()
+                    }
                 } catch (e: CancellationException) {
-                    // Expected when composable leaves composition - don't log as error
-                    // Re-throw to allow proper coroutine cancellation
                     throw e
                 } catch (e: Exception) {
                     android.util.Log.e("EthoraChat", "Error loading initial messages", e)
+                }
+            }
+        }
+        
+        DisposableEffect(xmppClient) {
+            onDispose {
+                android.util.Log.d("EthoraChat", "🧹 Disposing XMPP components")
+                messageLoaderQueue?.stop()
+                messagePriorityQueue?.stop()
+                xmppClient?.disconnect()
+            }
+        }
+        
+        LaunchedEffect(xmppClient) {
+            val client = xmppClient
+            if (client != null && MessageLoader.isSynced()) {
+                // Only run incremental sync if initial sync is complete
+                // This handles offline recovery
+                try {
+                    IncrementalHistoryLoader.updateMessagesTillLast(
+                        xmppClient = client,
+                        batchSize = 5,
+                        maxFetchAttempts = 4,
+                        messagesPerFetch = 5
+                    )
+                } catch (e: Exception) {
+                    android.util.Log.e("EthoraChat", "Error in incremental history sync", e)
                 }
             }
         }
@@ -186,7 +350,14 @@ fun Chat(
                 ChatRoomView(
                     room = selectedRoom!!,
                     xmppClient = xmppClient,
-                    onBack = { selectedRoom = null },
+                    onBack = { 
+                        // Mark room as closed and clear current room
+                        selectedRoom?.let { room ->
+                            com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, System.currentTimeMillis())
+                        }
+                        com.ethora.chat.core.store.RoomStore.setCurrentRoom(null)
+                        selectedRoom = null 
+                    },
                     modifier = modifier
                 )
             } else {

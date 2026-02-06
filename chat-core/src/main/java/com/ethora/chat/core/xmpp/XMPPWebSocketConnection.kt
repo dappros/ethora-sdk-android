@@ -27,6 +27,27 @@ class XMPPWebSocketConnection(
     private var isConnected: Boolean = false
     private var isAuthenticated: Boolean = false
     private val client = OkHttpClient.Builder()
+        .dns(object : okhttp3.Dns {
+            override fun lookup(hostname: String): List<java.net.InetAddress> {
+                android.util.Log.d("XMPPWebSocket", "🔍 DNS lookup for: $hostname")
+                return try {
+                    val addresses = okhttp3.Dns.SYSTEM.lookup(hostname)
+                    android.util.Log.d("XMPPWebSocket", "   ✅ Resolved $hostname to ${addresses.map { it.hostAddress }}")
+                    addresses
+                } catch (e: java.net.UnknownHostException) {
+                    android.util.Log.w("XMPPWebSocket", "   ⚠️ DNS lookup failed for $hostname, using fallback")
+                    when (hostname) {
+                        "api.ethoradev.com" -> listOf(java.net.InetAddress.getByName("3.139.111.222")).also {
+                            android.util.Log.d("XMPPWebSocket", "   ✅ Fallback resolve for $hostname: 3.139.111.222")
+                        }
+                        "xmpp.ethoradev.com" -> listOf(java.net.InetAddress.getByName("3.139.111.222")).also {
+                            android.util.Log.d("XMPPWebSocket", "   ✅ Fallback resolve for $hostname: 3.139.111.222")
+                        }
+                        else -> throw e
+                    }
+                }
+            }
+        })
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
@@ -160,6 +181,7 @@ class XMPPWebSocketConnection(
      * Handle incoming XMPP stanza
      */
     private suspend fun handleIncomingStanza(xml: String) {
+        com.ethora.chat.core.store.LogStore.receive(TAG, "📥 Receive: ${xml.take(300)}${if (xml.length > 300) "..." else ""}")
         try {
             Log.d(TAG, "🔍 Handling stanza in state: $authState")
             Log.d(TAG, "   XML: ${xml.take(500)}")
@@ -201,6 +223,9 @@ class XMPPWebSocketConnection(
                     } else if (xml.contains("<failure") || (xml.contains("failure") && xml.contains("urn:ietf:params:xml:ns:xmpp-sasl"))) {
                         Log.e(TAG, "❌ SASL Authentication failed: $xml")
                         authState = AuthState.NOT_STARTED
+                        clientWrapper?.let { client ->
+                            delegate?.onStatusChanged(client, ConnectionStatus.ERROR)
+                        }
                     }
                 }
                 AuthState.SASL_SUCCESS -> {
@@ -288,16 +313,20 @@ class XMPPWebSocketConnection(
      */
     private fun parseAndHandleStanza(xml: String) {
         try {
+            val stanzaType = extractAttribute(xml, "type")
+            val stanzaId = extractAttribute(xml, "id") ?: ""
+            
             // Check if this is a MAM result message
             if (xml.contains("urn:xmpp:mam:2") && xml.contains("<result")) {
                 Log.d(TAG, "📨 Received MAM result message")
-                // Extract query ID from result element
-                val queryIdMatch = "<result[^>]*id=['\"]([^'\"]+)['\"]".toRegex().find(xml)
-                val queryId = queryIdMatch?.groupValues?.get(1)
-                
-                if (queryId != null && mamCollectors.containsKey(queryId)) {
+                // Per XEP-0313, <result/> has:
+                // - id: the MAM result id (NOT the query id)
+                // - queryid: correlation id matching the <query queryid='...'>
+                val queryId = extractAttribute(xml, "queryid")
+
+                if (!queryId.isNullOrBlank() && mamCollectors.containsKey(queryId)) {
                     val stanza = XMPPStanza(
-                        id = extractAttribute(xml, "id") ?: "",
+                        id = stanzaId,
                         type = "message",
                         from = extractAttribute(xml, "from"),
                         to = extractAttribute(xml, "to"),
@@ -306,11 +335,11 @@ class XMPPWebSocketConnection(
                     )
                     mamCollectors[queryId]?.invoke(stanza)
                 } else {
-                    // Check all collectors for matching room
+                    // Fallback: broadcast to all collectors (some servers may omit queryid)
                     val from = extractAttribute(xml, "from") ?: ""
                     mamCollectors.values.forEach { collector ->
                         val stanza = XMPPStanza(
-                            id = extractAttribute(xml, "id") ?: "",
+                            id = stanzaId,
                             type = "message",
                             from = from,
                             to = extractAttribute(xml, "to"),
@@ -323,11 +352,10 @@ class XMPPWebSocketConnection(
             }
             
             // Check if this is the final IQ result for MAM query
-            if (xml.contains("<iq") && (xml.contains("type=\"result\"") || xml.contains("type='result'"))) {
-                val iqId = extractAttribute(xml, "id") ?: ""
-                if (iqId.startsWith("get-history:")) {
-                    Log.d(TAG, "✅ Received MAM query completion IQ: $iqId")
-                    mamQueryComplete.add(iqId)
+            if (xml.contains("<iq") && stanzaType == "result") {
+                if (stanzaId.startsWith("get-history:")) {
+                    Log.d(TAG, "✅ Received MAM query completion IQ: $stanzaId")
+                    mamQueryComplete.add(stanzaId)
                 }
             }
             
@@ -350,7 +378,7 @@ class XMPPWebSocketConnection(
             }
             
             // Handle message error stanzas (type="error")
-            if (xml.contains("<message") && (xml.contains("type=\"error\"") || xml.contains("type='error'"))) {
+            if (xml.contains("<message") && stanzaType == "error") {
                 parseAndHandleMessageError(xml)
                 return // Handled, don't process as regular message
             }
@@ -373,27 +401,28 @@ class XMPPWebSocketConnection(
             }
             
             // Handle edit message stanzas (id contains 'edit-message')
-            if (xml.contains("<message") && extractAttribute(xml, "id")?.contains("edit-message") == true) {
+            if (xml.contains("<message") && stanzaId.contains("edit-message")) {
                 parseAndHandleEditMessage(xml)
                 return // Handled, don't process as regular message
             }
             
             // Handle reaction stanzas (id contains 'message-reaction')
-            if (xml.contains("<message") && extractAttribute(xml, "id")?.contains("message-reaction") == true) {
+            if (xml.contains("<message") && stanzaId.contains("message-reaction")) {
                 parseAndHandleReaction(xml)
                 return // Handled, don't process as regular message
             }
             
             // Handle delete message stanzas (id='deleteMessageStanza')
-            if (xml.contains("<message") && extractAttribute(xml, "id") == "deleteMessageStanza") {
+            if (xml.contains("<message") && stanzaId == "deleteMessageStanza") {
                 parseAndHandleDeleteMessage(xml)
                 return // Handled, don't process as regular message
             }
             
             // Handle normal stanzas - parse real-time messages
-            if (xml.contains("<message") && xml.contains("type=\"groupchat\"") && !xml.contains("urn:xmpp:mam:2")) {
+            if (xml.contains("<message") && stanzaType == "groupchat" && !xml.contains("urn:xmpp:mam:2")) {
                 // Check if it's a typing indicator first
-                if (!xml.contains("<composing") && !xml.contains("<paused") && xml.contains("<body>")) {
+                // Use more flexible check for body to handle attributes like xml:lang
+                if (!xml.contains("<composing") && !xml.contains("<paused") && xml.contains("<body")) {
                     // This is a real-time message (not MAM result, not typing indicator)
                     parseAndHandleRealtimeMessage(xml)
                 }
@@ -401,8 +430,8 @@ class XMPPWebSocketConnection(
             
             // Handle normal stanzas
             val stanza = XMPPStanza(
-                id = extractAttribute(xml, "id") ?: "",
-                type = extractAttribute(xml, "type") ?: "message",
+                id = stanzaId,
+                type = stanzaType ?: "message",
                 from = extractAttribute(xml, "from"),
                 to = extractAttribute(xml, "to"),
                 body = extractElementText(xml, "body"),
@@ -479,35 +508,68 @@ class XMPPWebSocketConnection(
             val from = extractAttribute(xml, "from") ?: ""
             val body = extractElementText(xml, "body") ?: ""
             
-            if (body.isBlank() || messageId.isBlank()) {
+            // Extract media fields first to check if this is a media message
+            val dataStart = xml.indexOf("<data")
+            val dataXml = if (dataStart != -1) {
+                val dataEnd = xml.indexOf("/>", dataStart)
+                if (dataEnd != -1) {
+                    xml.substring(dataStart, dataEnd + 2)
+                } else {
+                    val dataEndTag = xml.indexOf("</data>", dataStart)
+                    if (dataEndTag != -1) {
+                        xml.substring(dataStart, dataEndTag + 7)
+                    } else ""
+                }
+            } else ""
+            
+            val isMediafile = extractAttribute(dataXml, "isMediafile")
+            val location = extractAttribute(dataXml, "location")
+            
+            // Allow messages with body OR media files (media messages have body="media" or empty body)
+            val hasBody = body.isNotBlank()
+            val hasMedia = isMediafile == "true" || location != null
+            
+            if (messageId.isBlank()) {
+                Log.d(TAG, "⚠️ Skipping message: missing messageId")
+                return
+            }
+
+            if (!hasBody && !hasMedia) {
+                Log.d(TAG, "⚠️ Skipping message: no body and no media, messageId=$messageId. XML: ${xml.take(1000)}")
                 return
             }
             
             // Extract room JID from 'from' attribute (format: room@conference.domain/user@domain/resource)
             val roomJid = from.split("/").firstOrNull() ?: return
             
+            // Verify room exists before processing message (matches web: if (!roomExist) return)
+            val roomExists = com.ethora.chat.core.store.RoomStore.getRoomByJid(roomJid) != null
+            if (!roomExists) {
+                Log.w(TAG, "⚠️ Received message for unknown room: $roomJid, ignoring")
+                return
+            }
+            
             // Extract user info from 'from' attribute
             val userJid = from.split("/").getOrNull(1) ?: from
             val username = userJid.split("@").firstOrNull() ?: "unknown"
             
-            // Extract user info from <data> element if present
-            val dataStart = xml.indexOf("<data")
-            val dataEnd = xml.indexOf("/>", dataStart)
-            val dataXml = if (dataStart != -1 && dataEnd != -1) {
-                xml.substring(dataStart, dataEnd + 2)
-            } else ""
-            
+            // Extract user info from <data> element if present (already extracted above)
             val senderFirstName = extractAttribute(dataXml, "senderFirstName")
             val senderLastName = extractAttribute(dataXml, "senderLastName")
             val photoURL = extractAttribute(dataXml, "photoURL")
             val fullName = extractAttribute(dataXml, "fullName")
             val senderJID = extractAttribute(dataXml, "senderJID")
             
+            // Extract media fields for media message matching (already extracted above)
+            val locationPreview = extractAttribute(dataXml, "locationPreview")
+            val fileName = extractAttribute(dataXml, "fileName")
+            val mimetype = extractAttribute(dataXml, "mimetype")
+            
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
             // Determine user ID
             val userId = senderJID?.split("@")?.firstOrNull() 
-                ?: userJid.split("@").firstOrNull() 
+                ?: userJid.split("@")?.firstOrNull() 
                 ?: username
             
             // Create User object
@@ -525,7 +587,7 @@ class XMPPWebSocketConnection(
             // Check if message is deleted (has <deleted> element)
             val isDeleted = xml.contains("<deleted") || xml.contains("<deleted>")
             
-            // Create Message object
+            // Create Message object with media fields
             val message = Message(
                 id = messageId,
                 user = user,
@@ -536,28 +598,65 @@ class XMPPWebSocketConnection(
                 xmppId = messageId,
                 xmppFrom = from,
                 pending = false, // Real-time messages are not pending
-                isDeleted = isDeleted
+                isDeleted = isDeleted,
+                location = location,
+                locationPreview = locationPreview,
+                fileName = fileName,
+                mimetype = mimetype,
+                isMediafile = isMediafile
             )
             
-            // Add to MessageStore.
-            // This will automatically replace any optimistic pending message
-            // with the same ID (matches web: addRoomMessage logic).
-            com.ethora.chat.core.store.MessageStore.addMessage(roomJid, message)
+            // Add to MessageStore with pending reconciliation
+            // Matches Swift: first try exact ID match, then fallback to content matching
+            // For media messages, also try matching by location/fileName since server might use different ID
+            val wasPending = com.ethora.chat.core.store.MessageStore.addMessage(roomJid, message)
+            if (!wasPending) {
+                // Try content-based matching for all messages (not just media)
+                // This handles cases where server echo has different ID than optimistic message
+                val matchedPending = com.ethora.chat.core.store.MessageStore.updatePendingMessage(roomJid, message)
+                if (matchedPending) {
+                    Log.d(TAG, "✅ Matched pending message via content matching")
+                } else if (hasMedia || body == "media") {
+                    // For media messages, log if no match found
+                    Log.d(TAG, "⚠️ No pending message matched for media message $messageId, message added as new")
+                }
+            } else {
+                Log.d(TAG, "✅ Matched pending message via ID matching")
+            }
             
-            Log.d(TAG, "📨 Parsed real-time message: ID=$messageId, From=$from, Body=${body.take(50)}")
+            Log.d(TAG, "📨 Parsed real-time message: ID=$messageId, From=$from, Body=${body.take(50)}, isMedia=$hasMedia, wasPending=$wasPending")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing real-time message", e)
         }
     }
     
     private fun extractAttribute(xml: String, attr: String): String? {
-        val regex = "$attr=\"([^\"]+)\"".toRegex()
+        val regex = "$attr=['\"]([^'\"]+)['\"]".toRegex()
         return regex.find(xml)?.groupValues?.get(1)
     }
     
     private fun extractElementText(xml: String, element: String): String? {
-        val regex = "<$element[^>]*>([^<]+)</$element>".toRegex()
-        return regex.find(xml)?.groupValues?.get(1)
+        val startTag = "<$element"
+        val startIdx = xml.indexOf(startTag)
+        if (startIdx == -1) return null
+        
+        // Find the end of the start tag (might have attributes)
+        val startTagEnd = xml.indexOf(">", startIdx)
+        if (startTagEnd == -1) return null
+        
+        // Check for self-closing tag
+        if (xml.getOrNull(startTagEnd - 1) == '/') return ""
+        
+        val endTag = "</$element>"
+        val endIdx = xml.indexOf(endTag, startTagEnd)
+        if (endIdx == -1) return null
+        
+        return xml.substring(startTagEnd + 1, endIdx)
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
     }
     
     /**
@@ -755,6 +854,7 @@ class XMPPWebSocketConnection(
      * Send raw XML
      */
     fun sendRaw(xml: String) {
+        com.ethora.chat.core.store.LogStore.send(TAG, "📤 Transmit: ${xml.take(300)}${if (xml.length > 300) "..." else ""}")
         webSocket?.send(xml) ?: run {
             Log.e(TAG, "Cannot send: WebSocket is null")
         }
@@ -827,6 +927,7 @@ class XMPPWebSocketConnection(
         val dataElement = """<data xmlns="wss://xmpp.ethoradev.com:5443/ws" senderFirstName="$escapedFirstName" senderLastName="$escapedLastName" fullName="$escapedFullName" photoURL="$escapedPhotoURL" senderJID="$escapedSenderJID" senderWalletAddress="$escapedWalletAddress" roomJid="$escapedRoomJid" isSystemMessage="false" tokenAmount="0" quickReplies="" notDisplayedValue="" showInChannel="${showInChannel}" isReply="${isReply}" mainMessage="$escapedMainMessage" push="true"/>"""
         
         val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$dataElement<body>$escapedBody</body></message>"""
+        com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMessage() to $fixedRoomJid")
         sendRaw(message)
         Log.d(TAG, "📤 Sent message to $fixedRoomJid: $body (ID: $messageId)")
         Log.d(TAG, "📤 Message XML: ${message.take(500)}")
@@ -871,6 +972,7 @@ class XMPPWebSocketConnection(
         
         // Matches web version: includes from attribute and store hint
         val message = """<message id="$messageId" type="groupchat" from="$fromJid" to="$fixedRoomJid"><body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
+        com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMediaMessage() to $fixedRoomJid")
         sendRaw(message)
         Log.d(TAG, "📤 Sent media message to $fixedRoomJid")
         return true
@@ -878,10 +980,12 @@ class XMPPWebSocketConnection(
     
     /**
      * Send MAM query for message history
-     * Matches web: getHistory.xmpp.ts
-     * Note: Web version uses timestamp (number) for before, not message ID
+     * Matches Swift: SendGetHistory.swift
+     * - When beforeMessageId is null: sends RSM <before/> (empty) to get newest messages
+     * - When beforeMessageId is provided: sends RSM <before>messageId</before> to paginate older messages
+     * Note: Swift uses message ID (Int64) converted from message.id string using Number()
      */
-    suspend fun sendMAMQuery(roomJid: String, max: Int, beforeTimestamp: Long? = null, queryId: String): Boolean {
+    suspend fun sendMAMQuery(roomJid: String, max: Int, beforeMessageId: Long? = null, queryId: String): Boolean {
         if (!isAuthenticated) {
             Log.e(TAG, "Cannot send MAM query: not authenticated")
             return false
@@ -893,19 +997,28 @@ class XMPPWebSocketConnection(
         } else {
             "$roomJid@conference.xmpp.ethoradev.com"
         }
-        
-        // Web version uses timestamp (number) for before element, not message ID
-        // Format: <before>timestamp</before> or <before></before>
-        val beforeElement = if (beforeTimestamp != null && beforeTimestamp > 0) {
-            "<before>$beforeTimestamp</before>"
+
+        // Build RSM <before> element - matches Swift exactly
+        // Swift: before ? xml('before', {}, before.toString()) : xml('before')
+        val beforeStanza = if (beforeMessageId != null && beforeMessageId > 0) {
+            "<before>$beforeMessageId</before>"
         } else {
-            "<before></before>"
+            "<before/>"  // Empty element to request newest messages
         }
-        
-        val mamQuery = """<iq type='set' to='$fixedRoomJid' id='$queryId'><query xmlns='urn:xmpp:mam:2'><set xmlns='http://jabber.org/protocol/rsm'><max>$max</max>$beforeElement</set></query></iq>"""
-        
+
+        val mamQuery = """
+            <iq type='set' to='$fixedRoomJid' id='$queryId'>
+              <query xmlns='urn:xmpp:mam:2' queryid='$queryId'>
+                <set xmlns='http://jabber.org/protocol/rsm'>
+                  <max>$max</max>
+                  $beforeStanza
+                </set>
+              </query>
+            </iq>
+        """.trimIndent()
+
         sendRaw(mamQuery)
-        Log.d(TAG, "📤 Sent MAM query for $fixedRoomJid (max: $max, beforeTimestamp: $beforeTimestamp)")
+        Log.d(TAG, "📤 Sent MAM query for $fixedRoomJid (max=$max, before=$beforeMessageId, queryId=$queryId)")
         return true
     }
     
@@ -1379,8 +1492,21 @@ class XMPPWebSocketConnection(
     }
     
     /**
+     * Send general presence (available)
+     */
+    suspend fun sendGeneralPresence(): Boolean {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot send general presence: not authenticated")
+            return false
+        }
+        
+        val presence = """<presence/>"""
+        sendRaw(presence)
+        return true
+    }
+    
+    /**
      * Send presence in room
-     * Matches web: presenceInRoom.xmpp.ts
      */
     suspend fun sendPresenceInRoom(roomJid: String): Boolean {
         if (!isAuthenticated) {
@@ -1406,7 +1532,6 @@ class XMPPWebSocketConnection(
         
         val presence = """<presence from="$fromJid" to="$fixedRoomJid/$localPart" id="presenceInRoom"><x xmlns="http://jabber.org/protocol/muc"/></presence>"""
         sendRaw(presence)
-        Log.d(TAG, "📤 Sent presence to $fixedRoomJid")
         return true
     }
     

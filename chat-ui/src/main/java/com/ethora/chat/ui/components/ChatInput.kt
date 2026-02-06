@@ -79,9 +79,24 @@ fun ChatInput(
                     }
                 }
                 val mimeType = context.contentResolver.getType(it) ?: "application/octet-stream"
+                
+                // Validate file size (max 50MB)
+                val maxSizeBytes = 50 * 1024 * 1024L // 50MB
+                val fileSize = file.length()
+                
+                if (fileSize > maxSizeBytes) {
+                    // Show error - file too large
+                    android.util.Log.w("ChatInput", "File too large: ${fileSize} bytes (max: $maxSizeBytes)")
+                    // TODO: Show error toast/snackbar
+                    file.delete() // Clean up
+                    return@let
+                }
+                
+                // Validate file type (optional - allow all for now)
                 selectedFile = Pair(file, mimeType)
             } catch (e: Exception) {
                 android.util.Log.e("ChatInput", "Error copying file", e)
+                // TODO: Show error toast/snackbar
             }
         }
     }

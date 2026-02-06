@@ -90,9 +90,10 @@ fun RoomListView(
                 room.createdAt != null -> {
                     // Parse createdAt string to timestamp
                     try {
+                        val createdAt = room.createdAt
                         // Try ISO format first
-                        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).parse(room.createdAt)?.time
-                            ?: java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.getDefault()).parse(room.createdAt)?.time
+                        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).parse(createdAt)?.time
+                            ?: java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.getDefault()).parse(createdAt)?.time
                             ?: 0L
                     } catch (e: Exception) {
                         0L
@@ -102,10 +103,10 @@ fun RoomListView(
             }
         }.thenByDescending { room ->
             // Secondary sort by createdAt if timestamps are equal
-            room.createdAt?.let {
+            room.createdAt?.let { createdAt ->
                 try {
-                    java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).parse(it)?.time
-                        ?: java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.getDefault()).parse(it)?.time
+                    java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).parse(createdAt)?.time
+                        ?: java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.getDefault()).parse(createdAt)?.time
                         ?: 0L
                 } catch (e: Exception) {
                     0L
@@ -427,6 +428,36 @@ private fun RoomListItem(
                                 },
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    
+                    // Pending messages indicator
+                    if (room.pendingMessages > 0) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Row(
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = if (isActive) {
+                                    MaterialTheme.colorScheme.onPrimary
+                                } else {
+                                    MaterialTheme.colorScheme.primary
+                                }
+                            )
+                            Text(
+                                text = "${room.pendingMessages} sending",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontStyle = FontStyle.Italic
+                                ),
+                                color = if (isActive) {
+                                    MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
+                                } else {
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                                }
                             )
                         }
                     }

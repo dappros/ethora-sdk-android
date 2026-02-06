@@ -19,13 +19,44 @@ import androidx.media3.ui.PlayerView
 @Composable
 fun VideoPlayerView(
     videoUrl: String,
+    onLoadingChange: ((Boolean) -> Unit)? = null,
+    onError: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    var isLoading by remember { mutableStateOf(true) }
+    
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
             val mediaItem = MediaItem.fromUri(videoUrl)
             setMediaItem(mediaItem)
+            
+            addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    when (playbackState) {
+                        Player.STATE_READY -> {
+                            isLoading = false
+                            onLoadingChange?.invoke(false)
+                        }
+                        Player.STATE_BUFFERING -> {
+                            isLoading = true
+                            onLoadingChange?.invoke(true)
+                        }
+                        Player.STATE_ENDED -> {
+                            isLoading = false
+                            onLoadingChange?.invoke(false)
+                        }
+                    }
+                }
+                
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    isLoading = false
+                    onLoadingChange?.invoke(false)
+                    onError?.invoke()
+                    android.util.Log.e("VideoPlayerView", "Player error", error)
+                }
+            })
+            
             prepare()
             playWhenReady = false
             repeatMode = Player.REPEAT_MODE_OFF

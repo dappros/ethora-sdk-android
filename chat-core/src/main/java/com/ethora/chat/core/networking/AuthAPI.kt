@@ -176,12 +176,23 @@ object AuthAPIHelper {
         password: String,
         baseUrl: String = AppConfig.defaultBaseURL
     ): LoginResponse {
+        android.util.Log.d("AuthAPIHelper", "🌐 loginWithEmail: $baseUrl/users/login-with-email")
         val api = ApiClient.createService<AuthAPI>(baseUrl)
-        val response = api.loginWithEmail(LoginRequest(email, password))
-        if (response.isSuccessful) {
-            return response.body()!!
-        } else {
-            throw Exception("Login failed: ${response.code()} ${response.message()}")
+        try {
+            val response = api.loginWithEmail(LoginRequest(email, password))
+            if (response.isSuccessful) {
+                val body = response.body()!!
+                android.util.Log.d("AuthAPIHelper", "✅ loginWithEmail success: token=${body.token.take(10)}...")
+                return body
+            } else {
+                val errorBody = response.errorBody()?.string()
+                android.util.Log.e("AuthAPIHelper", "❌ loginWithEmail failed: ${response.code()} ${response.message()}")
+                android.util.Log.e("AuthAPIHelper", "   Error body: $errorBody")
+                throw Exception("Login failed: ${response.code()} ${response.message()}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("AuthAPIHelper", "❌ loginWithEmail exception: ${e.message}", e)
+            throw e
         }
     }
 

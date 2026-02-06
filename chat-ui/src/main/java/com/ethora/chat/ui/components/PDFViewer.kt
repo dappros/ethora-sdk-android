@@ -15,6 +15,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 @Composable
 fun PDFViewer(
     pdfUrl: String,
+    onLoadingChange: ((Boolean) -> Unit)? = null,
+    onError: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     AndroidView(
@@ -30,7 +32,28 @@ fun PDFViewer(
                 settings.allowFileAccess = true
                 settings.allowContentAccess = true
                 
-                webViewClient = WebViewClient()
+                webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                        super.onPageStarted(view, url, favicon)
+                        onLoadingChange?.invoke(true)
+                    }
+                    
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        onLoadingChange?.invoke(false)
+                    }
+                    
+                    override fun onReceivedError(
+                        view: WebView?,
+                        request: android.webkit.WebResourceRequest?,
+                        error: android.webkit.WebResourceError?
+                    ) {
+                        super.onReceivedError(view, request, error)
+                        onLoadingChange?.invoke(false)
+                        onError?.invoke()
+                    }
+                }
+                
                 webChromeClient = WebChromeClient()
                 
                 // Use PDF.js viewer (same as web version)

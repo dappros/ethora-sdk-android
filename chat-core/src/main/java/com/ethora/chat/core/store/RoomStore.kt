@@ -242,6 +242,21 @@ object RoomStore {
     }
     
     /**
+     * Update pending messages count for a room
+     */
+    fun updatePendingCount(roomJid: String, messages: List<com.ethora.chat.core.models.Message>) {
+        val room = getRoomByJid(roomJid)
+        if (room != null) {
+            val pendingCount = messages.count { it.pending == true }
+            if (room.pendingMessages != pendingCount) {
+                val updatedRoom = room.copy(pendingMessages = pendingCount)
+                updateRoom(updatedRoom)
+                android.util.Log.d("RoomStore", "📊 Updated pending count for $roomJid: $pendingCount")
+            }
+        }
+    }
+    
+    /**
      * Calculate and update unread messages count for a room
      * Matches web: unreadMiddleware logic
      */

@@ -6,6 +6,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.List
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -26,6 +29,8 @@ import com.ethora.chat.core.store.ScrollPositionStore
 import com.ethora.chat.core.persistence.ChatPersistenceManager
 import com.ethora.chat.core.persistence.MessageCache
 import com.ethora.chat.core.persistence.ChatDatabase
+import com.ethora.chat.core.persistence.LocalStorage
+import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.service.LogoutService
 import com.ethora.chat.core.xmpp.XMPPClient
 import com.ethora.chat.core.xmpp.XMPPClientDelegate
@@ -59,6 +64,7 @@ class MainActivity : ComponentActivity() {
                     var connectionStatus by remember { mutableStateOf("Initializing...") }
                     var roomsCount by remember { mutableStateOf(0) }
                     var showChat by remember { mutableStateOf(false) }
+                    var selectedTab by remember { mutableStateOf(0) }
 
                     // Initialize and test
                     LaunchedEffect(Unit) {
@@ -78,6 +84,11 @@ class MainActivity : ComponentActivity() {
                             MessageStore.initialize(messageCache)
                             ScrollPositionStore.initialize(this@MainActivity)
                             
+                            // Initialize MessageLoader with LocalStorage for sync
+                            val localStorage = LocalStorage(this@MainActivity)
+                            MessageLoader.initialize(localStorage)
+                            
+                            com.ethora.chat.core.store.LogStore.success(TAG, "✅ Persistence initialized")
                             Log.d(TAG, "✅ Persistence initialized")
                             
                             // Load persisted data
@@ -128,7 +139,7 @@ class MainActivity : ComponentActivity() {
                                 connectionStatus = "Step 1: Logging in..."
                                 Log.d(TAG, "🔐 Step 1: Logging in with email...")
                                 
-                                val loginResponse = AuthAPIHelper.loginWithEmail(email, password)
+                                val loginResponse = AuthAPIHelper.loginWithEmail(email, password, baseUrl = "https://api.ethoradev.com/v1")
                                 
                                 // Save to UserStore
                                 UserStore.setUser(loginResponse)
@@ -320,25 +331,50 @@ class MainActivity : ComponentActivity() {
                     }
 
                     if (showChat) {
-                        // Show chat UI
-                        val config = ChatConfig(
-                            colors = ChatColors(
-                                primary = "#4287f5",
-                                secondary = "#42f5e9"
-                            ),
-                            xmppSettings = XMPPSettings(
-                                devServer = "wss://xmpp.ethoradev.com:5443/ws",
-                                host = "xmpp.ethoradev.com",
-                                conference = "conference.xmpp.ethoradev.com"
-                            ),
-                            baseUrl = "https://api.ethoradev.com/v1",
-                            userLogin = UserLoginConfig(
-                                enabled = true,
-                                user = UserStore.currentUser.value
-                            )
-                        )
-                        
-                        Chat(config = config)
+                        Scaffold(
+                            bottomBar = {
+                                NavigationBar {
+                                    NavigationBarItem(
+                                        selected = selectedTab == 0,
+                                        onClick = { selectedTab = 0 },
+                                        icon = { Icon(Icons.Default.Home, contentDescription = "Chat") },
+                                        label = { Text("Chat") }
+                                    )
+                                    NavigationBarItem(
+                                        selected = selectedTab == 1,
+                                        onClick = { selectedTab = 1 },
+                                        icon = { Icon(Icons.Default.List, contentDescription = "Logs") },
+                                        label = { Text("Logs") }
+                                    )
+                                }
+                            }
+                        ) { padding ->
+                            Box(modifier = Modifier.padding(padding)) {
+                                if (selectedTab == 0) {
+                                    // Show chat UI
+                                    val config = ChatConfig(
+                                        colors = ChatColors(
+                                            primary = "#4287f5",
+                                            secondary = "#42f5e9"
+                                        ),
+                                        xmppSettings = XMPPSettings(
+                                            devServer = "wss://xmpp.ethoradev.com:5443/ws",
+                                            host = "xmpp.ethoradev.com",
+                                            conference = "conference.xmpp.ethoradev.com"
+                                        ),
+                                        baseUrl = "https://api.ethoradev.com/v2",
+                                        userLogin = UserLoginConfig(
+                                            enabled = true,
+                                            user = UserStore.currentUser.value
+                                        )
+                                    )
+                                    
+                                    Chat(config = config)
+                                } else {
+                                    com.ethora.chat.ui.components.LogsView()
+                                }
+                            }
+                        }
                     } else {
                         // Show loading/status screen
                         Column(

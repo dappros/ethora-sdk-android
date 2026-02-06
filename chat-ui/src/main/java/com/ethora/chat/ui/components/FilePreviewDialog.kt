@@ -55,7 +55,10 @@ fun FilePreviewDialog(
                     )
                 }
                 mimeType.startsWith("video/") -> {
-                    // Native video player
+                    // Native video player with loading and error handling
+                    var isLoading by remember { mutableStateOf(true) }
+                    var hasError by remember { mutableStateOf(false) }
+                    
                     Column(modifier = Modifier.fillMaxSize()) {
                         // Header
                         TopAppBar(
@@ -70,15 +73,63 @@ fun FilePreviewDialog(
                             }
                         )
                         
-                        // Video player
-                        VideoPlayerView(
-                            videoUrl = fileUrl,
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        // Video player with loading indicator
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            if (fileUrl.isNotBlank()) {
+                                VideoPlayerView(
+                                    videoUrl = fileUrl,
+                                    onLoadingChange = { isLoading = it },
+                                    onError = { hasError = true },
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                hasError = true
+                            }
+                            
+                            // Loading indicator
+                            if (isLoading && !hasError) {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator()
+                                }
+                            }
+                            
+                            // Error state
+                            if (hasError) {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Warning,
+                                            contentDescription = "Error",
+                                            modifier = Modifier.size(64.dp),
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                        Text(
+                                            text = "Failed to load video",
+                                            style = MaterialTheme.typography.bodyLarge
+                                        )
+                                        TextButton(onClick = onDismiss) {
+                                            Text("Close")
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                mimeType.contains("pdf") -> {
-                    // PDF viewer
+                mimeType.contains("pdf") || mimeType == "application/pdf" -> {
+                    // PDF viewer with loading and error handling
+                    var isLoading by remember { mutableStateOf(true) }
+                    var hasError by remember { mutableStateOf(false) }
+                    
                     Column(modifier = Modifier.fillMaxSize()) {
                         // Header
                         TopAppBar(
@@ -93,11 +144,61 @@ fun FilePreviewDialog(
                             }
                         )
                         
-                        // PDF viewer
-                        PDFViewer(
-                            pdfUrl = fileUrl,
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        // PDF viewer with loading indicator
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            if (fileUrl.isNotBlank()) {
+                                PDFViewer(
+                                    pdfUrl = fileUrl,
+                                    onLoadingChange = { isLoading = it },
+                                    onError = { hasError = true },
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                hasError = true
+                            }
+                            
+                            // Loading indicator
+                            if (isLoading && !hasError) {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator()
+                                }
+                            }
+                            
+                            // Error state
+                            if (hasError) {
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.PictureAsPdf,
+                                            contentDescription = "PDF Error",
+                                            modifier = Modifier.size(64.dp),
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                        Text(
+                                            text = "Failed to load PDF",
+                                            style = MaterialTheme.typography.bodyLarge
+                                        )
+                                        Text(
+                                            text = "Please check your internet connection and try again",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        TextButton(onClick = onDismiss) {
+                                            Text("Close")
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 else -> {
