@@ -43,15 +43,15 @@ import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val TAG = "MainActivity"
-    private var xmppClient: XMPPClient? = null
-    private val scope = CoroutineScope(Dispatchers.Main)
+
+    enum class AppScreen {
+        INITIALIZING,
+        LOGIN,
+        CHAT
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Test credentials (same as Swift version)
-        val email = "yukiraze9@gmail.com"
-        val password = "Qwerty123"
 
         setContent {
             ChatTheme {
@@ -59,366 +59,232 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    var isLoading by remember { mutableStateOf(true) }
+                    var currentScreen by remember { mutableStateOf(AppScreen.INITIALIZING) }
+                    var isLoading by remember { mutableStateOf(false) }
                     var errorMessage by remember { mutableStateOf<String?>(null) }
-                    var connectionStatus by remember { mutableStateOf("Initializing...") }
-                    var roomsCount by remember { mutableStateOf(0) }
-                    var showChat by remember { mutableStateOf(false) }
-                    var selectedTab by remember { mutableStateOf(0) }
+                    
+                    // Persistent states
+                    val scope = rememberCoroutineScope()
+                    var email by remember { mutableStateOf("yukiraze9@gmail.com") }
+                    var password by remember { mutableStateOf("Qwerty123") }
 
-                    // Initialize and test
+                    // Initial Persistence Setup
                     LaunchedEffect(Unit) {
                         try {
-                            Log.d(TAG, "🚀 Starting XMPP Chat Test App")
-                            Log.d(TAG, "📧 Email: $email")
-                            
-                            // Initialize persistence managers
-                            Log.d(TAG, "💾 Initializing persistence...")
+                            // Initialize persistence managers (once per app lifetime)
                             val persistenceManager = ChatPersistenceManager(this@MainActivity)
                             val chatDatabase = ChatDatabase.getDatabase(this@MainActivity)
                             val messageCache = MessageCache(chatDatabase)
                             
-                            // Initialize stores with persistence
                             RoomStore.initialize(persistenceManager)
                             UserStore.initialize(persistenceManager)
                             MessageStore.initialize(messageCache)
                             ScrollPositionStore.initialize(this@MainActivity)
                             
-                            // Initialize MessageLoader with LocalStorage for sync
                             val localStorage = LocalStorage(this@MainActivity)
                             MessageLoader.initialize(localStorage)
                             
-                            com.ethora.chat.core.store.LogStore.success(TAG, "✅ Persistence initialized")
-                            Log.d(TAG, "✅ Persistence initialized")
-                            
-                            // Load persisted data
-                            Log.d(TAG, "📂 Loading persisted data...")
-                            withContext(Dispatchers.IO) {
-                                // Load user
-                                val persistedUser = UserStore.loadUserFromPersistence()
-                                if (persistedUser != null) {
-                                    Log.d(TAG, "📂 Found persisted user, using it")
-                                    withContext(Dispatchers.Main) {
-                                        UserStore.setUser(persistedUser)
-                                        ApiClient.setUserToken(persistedUser.token ?: "")
-                                    }
-                                }
-                                
-                                // Load rooms
-                                val persistedRooms = RoomStore.loadRoomsFromPersistence()
-                                if (persistedRooms.isNotEmpty()) {
-                                    Log.d(TAG, "📂 Found ${persistedRooms.size} persisted rooms")
-                                    withContext(Dispatchers.Main) {
-                                        RoomStore.setRooms(persistedRooms)
-                                        roomsCount = persistedRooms.size
-                                        
-                                        // Load messages for each room from persistence
-                                        persistedRooms.forEach { room ->
-                                            val messages = MessageStore.loadMessagesFromPersistence(room.jid)
-                                            if (messages.isNotEmpty()) {
-                                                MessageStore.setMessagesForRoom(room.jid, messages)
-                                                Log.d(TAG, "📂 Loaded ${messages.size} persisted messages for ${room.jid}")
-                                            }
-                                        }
-                                        
-                                        // Load current room JID
-                                        val currentRoomJid = RoomStore.loadCurrentRoomJidFromPersistence()
-                                        if (currentRoomJid != null) {
-                                            val currentRoom = persistedRooms.firstOrNull { it.jid == currentRoomJid }
-                                            if (currentRoom != null) {
-                                                RoomStore.setCurrentRoom(currentRoom)
-                                            }
-                                        }
-                                    }
-                                }
+                            // Load persisted user if any (but still show login if user wants to test login)
+                            val persistedUser = withContext(Dispatchers.IO) {
+                                UserStore.loadUserFromPersistence()
                             }
                             
-                            // Step 1: Login (only if no persisted user)
-                            val currentUser = UserStore.currentUser.value
-                            if (currentUser == null) {
-                                connectionStatus = "Step 1: Logging in..."
-                                Log.d(TAG, "🔐 Step 1: Logging in with email...")
-                                
-                                val loginResponse = AuthAPIHelper.loginWithEmail(email, password, baseUrl = "https://api.ethoradev.com/v1")
-                                
-                                // Save to UserStore
-                                UserStore.setUser(loginResponse)
-                                
-                                // Set token in API client
-                                ApiClient.setUserToken(loginResponse.token)
-                                
-                                Log.d(TAG, "✅ Login successful! User stored in UserStore")
-                                connectionStatus = "Login successful!"
-                            } else {
-                                Log.d(TAG, "✅ Using persisted user, skipping login")
-                                connectionStatus = "Using persisted user"
+                            if (persistedUser != null) {
+                                UserStore.setUser(persistedUser)
+                                ApiClient.setUserToken(persistedUser.token ?: "")
                             }
                             
-                            // Step 2: Connect XMPP
-                            connectionStatus = "Step 2: Connecting to XMPP server..."
-                            Log.d(TAG, "🔐 Step 2: Connecting to XMPP server...")
-                            
-                            val userForXmpp = UserStore.currentUser.value
-                            if (userForXmpp == null) {
-                                throw Exception("User not found in store")
-                            }
-                            val xmppUsername = userForXmpp.xmppUsername ?: email
-                            val xmppPassword = userForXmpp.xmppPassword ?: password
-                            
-                            val settings = XMPPSettings(
-                                devServer = "wss://xmpp.ethoradev.com:5443/ws",
-                                host = "xmpp.ethoradev.com",
-                                conference = "conference.xmpp.ethoradev.com"
-                            )
-                            
-                            xmppClient = XMPPClient(
-                                username = xmppUsername,
-                                password = xmppPassword,
-                                settings = settings
-                            )
-                            
-                            // Set XMPP client in LogoutService so external apps can logout
-                            LogoutService.setXMPPClient(xmppClient)
-                            
-                            // Set delegate
-                            xmppClient?.setDelegate(object : XMPPClientDelegate {
-                                override fun onXMPPClientConnected(client: XMPPClient) {
-                                    Log.d(TAG, "✅ XMPP Client connected successfully!")
-                                    connectionStatus = "XMPP Connected!"
-                                    scope.launch {
-                                        isLoading = false
-                                        showChat = true
-                                    }
-                                }
-                                
-                                override fun onXMPPClientDisconnected(client: XMPPClient) {
-                                    Log.d(TAG, "❌ XMPP Client disconnected")
-                                    connectionStatus = "XMPP Disconnected"
-                                }
-                                
-                                override fun onMessageReceived(
-                                    client: XMPPClient,
-                                    message: com.ethora.chat.core.models.Message
-                                ) {
-                                    Log.d(TAG, "📨 Received message: ${message.body}")
-                                }
-                                
-                                override fun onStanzaReceived(
-                                    client: XMPPClient,
-                                    stanza: com.ethora.chat.core.xmpp.XMPPStanza
-                                ) {
-                                    // Handle stanza
-                                }
-                                
-                                override fun onStatusChanged(
-                                    client: XMPPClient,
-                                    status: ConnectionStatus
-                                ) {
-                                    Log.d(TAG, "🔄 Connection status changed: ${status.name}")
-                                    connectionStatus = "Status: ${status.name}"
-                                    
-                                    // If XMPP connection fails, still show chat UI (rooms are loaded)
-                                    if (status == ConnectionStatus.ERROR) {
-                                        scope.launch {
-                                            isLoading = false
-                                            showChat = true
-                                            errorMessage = "XMPP connection failed, but you can still view rooms"
-                                        }
-                                    }
-                                }
-                                
-                                override fun onComposingReceived(
-                                    client: XMPPClient,
-                                    roomJid: String,
-                                    isComposing: Boolean,
-                                    composingList: List<String>
-                                ) {
-                                    Log.d(TAG, "📝 Composing received: room=$roomJid, composing=$isComposing, users=$composingList")
-                                    // Update RoomStore with composing state (matches web: setComposing)
-                                    RoomStore.setComposing(roomJid, isComposing, composingList)
-                                }
-                                
-                                override fun onMessageEdited(
-                                    client: XMPPClient,
-                                    roomJid: String,
-                                    messageId: String,
-                                    newText: String
-                                ) {
-                                    Log.d(TAG, "✏️ Message edited received for $roomJid, ID: $messageId, newText: ${newText.take(50)}")
-                                    com.ethora.chat.core.store.MessageStore.editMessage(roomJid, messageId, newText)
-                                }
-                                
-                                override fun onReactionReceived(
-                                    client: XMPPClient,
-                                    roomJid: String,
-                                    messageId: String,
-                                    from: String,
-                                    reactions: List<String>,
-                                    data: Map<String, String>
-                                ) {
-                                    Log.d(TAG, "😀 Reaction received for $roomJid, messageId: $messageId, from: $from, reactions: $reactions")
-                                    com.ethora.chat.core.store.MessageStore.updateReaction(roomJid, messageId, from, reactions, data)
-                                }
-                            })
-                            
-                            // Initialize XMPP client (async)
-                            scope.launch(Dispatchers.IO) {
-                                try {
-                                    xmppClient?.initializeClient()
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "XMPP initialization error: ${e.message}", e)
-                                    errorMessage = "XMPP connection error: ${e.message}"
-                                }
-                            }
-                            
-                            // Step 3: Load rooms (only if not already loaded from persistence)
-                            val existingRooms = RoomStore.rooms.value
-                            if (existingRooms.isEmpty()) {
-                                connectionStatus = "Step 3: Loading rooms..."
-                                Log.d(TAG, "📋 Step 3: Loading rooms from API...")
-                                
-                                scope.launch(Dispatchers.IO) {
-                                    try {
-                                        val rooms = RoomsAPIHelper.getRooms()
-                                        roomsCount = rooms.size
-                                        Log.d(TAG, "✅ Loaded ${rooms.size} rooms!")
-                                        rooms.forEach { room ->
-                                            Log.d(TAG, "   - ${room.title} (${room.jid})")
-                                        }
-                                        connectionStatus = "Loaded ${rooms.size} rooms!"
-                                        
-                                        // Save to RoomStore (will persist automatically)
-                                        withContext(Dispatchers.Main) {
-                                            RoomStore.setRooms(rooms)
-                                            
-                                            // Load persisted messages for each room
-                                            rooms.forEach { room ->
-                                                val messages = MessageStore.loadMessagesFromPersistence(room.jid)
-                                                if (messages.isNotEmpty()) {
-                                                    MessageStore.setMessagesForRoom(room.jid, messages)
-                                                    Log.d(TAG, "📂 Loaded ${messages.size} persisted messages for ${room.jid}")
-                                                }
-                                            }
-                                        }
-                                        
-                                        // Show chat UI after rooms are loaded
-                                        scope.launch(Dispatchers.Main) {
-                                            isLoading = false
-                                            showChat = true
-                                        }
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "❌ Failed to load rooms: ${e.message}", e)
-                                        errorMessage = "Failed to load rooms: ${e.message}"
-                                        scope.launch(Dispatchers.Main) {
-                                            isLoading = false
-                                        }
-                                    }
-                                }
-                            } else {
-                                Log.d(TAG, "✅ Using ${existingRooms.size} persisted rooms")
-                                roomsCount = existingRooms.size
-                                connectionStatus = "Using persisted rooms"
-                                isLoading = false
-                                showChat = true
-                            }
-                            
+                            currentScreen = AppScreen.LOGIN
                         } catch (e: Exception) {
-                            Log.e(TAG, "❌ Error: ${e.message}", e)
-                            errorMessage = e.message
-                            connectionStatus = "Error: ${e.message}"
+                            Log.e(TAG, "Initialization failed", e)
+                            errorMessage = "Initialization failed: ${e.message}"
+                        }
+                    }
+
+                    // Setup logout callback to return to login screen
+                    LaunchedEffect(Unit) {
+                        LogoutService.setOnLogoutCallback {
+                            currentScreen = AppScreen.LOGIN
                             isLoading = false
                         }
                     }
 
-                    if (showChat) {
-                        Scaffold(
-                            bottomBar = {
-                                NavigationBar {
-                                    NavigationBarItem(
-                                        selected = selectedTab == 0,
-                                        onClick = { selectedTab = 0 },
-                                        icon = { Icon(Icons.Default.Home, contentDescription = "Chat") },
-                                        label = { Text("Chat") }
-                                    )
-                                    NavigationBarItem(
-                                        selected = selectedTab == 1,
-                                        onClick = { selectedTab = 1 },
-                                        icon = { Icon(Icons.Default.List, contentDescription = "Logs") },
-                                        label = { Text("Logs") }
-                                    )
-                                }
-                            }
-                        ) { padding ->
-                            Box(modifier = Modifier.padding(padding)) {
-                                if (selectedTab == 0) {
-                                    // Show chat UI
-                                    val config = ChatConfig(
-                                        colors = ChatColors(
-                                            primary = "#4287f5",
-                                            secondary = "#42f5e9"
-                                        ),
-                                        xmppSettings = XMPPSettings(
-                                            devServer = "wss://xmpp.ethoradev.com:5443/ws",
-                                            host = "xmpp.ethoradev.com",
-                                            conference = "conference.xmpp.ethoradev.com"
-                                        ),
-                                        baseUrl = "https://api.ethoradev.com/v2",
-                                        userLogin = UserLoginConfig(
-                                            enabled = true,
-                                            user = UserStore.currentUser.value
-                                        )
-                                    )
-                                    
-                                    Chat(config = config)
-                                } else {
-                                    com.ethora.chat.ui.components.LogsView()
-                                }
-                            }
+                    when (currentScreen) {
+                        AppScreen.INITIALIZING -> {
+                            LoadingScreen("Initializing persistence...")
                         }
-                    } else {
-                        // Show loading/status screen
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            if (isLoading) {
-                                CircularProgressIndicator()
-                                Spacer(modifier = Modifier.height(16.dp))
-                            }
-                            
-                            Text(
-                                text = connectionStatus,
-                                style = MaterialTheme.typography.titleMedium
+                        AppScreen.LOGIN -> {
+                            LoginScreen(
+                                email = email,
+                                password = password,
+                                isLoading = isLoading,
+                                errorMessage = errorMessage,
+                                onEmailChange = { email = it },
+                                onPasswordChange = { password = it },
+                                onLogin = {
+                                    isLoading = true
+                                    errorMessage = null
+                                    scope.launch {
+                                        try {
+                                            val response = withContext(Dispatchers.IO) {
+                                                AuthAPIHelper.loginWithEmail(email, password, baseUrl = "https://api.ethoradev.com/v1")
+                                            }
+                                            UserStore.setUser(response)
+                                            ApiClient.setUserToken(response.token)
+                                            currentScreen = AppScreen.CHAT
+                                        } catch (e: Exception) {
+                                            Log.e(TAG, "Login failed", e)
+                                            errorMessage = "Login failed: ${e.message}"
+                                        } finally {
+                                            isLoading = false
+                                        }
+                                    }
+                                }
                             )
-                            
-                            if (roomsCount > 0) {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = "Rooms loaded: $roomsCount",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                            }
-                            
-                            errorMessage?.let { error ->
-                                Spacer(modifier = Modifier.height(16.dp))
-                                Text(
-                                    text = error,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                            }
+                        }
+                        AppScreen.CHAT -> {
+                            ChatScreen(
+                                onLogout = {
+                                    LogoutService.performLogout()
+                                }
+                            )
                         }
                     }
                 }
             }
         }
     }
+}
 
-    override fun onDestroy() {
-        super.onDestroy()
-        xmppClient?.cleanup()
+@Composable
+fun LoadingScreen(message: String) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            CircularProgressIndicator()
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(text = message, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LoginScreen(
+    email: String,
+    password: String,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onEmailChange: (String) -> Unit,
+    onPasswordChange: (String) -> Unit,
+    onLogin: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(text = "Ethora Chat Test App", style = MaterialTheme.typography.headlineMedium)
+        Spacer(modifier = Modifier.height(32.dp))
+        
+        OutlinedTextField(
+            value = email,
+            onValueChange = onEmailChange,
+            label = { Text("Email") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isLoading
+        )
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        OutlinedTextField(
+            value = password,
+            onValueChange = onPasswordChange,
+            label = { Text("Password") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isLoading
+        )
+        
+        Spacer(modifier = Modifier.height(24.dp))
+        
+        if (isLoading) {
+            CircularProgressIndicator()
+        } else {
+            Button(
+                onClick = onLogin,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Login")
+            }
+        }
+        
+        errorMessage?.let {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(text = it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ChatScreen(onLogout: () -> Unit) {
+    var selectedTab by remember { mutableStateOf(0) }
+    
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Ethora Chat") },
+                actions = {
+                    Button(onClick = onLogout) {
+                        Text("Logout")
+                    }
+                }
+            )
+        },
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    selected = selectedTab == 0,
+                    onClick = { selectedTab = 0 },
+                    icon = { Icon(Icons.Default.Home, contentDescription = "Chat") },
+                    label = { Text("Chat") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 1,
+                    onClick = { selectedTab = 1 },
+                    icon = { Icon(Icons.Default.List, contentDescription = "Logs") },
+                    label = { Text("Logs") }
+                )
+            }
+        }
+    ) { padding ->
+        Box(modifier = Modifier.padding(padding)) {
+            if (selectedTab == 0) {
+                // Main Chat component from chat-ui
+                val config = ChatConfig(
+                    disableHeader = false,
+                    disableRooms = false,
+                    disableMedia = true,
+                    newArch = true,
+                    disableProfilesInteractions = true,
+                    baseUrl = "https://api.ethoradev.com/v1",
+                    xmppSettings = XMPPSettings(
+                        devServer = "wss://xmpp.ethoradev.com:5443/ws",
+                        host = "xmpp.ethoradev.com",
+                        conference = "conference.xmpp.ethoradev.com"
+                    ),
+                    enableRoomsRetry = com.ethora.chat.core.config.EnableRoomsRetryConfig(
+                        enabled = true,
+                        helperText = "Initializing room"
+                    )
+                )
+                
+                Chat(config = config)
+            } else {
+                com.ethora.chat.ui.components.LogsView()
+            }
+        }
+    }
+}
+

@@ -139,11 +139,11 @@ data class RefreshTokenResponse(
  * File upload response
  */
 data class FileUploadResponse(
-    val data: FileUploadData
+    val data: FileUploadData?
 )
 
 data class FileUploadData(
-    val results: List<FileUploadResult>
+    val results: List<FileUploadResult>?
 )
 
 data class FileUploadResult(
@@ -257,7 +257,12 @@ object AuthAPIHelper {
             
             val response = api.uploadFile("Bearer $token", multipartBody)
             if (response.isSuccessful && response.body() != null) {
-                response.body()!!.data.results.firstOrNull()
+                val body = response.body()!!
+                val result = body.data?.results?.firstOrNull()
+                if (result == null) {
+                   android.util.Log.e("AuthAPIHelper", "File upload succeeded but no results found or data is null.")
+                }
+                result
             } else {
                 android.util.Log.e("AuthAPIHelper", "File upload failed: ${response.code()} ${response.message()}")
                 null

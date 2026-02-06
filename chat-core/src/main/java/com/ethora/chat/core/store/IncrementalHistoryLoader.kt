@@ -76,7 +76,7 @@ object IncrementalHistoryLoader {
                         
                         while (!isMessageFound && counter < maxFetchAttempts) {
                             val lastMessageId = if (counter > 0) {
-                                currentJidNewMessages.firstOrNull()?.id?.toLongOrNull()
+                                currentJidNewMessages.firstOrNull()?.id
                             } else {
                                 null
                             }

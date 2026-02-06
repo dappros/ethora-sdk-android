@@ -68,9 +68,6 @@ object MessageLoader {
         syncInProgress = true
         
         try {
-            RoomsPresenceInitializer.initRoomsPresence(xmppClient, rooms)
-            delay(500)
-            
             val roomsToLoad = rooms.filter { room ->
                 val existingMessages = MessageStore.messages.value[room.jid] ?: emptyList()
                 existingMessages.isEmpty()
@@ -91,40 +88,55 @@ object MessageLoader {
             } else {
                 roomsToLoad
             }
-            
-            if (activeRoomJid != null && prioritizedRooms.isNotEmpty() && prioritizedRooms[0].jid == activeRoomJid) {
-                val activeRoom = prioritizedRooms[0]
-                try {
-                    val history = xmppClient.getHistory(activeRoom.jid, max = messagesPerRoom, beforeMessageId = null)
-                    if (history.isNotEmpty()) {
-                        MessageStore.addMessages(activeRoom.jid, history)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error loading messages for active room ${activeRoom.jid}", e)
-                }
-            }
-            
-            val remainingRooms = if (activeRoomJid != null && prioritizedRooms.isNotEmpty() && prioritizedRooms[0].jid == activeRoomJid) {
-                prioritizedRooms.drop(1)
-            } else {
-                prioritizedRooms
-            }
-            
-            scope.launch {
-                for ((index, room) in remainingRooms.withIndex()) {
-                    try {
-                        if (index > 0) {
-                            delay(50)
+
+            Log.d(TAG, "🚀 Starting batched history load for ${prioritizedRooms.size} rooms")
+
+            // Process rooms in batches of 5 (match web/requested pattern)
+            // For each room: send presence -> delay 100ms -> request history
+            var processedIndex = 0
+            while (processedIndex < prioritizedRooms.size) {
+                val currentBatch = prioritizedRooms.slice(
+                    processedIndex until minOf(processedIndex + batchSize, prioritizedRooms.size)
+                )
+                
+                Log.d(TAG, "📦 Processing batch ${processedIndex / batchSize + 1} (${currentBatch.size} rooms)")
+                
+                coroutineScope {
+                    currentBatch.map { room ->
+                        async {
+                            try {
+                                // 1. Send Presence
+                                if (xmppClient.isFullyConnected()) {
+                                    Log.d(TAG, "  📍 Sending presence to ${room.jid}")
+                                    xmppClient.sendPresenceInRoom(room.jid)
+                                    // 2. Wait 100ms (as requested)
+                                    delay(100)
+                                }
+                                
+                                // 3. Request History
+                                Log.d(TAG, "  📜 Requesting history for ${room.jid}")
+                                val history = xmppClient.getHistory(room.jid, max = messagesPerRoom, beforeMessageId = null)
+                                if (history.isNotEmpty()) {
+                                    Log.d(TAG, "  ✅ Received ${history.size} messages for ${room.jid}")
+                                    MessageStore.addMessages(room.jid, history)
+                                } else {
+                                    Log.d(TAG, "  ℹ️ No history found for ${room.jid}")
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error loading messages for room ${room.jid}", e)
+                            }
+                            Unit
                         }
-                        xmppClient.getHistory(room.jid, max = messagesPerRoom, beforeMessageId = null)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error requesting history for room ${room.jid}", e)
-                    }
+                    }.awaitAll()
+                }
+                
+                processedIndex += batchSize
+                if (processedIndex < prioritizedRooms.size) {
+                    delay(250) // Small delay between batches
                 }
             }
 
+            Log.d(TAG, "🏁 Finished batched history load")
             hasSyncedHistory = true
             
             localStorage?.let { storage ->

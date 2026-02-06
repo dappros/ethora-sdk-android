@@ -264,7 +264,7 @@ class ChatRoomViewModel(
                     }
                     
                     if (undefinedTextCount > 0 && initialHistory.isNotEmpty()) {
-                        val firstMessageId = initialHistory.firstOrNull()?.id?.toLongOrNull()
+                        val firstMessageId = initialHistory.firstOrNull()?.id
                         
                         if (firstMessageId != null) {
                             val additionalHistory = client.getHistory(
@@ -377,31 +377,18 @@ class ChatRoomViewModel(
                 // In reverse layout, first message in list is the oldest (at "top")
                 // Get the first message (oldest) for pagination, skipping delimiter-new
                 // Matches web: firstMessage?.id === 'delimiter-new' ? secondMessage?.id : firstMessage?.id
-                val oldestMessage = currentMessages.firstOrNull { it.id != "delimiter-new" } 
-                    ?: currentMessages.firstOrNull()
+                val oldestMessage = currentMessages.firstOrNull { it.id != "delimiter-new" }
+                
                 if (oldestMessage == null) {
-                    android.util.Log.d("ChatRoomViewModel", "No oldest message found")
+                    android.util.Log.d("ChatRoomViewModel", "No valid oldest message found for pagination")
                     isLoadingMoreInProgress = false
                     _isLoadingMore.value = false
                     return@launch
                 }
                 
-                // Convert message ID to Long for pagination (matches Swift: Number(firstMessageId))
-                // Matches web: numericFirstId = Number(firstMessageId)
-                val beforeMessageId = try {
-                    oldestMessage.id.toLongOrNull()
-                } catch (e: Exception) {
-                    null
-                }
+                val beforeMessageId = oldestMessage.id // Use the ID directly as string
                 
-                if (beforeMessageId == null || beforeMessageId <= 0) {
-                    android.util.Log.w("ChatRoomViewModel", "Cannot paginate: message ID '${oldestMessage.id}' is not numeric")
-                    isLoadingMoreInProgress = false
-                    _isLoadingMore.value = false
-                    return@launch
-                }
-                
-                android.util.Log.d("ChatRoomViewModel", "Loading more messages before message ID: $beforeMessageId (oldest message: ${oldestMessage.id})")
+                android.util.Log.d("ChatRoomViewModel", "Loading more messages before message ID: $beforeMessageId")
                 
                 xmppClient?.let { client ->
                     val history = client.getHistory(room.jid, max = 30, beforeMessageId = beforeMessageId)
@@ -520,17 +507,6 @@ class ChatRoomViewModel(
                 
                 if (uploadResult == null) {
                     android.util.Log.e("ChatRoomViewModel", "File upload failed")
-                    
-                    // Retry logic (max 2 retries)
-                    if (retryCount < 2) {
-                        android.util.Log.d("ChatRoomViewModel", "Retrying upload in 2 seconds...")
-                        kotlinx.coroutines.delay(2000)
-                        sendMedia(file, mimeType, retryCount + 1)
-                        return@launch
-                    }
-                    
-                    // Max retries reached, remove optimistic message
-                    android.util.Log.e("ChatRoomViewModel", "Max retries reached, removing failed message")
                     MessageStore.removeMessage(room.jid, messageId)
                     return@launch
                 }

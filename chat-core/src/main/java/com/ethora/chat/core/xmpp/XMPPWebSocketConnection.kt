@@ -994,7 +994,7 @@ class XMPPWebSocketConnection(
      * - When beforeMessageId is provided: sends RSM <before>messageId</before> to paginate older messages
      * Note: Swift uses message ID (Int64) converted from message.id string using Number()
      */
-    suspend fun sendMAMQuery(roomJid: String, max: Int, beforeMessageId: Long? = null, queryId: String): Boolean {
+    suspend fun sendMAMQuery(roomJid: String, max: Int, beforeMessageId: String? = null, queryId: String): Boolean {
         if (!isAuthenticated) {
             Log.e(TAG, "Cannot send MAM query: not authenticated")
             return false
@@ -1007,9 +1007,10 @@ class XMPPWebSocketConnection(
             "$roomJid@conference.xmpp.ethoradev.com"
         }
 
-        // Build RSM <before> element - matches Swift exactly
-        // Swift: before ? xml('before', {}, before.toString()) : xml('before')
-        val beforeStanza = if (beforeMessageId != null && beforeMessageId > 0) {
+        // Build RSM <before> element - matches Swift/Web logic
+        // If beforeMessageId is null or empty, send <before/> to get newest messages.
+        // Otherwise, send <before>ID</before> to get older messages.
+        val beforeStanza = if (!beforeMessageId.isNullOrBlank()) {
             "<before>$beforeMessageId</before>"
         } else {
             "<before/>"  // Empty element to request newest messages

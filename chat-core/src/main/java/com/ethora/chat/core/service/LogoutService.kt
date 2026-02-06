@@ -133,10 +133,13 @@ object LogoutService {
                     }
                 }
                 
-                // 4. Stop token refresh
+                // 4. Clear ApiClient user token (Fixes relogin 400 error)
+                com.ethora.chat.core.networking.ApiClient.setUserToken(null)
+                
+                // 5. Stop token refresh
                 TokenManager.stopAutoRefresh()
                 
-                // 5. Reset XMPP client reference
+                // 6. Reset XMPP client reference
                 xmppClient = null
                 
                 Log.d(TAG, "✅ Logout completed successfully")

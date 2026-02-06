@@ -178,7 +178,6 @@ fun ChatRoomView(
     
     // Scroll position restoration
     // Save scroll position before loading older messages, restore after loading
-    var savedScrollParams by remember { mutableStateOf<Pair<Int, Int>?>(null) } // (firstVisibleItemIndex, totalItemsCount)
     
     // Detect when user scrolls near the visual top (older messages) using pixel-based detection
     // User wants: when scroll position reaches 1050px (150px from top of 1200px area), trigger loading
@@ -187,76 +186,57 @@ fun ChatRoomView(
     // Use snapshotFlow to observe scroll changes more reliably - don't restart on state changes
     // In reverseLayout: index 0 = newest (bottom), higher indices = older (top)
     // Trigger when scrolling up and reaching near the top (oldest messages)
-    LaunchedEffect(Unit) {
+    // Scroll listener for loading older messages
+    LaunchedEffect(listState) {
         snapshotFlow { 
-            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+            val layoutInfo = listState.layoutInfo
+            val totalItems = layoutInfo.totalItemsCount
+            val visibleItems = layoutInfo.visibleItemsInfo
+            
+            if (totalItems == 0 || visibleItems.isEmpty()) {
+                Triple(0, 0, 0)
+            } else {
+                val topVisibleItemIndex = visibleItems.lastOrNull()?.index ?: 0
+                Triple(topVisibleItemIndex, totalItems, listState.firstVisibleItemScrollOffset)
+            }
         }
-        .collect { (firstIndex, scrollOffset) ->
-            // Read current state values inside collect to avoid restarting the flow
+        .collect { (topVisibleItemIndex, totalItems, _) ->
+            if (totalItems == 0) return@collect
+            
             val currentIsLoadingMore = isLoadingMore
             val currentIsLoading = isLoading
             val currentHasMore = hasMoreMessages
-            val currentMessagesSize = messages.size
             
-            val layoutInfo = listState.layoutInfo
-            val totalItems = layoutInfo.totalItemsCount
-            if (totalItems == 0 || currentMessagesSize == 0) return@collect
-
-            // In reverseLayout: when firstIndex is close to totalItems - 1, we're near the top (oldest messages)
-            // Match Swift: triggers when scrollTop < 150px (small scroll threshold)
-            // Use a threshold of 5 items from the top to trigger loading (more aggressive)
+            // Trigger when top visible item is within 5 items of total history
             val itemThreshold = 5
             val topItemThreshold = (totalItems - itemThreshold).coerceAtLeast(0)
-            val nearTopByItems = firstIndex >= topItemThreshold
-            
-            // Also check if scroll offset is small (near top of scrollable area)
-            // Match Swift: scrollTop < 150px threshold (converted to dp: ~150dp)
-            // Match web: scrollTop < 150
-            val scrollThreshold = 150 // Match web's 150px threshold for small scroll
-            val nearTopByScroll = scrollOffset < scrollThreshold
-            
-            val nearTop = nearTopByItems || nearTopByScroll
+            val nearTop = topVisibleItemIndex >= topItemThreshold
 
-            android.util.Log.d(
-                "ChatRoomView",
-                " Scroll: firstIndex=$firstIndex, total=$totalItems, scrollOffset=$scrollOffset, topItemThreshold=$topItemThreshold, nearTopByItems=$nearTopByItems, nearTopByScroll=$nearTopByScroll, nearTop=$nearTop, isLoadingMore=$currentIsLoadingMore, isLoading=$currentIsLoading, hasMore=$currentHasMore"
-            )
+            if (nearTop) {
+                android.util.Log.d(
+                    "ChatRoomView",
+                    "📜 Scroll logic: topVisibleItemIndex=$topVisibleItemIndex, total=$totalItems"
+                )
+            }
 
-            // Debounce: only trigger if at least 200ms have passed since last trigger
             val now = System.currentTimeMillis()
             val shouldTrigger = nearTop && 
-                              !currentIsLoadingMore && 
-                              !currentIsLoading && 
-                              currentHasMore &&
-                              (now - lastLoadTrigger) > 200
+                               !currentIsLoadingMore && 
+                               !currentIsLoading && 
+                               currentHasMore &&
+                               (now - lastLoadTrigger) > 500
 
             if (shouldTrigger) {
-                savedScrollParams = Pair(firstIndex, totalItems)
                 lastLoadTrigger = now
+                android.util.Log.i("ChatRoomView", "🚀 Triggering loadMoreMessages() at totalItems=$totalItems")
                 viewModel.loadMoreMessages()
             }
         }
     }
     
-    LaunchedEffect(messages.size, isLoadingMore) {
-        if (savedScrollParams != null && !isLoadingMore && messages.isNotEmpty()) {
-            val (savedIndex, savedTotal) = savedScrollParams!!
-            val currentTotal = listState.layoutInfo.totalItemsCount
-            
-            if (currentTotal > savedTotal) {
-                val itemsAdded = currentTotal - savedTotal
-                val newIndex = savedIndex + itemsAdded
-                
-                kotlinx.coroutines.delay(100)
-                
-                coroutineScope.launch {
-                    listState.scrollToItem(newIndex.coerceAtMost(currentTotal - 1))
-                }
-                
-                savedScrollParams = null
-            }
-        }
-    }
+
+    // Get chat config
+    val config by com.ethora.chat.core.store.ChatStore.config.collectAsState()
 
     Column(modifier = modifier.fillMaxSize()) {
         // Show user profile screen if user is selected
@@ -282,18 +262,20 @@ fun ChatRoomView(
                 onBack = { showChatInfo = false }
             )
         } else {
-            // Header
-            ChatRoomHeader(
-                room = room,
-                onBack = {
-                    // Save scroll position before navigating back
-                    val currentIndex = listState.firstVisibleItemIndex
-                    ScrollPositionStore.saveScrollPosition(room.jid, currentIndex)
-                    android.util.Log.d("ChatRoomView", "Saved scroll position on back: $currentIndex")
-                    onBack()
-                },
-                onInfoClick = { showChatInfo = true }
-            )
+            // Header (only if not disabled)
+            if (config?.disableHeader != true) {
+                ChatRoomHeader(
+                    room = room,
+                    onBack = {
+                        // Save scroll position before navigating back
+                        val currentIndex = listState.firstVisibleItemIndex
+                        ScrollPositionStore.saveScrollPosition(room.jid, currentIndex)
+                        android.util.Log.d("ChatRoomView", "Saved scroll position on back: $currentIndex")
+                        onBack()
+                    },
+                    onInfoClick = { showChatInfo = true }
+                )
+            }
         
         // Messages list
         Box(modifier = Modifier.weight(1f)) {
@@ -588,7 +570,9 @@ fun ChatRoomView(
             TypingIndicator(users = composingUsers)
         }
         
-        // Input
+        // Input (disable media if config says so)
+        val disableMedia = config?.disableMedia == true
+        
         ChatInput(
             onSendMessage = { text ->
                 if (editMessageId != null) {
@@ -603,7 +587,7 @@ fun ChatRoomView(
                 // Stop typing when message is sent
                 viewModel.sendStopTyping()
             },
-            onSendMedia = { file, mimeType ->
+            onSendMedia = if (disableMedia) null else { file, mimeType ->
                 viewModel.sendMedia(file, mimeType)
                 // Stop typing when media is sent
                 viewModel.sendStopTyping()

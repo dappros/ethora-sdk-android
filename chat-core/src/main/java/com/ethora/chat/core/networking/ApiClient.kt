@@ -57,17 +57,24 @@ object ApiClient {
 
             val authInterceptor = Interceptor { chain ->
                 val originalRequest = chain.request()
-                val newRequest = originalRequest.newBuilder()
+                val requestUrl = originalRequest.url.toString()
+                
+                val builder = originalRequest.newBuilder()
                     .header("Authorization", appToken)
-                    .apply {
-                        userToken?.let {
-                            header("Authorization", it)
-                        }
-                    }
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
-                    .build()
-                chain.proceed(newRequest)
+                
+                // Don't add user token for login or sign-up endpoints
+                val isAuthEndpoint = requestUrl.contains("users/login-with-email") || 
+                                   requestUrl.contains("users/sign-up-with-email")
+                                   
+                if (!isAuthEndpoint) {
+                    userToken?.let {
+                        builder.header("Authorization", it)
+                    }
+                }
+                
+                chain.proceed(builder.build())
             }
 
             val client = OkHttpClient.Builder()

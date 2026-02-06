@@ -153,15 +153,19 @@ fun Chat(
             // No rooms loaded yet, load them
             kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
                 try {
+                    RoomStore.setLoading(true)
                     val rooms = RoomsAPIHelper.getRooms()
                     RoomStore.setRooms(rooms)
                     android.util.Log.d("EthoraChat", "✅ Loaded ${rooms.size} rooms globally")
                 } catch (e: Exception) {
                     android.util.Log.e("EthoraChat", "❌ Failed to load rooms", e)
+                } finally {
+                    RoomStore.setLoading(false)
                 }
             }
         } else if (existingRooms.isNotEmpty()) {
             android.util.Log.d("EthoraChat", "⏭️ Rooms already loaded (${existingRooms.size} rooms), skipping API request")
+            RoomStore.setLoading(false)
         }
     }
     

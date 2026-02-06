@@ -92,7 +92,7 @@ class MessagePriorityQueue(
                         val beforeMessageId = if (room.messageCount == 0) {
                             null  // Get latest messages
                         } else {
-                            room.lastMessageId?.toLongOrNull()  // Paginate older messages
+                            room.lastMessageId  // Paginate older messages
                         }
                         
                         val newMessages = xmppClient?.getHistory(

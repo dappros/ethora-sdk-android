@@ -437,7 +437,7 @@ class XMPPClient(
      * - When beforeMessageId is provided: requests older messages before that ID
      * Note: Swift uses message ID (Int64) converted from message.id string using Number()
      */
-    suspend fun getHistory(roomJID: String, max: Int = 30, beforeMessageId: Long? = null): List<Message> {
+    suspend fun getHistory(roomJID: String, max: Int = 30, beforeMessageId: String? = null): List<Message> {
         return try {
             if (!isFullyConnected()) {
                 Log.e(TAG, "Cannot get history: not fully connected")

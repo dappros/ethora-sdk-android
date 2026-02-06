@@ -88,25 +88,23 @@ fun RoomListView(
                 room.lastMessageTimestamp != null -> room.lastMessageTimestamp!!
                 room.lastMessage?.date != null -> room.lastMessage!!.date!!.time
                 room.createdAt != null -> {
-                    // Parse createdAt string to timestamp
                     try {
-                        val createdAt = room.createdAt
-                        // Try ISO format first
-                        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).parse(createdAt)?.time
-                            ?: java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.getDefault()).parse(createdAt)?.time
+                        val createdAtStr = room.createdAt!!
+                        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.getDefault()).parse(createdAtStr)?.time
+                            ?: java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.getDefault()).parse(createdAtStr)?.time
                             ?: 0L
                     } catch (e: Exception) {
                         0L
                     }
                 }
-                else -> 0L // Rooms without messages go to bottom
+                else -> 0L
             }
         }.thenByDescending { room ->
             // Secondary sort by createdAt if timestamps are equal
-            room.createdAt?.let { createdAt ->
+            room.createdAt?.let { createdAtStr ->
                 try {
-                    java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).parse(createdAt)?.time
-                        ?: java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.getDefault()).parse(createdAt)?.time
+                    java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.getDefault()).parse(createdAtStr)?.time
+                        ?: java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.getDefault()).parse(createdAtStr)?.time
                         ?: 0L
                 } catch (e: Exception) {
                     0L

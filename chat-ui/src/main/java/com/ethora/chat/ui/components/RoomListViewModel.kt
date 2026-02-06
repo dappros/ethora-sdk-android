@@ -22,9 +22,7 @@ class RoomListViewModel : ViewModel() {
     private val TAG = "RoomListViewModel"
     
     val rooms: StateFlow<List<Room>> = RoomStore.rooms
-
-    private val _isLoading = MutableStateFlow(false)
-    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+    val isLoading: StateFlow<Boolean> = RoomStore.isLoading
     
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
@@ -47,7 +45,7 @@ class RoomListViewModel : ViewModel() {
      */
     fun loadRooms() {
         viewModelScope.launch {
-            _isLoading.value = true
+            RoomStore.setLoading(true)
             _error.value = null
             try {
                 val roomsList = RoomsAPIHelper.getRooms()
@@ -57,7 +55,7 @@ class RoomListViewModel : ViewModel() {
                 Log.e(TAG, "Failed to load rooms", e)
                 _error.value = "Failed to load chats: ${e.message}"
             } finally {
-                _isLoading.value = false
+                RoomStore.setLoading(false)
             }
         }
     }
@@ -73,7 +71,7 @@ class RoomListViewModel : ViewModel() {
         members: List<String>? = null
     ) {
         viewModelScope.launch {
-            _isLoading.value = true
+            RoomStore.setLoading(true)
             _error.value = null
             _toastMessage.value = "Room is being created..."
             
@@ -135,12 +133,13 @@ class RoomListViewModel : ViewModel() {
                 
                 _toastMessage.value = "Room created successfully!"
                 Log.d(TAG, "Room created successfully: ${newRoom.id}")
+                
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to create room", e)
                 _error.value = "Failed to create chat: ${e.message}"
                 _toastMessage.value = "Failed to create chat: ${e.message}"
             } finally {
-                _isLoading.value = false
+                RoomStore.setLoading(false)
             }
         }
     }
