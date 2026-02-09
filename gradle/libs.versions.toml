@@ -1,10 +1,10 @@
 [versions]
 kotlin = "1.9.22"
-androidGradlePlugin = "8.2.0"
+androidGradlePlugin = "8.5.2"
 compileSdk = "34"
 minSdk = "24"
 targetSdk = "34"
-jvmTarget = "17"
+jvmTarget = "21"
 versionCode = "1"
 versionName = "1.0.0"
 
