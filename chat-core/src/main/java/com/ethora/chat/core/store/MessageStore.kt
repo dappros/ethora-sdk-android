@@ -103,12 +103,16 @@ object MessageStore {
     }
 
     /**
-     * Set messages for room
+     * Set messages for room.
+     * Updates room's last message in RoomStore so chat list shows preview on first load.
      */
     fun setMessagesForRoom(roomJid: String, messages: List<Message>) {
         val currentMessages = _messages.value.toMutableMap()
         currentMessages[roomJid] = messages
         _messages.value = currentMessages
+        if (messages.isNotEmpty()) {
+            updateRoomLastMessage(roomJid, messages)
+        }
     }
 
     /**

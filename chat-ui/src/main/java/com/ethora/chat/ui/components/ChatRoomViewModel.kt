@@ -46,6 +46,9 @@ class ChatRoomViewModel(
     private val _hasMoreMessages = MutableStateFlow(true)
     val hasMoreMessages: StateFlow<Boolean> = _hasMoreMessages.asStateFlow()
 
+    private val _scrollRestoreAnchor = MutableStateFlow<String?>(null)
+    val scrollRestoreAnchor: StateFlow<String?> = _scrollRestoreAnchor.asStateFlow()
+
     private val _composingUsers = MutableStateFlow<List<String>>(emptyList())
     val composingUsers: StateFlow<List<String>> = _composingUsers.asStateFlow()
     
@@ -62,8 +65,8 @@ class ChatRoomViewModel(
             MessageStore.messages
                 .map { 
                     val roomMessages = it[room.jid] ?: emptyList()
-                    // Re-sort descending: newest at index 0 for LazyColumn(reverseLayout=true)
-                    val sorted = roomMessages.sortedByDescending { it.timestamp ?: it.date.time }
+                    // Sort ascending: oldest at index 0 for normal LazyColumn
+                    val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
                     android.util.Log.d("ChatRoomViewModel", "Store updated, messages for ${room.jid}: ${roomMessages.size} (displayed: ${sorted.size})")
                     sorted
                 }
@@ -96,8 +99,8 @@ class ChatRoomViewModel(
                 if (persistedMessages.isNotEmpty()) {
                     // Load from persistence
                     MessageStore.setMessagesForRoom(room.jid, persistedMessages)
-                    _messages.value = persistedMessages.sortedByDescending { it.timestamp ?: it.date.time }
-                    android.util.Log.d("ChatRoomViewModel", "Loaded ${persistedMessages.size} messages from persistence (sorted newest-first)")
+                    _messages.value = persistedMessages.sortedBy { it.timestamp ?: it.date.time }
+                    android.util.Log.d("ChatRoomViewModel", "Loaded ${persistedMessages.size} messages from persistence (sorted oldest-first)")
                 } else {
                     // Avoid racing the global MessageLoader (which runs shortly after rooms load).
                     // If global sync is in progress (or hasn't finished yet), wait briefly for it to populate the store,
@@ -112,8 +115,8 @@ class ChatRoomViewModel(
                         kotlinx.coroutines.delay(1500)
                         val afterWaitMessages = MessageStore.messages.value[room.jid] ?: emptyList()
                         if (afterWaitMessages.isNotEmpty()) {
-                            _messages.value = afterWaitMessages.sortedByDescending { it.timestamp ?: it.date.time }
-                            android.util.Log.d("ChatRoomViewModel", "Global loader filled messages (${afterWaitMessages.size}), skipping per-room load (sorted newest-first)")
+                            _messages.value = afterWaitMessages.sortedBy { it.timestamp ?: it.date.time }
+                            android.util.Log.d("ChatRoomViewModel", "Global loader filled messages (${afterWaitMessages.size}), skipping per-room load (sorted oldest-first)")
                             return@launch
                         }
                     }
@@ -125,8 +128,9 @@ class ChatRoomViewModel(
             }
         } else {
             // Messages already loaded globally, just use them (no loader)
-            _messages.value = storedMessages
-            android.util.Log.d("ChatRoomViewModel", "Using pre-loaded messages (${storedMessages.size} messages)")
+            val sorted = storedMessages.sortedBy { it.timestamp ?: it.date.time }
+            _messages.value = sorted
+            android.util.Log.d("ChatRoomViewModel", "Using pre-loaded messages (${sorted.size} messages, sorted oldest-first)")
         }
     }
     
@@ -269,28 +273,16 @@ class ChatRoomViewModel(
                     }
                     
                     if (undefinedTextCount > 0 && initialHistory.isNotEmpty()) {
-                        val oldestMessageId = initialHistory.lastOrNull()?.id
+                        // Match web: use res[0].id as the anchor for the follow-up request
+                        val anchorMessageId = initialHistory.firstOrNull()?.id
                         
-                        if (oldestMessageId != null) {
+                        if (anchorMessageId != null) {
                             val additionalHistory = client.getHistory(
                                 room.jid,
                                 max = 20 + undefinedTextCount,
-                                beforeMessageId = oldestMessageId
+                                beforeMessageId = anchorMessageId
                             )
-                            
-                            val allMessages = (additionalHistory + initialHistory).distinctBy { it.id }
-                            MessageStore.addMessages(room.jid, allMessages)
-                            
-                            val updatedRoom = RoomStore.getRoomByJid(room.jid)
-                            val historyComplete = updatedRoom?.historyComplete == true
-                            _hasMoreMessages.value = !historyComplete && allMessages.size >= 30
-                            
-                            if (historyComplete) {
-                                _hasMoreMessages.value = false
-                            }
                         } else {
-                            MessageStore.addMessages(room.jid, initialHistory)
-                            
                             val updatedRoom = RoomStore.getRoomByJid(room.jid)
                             val historyComplete = updatedRoom?.historyComplete == true
                             _hasMoreMessages.value = !historyComplete && initialHistory.size >= 30
@@ -301,8 +293,6 @@ class ChatRoomViewModel(
                         }
                     } else {
                         if (initialHistory.isNotEmpty()) {
-                            MessageStore.addMessages(room.jid, initialHistory)
-                            
                             val updatedRoom = RoomStore.getRoomByJid(room.jid)
                             val historyComplete = updatedRoom?.historyComplete == true
                             _hasMoreMessages.value = !historyComplete && initialHistory.size >= 30
@@ -352,18 +342,18 @@ class ChatRoomViewModel(
     
     /**
      * Load more messages (pagination) when scrolling to top
-     * In reverse layout, "top" means oldest messages (first in the list)
-     * Matches web: loadMoreMessages in ChatRoom.tsx
+     * Matches web: loadMoreMessages in ChatRoom.tsx exactly
+     * 
+     * React logic:
+     * - Check: !isLoadingMore && !roomsList?.[chatJID]?.historyComplete
+     * - Get lastMsgId: if idOfMessageBefore provided, use it; else use messages[length-2].id (skip delimiter-new)
+     * - Call: client?.getHistoryStanza(chatJID, max, lastMsgId)
      */
-    fun loadMoreMessages() {
-        val currentHasMore = _hasMoreMessages.value
-        val currentIsLoading = isLoading.value
-        val currentRoom = RoomStore.getRoomByJid(this.room.jid)
-        val historyComplete = currentRoom?.historyComplete == true
-        
-        // Don't load if already loading, no more messages, or history is complete
-        if (isLoadingMoreInProgress || !currentHasMore || currentIsLoading || historyComplete) {
-            android.util.Log.d("ChatRoomViewModel", "Skipping loadMore: isLoadingMore=$isLoadingMoreInProgress, hasMore=$currentHasMore, isLoading=$currentIsLoading, historyComplete=$historyComplete")
+    fun loadMoreMessages(idOfMessageBefore: String? = null) {
+        // historyComplete from initial MAM query means "that query finished", NOT "no older messages exist".
+        // We must always attempt loadMore when user scrolls up; empty response will set hasMoreMessages=false.
+        if (isLoadingMoreInProgress) {
+            android.util.Log.d("ChatRoomViewModel", "Skipping loadMore: already in progress")
             return
         }
         
@@ -379,52 +369,48 @@ class ChatRoomViewModel(
                     return@launch
                 }
                 
-                // With descending sorting (newest first), the oldest message is at the end of the list
-                val oldestMessage = currentMessages.lastOrNull { it.id != "delimiter-new" }
-                
+                val messagesWithoutDelimiter = currentMessages.filter { it.id != "delimiter-new" }
+                val oldestMessage = messagesWithoutDelimiter.firstOrNull()
                 if (oldestMessage == null) {
-                    android.util.Log.d("ChatRoomViewModel", "No valid oldest message found for pagination")
+                    android.util.Log.d("ChatRoomViewModel", "No valid message ID found for pagination")
                     isLoadingMoreInProgress = false
                     _isLoadingMore.value = false
                     return@launch
                 }
                 
-                val beforeMessageId = oldestMessage.id
-                
-                android.util.Log.d("ChatRoomViewModel", "🚀 Triggering loadMoreMessages for ${room.jid} before message ID: $beforeMessageId")
+                _scrollRestoreAnchor.value = oldestMessage.id
+
+                // Use OLDEST SERVER message for beforeId - optimistic ids are not in server archive.
+                val anchorMsg = messagesWithoutDelimiter.firstOrNull { msg ->
+                    !msg.id.startsWith("send-text-message-") && !msg.id.startsWith("pending-")
+                } ?: oldestMessage
+
+                val idStr = anchorMsg.id
+                val numericPart = Regex("\\d{13,}").find(idStr)?.value?.toLongOrNull()
+                val beforeId = when {
+                    numericPart != null -> numericPart.toString()
+                    idStr.toLongOrNull() != null -> idStr
+                    else -> (anchorMsg.timestamp?.toString() ?: anchorMsg.date.time.toString())
+                }
+
+                android.util.Log.d("ChatRoomViewModel", "Triggering loadMoreMessages for ${room.jid} beforeId=$beforeId (anchorId=${anchorMsg.id})")
                 
                 xmppClient?.let { client ->
-                    val history = client.getHistory(room.jid, max = 30, beforeMessageId = beforeMessageId)
+                    val history = client.getHistory(room.jid, max = 30, beforeMessageId = beforeId)
                     android.util.Log.d("ChatRoomViewModel", "  Received ${history.size} older messages")
                     
                     if (history.isNotEmpty()) {
-                        // Add to message store - these will be older messages
                         MessageStore.addMessages(room.jid, history)
                         android.util.Log.d("ChatRoomViewModel", "   Added ${history.size} older messages to store")
-                        
-                        // Update hasMoreMessages - if we got less than max, we've reached the end
-                        val hasMore = history.size >= 30
-                        _hasMoreMessages.value = hasMore
-                        
-                        // Check if history is complete (from room)
-                        val updatedRoom = RoomStore.getRoomByJid(room.jid)
-                        if (updatedRoom?.historyComplete == true) {
-                            _hasMoreMessages.value = false
-                            android.util.Log.d("ChatRoomViewModel", "   History is complete, no more messages")
-                        }
-                        
-                        // Force UI update to show new messages
                         kotlinx.coroutines.delay(50)
-                        val updatedMessages = (MessageStore.messages.value[room.jid] ?: emptyList())
-                            .sortedByDescending { it.timestamp ?: it.date.time }
-                        _messages.value = updatedMessages
-                        android.util.Log.d("ChatRoomViewModel", "   Updated UI with ${updatedMessages.size} total messages")
-                        
-                        if (!hasMore) {
-                            android.util.Log.d("ChatRoomViewModel", "   Reached end of history (got ${history.size} < 30)")
-                        }
-                    } else {
-                        android.util.Log.d("ChatRoomViewModel", "   No more messages available")
+                        val updated = (MessageStore.messages.value[room.jid] ?: emptyList())
+                            .sortedBy { it.timestamp ?: it.date.time }
+                        _messages.value = updated
+                        android.util.Log.d("ChatRoomViewModel", "   UI updated: ${updated.size} total messages")
+                    }
+
+                    if (history.isEmpty()) {
+                        android.util.Log.d("ChatRoomViewModel", "   No more messages available (empty response)")
                         _hasMoreMessages.value = false
                     }
                 } ?: run {
@@ -441,6 +427,10 @@ class ChatRoomViewModel(
                 android.util.Log.d("ChatRoomViewModel", "  Finished loading more, isLoadingMore: false")
             }
         }
+    }
+
+    fun clearScrollRestoreAnchor() {
+        _scrollRestoreAnchor.value = null
     }
     
     /**

@@ -149,19 +149,29 @@ fun Chat(
     // Load rooms once globally (similar to web: if (roomsList && Object.keys(roomsList).length > 0))
     LaunchedEffect(currentUser) {
         val existingRooms = RoomStore.rooms.value
-        if (existingRooms.isEmpty() && currentUser != null) {
-            // No rooms loaded yet, load them
-            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    RoomStore.setLoading(true)
-                    val rooms = RoomsAPIHelper.getRooms()
-                    RoomStore.setRooms(rooms)
-                    android.util.Log.d("EthoraChat", "✅ Loaded ${rooms.size} rooms globally")
-                } catch (e: Exception) {
-                    android.util.Log.e("EthoraChat", "❌ Failed to load rooms", e)
-                } finally {
-                    RoomStore.setLoading(false)
+        if (currentUser != null && existingRooms.isEmpty()) {
+            try {
+                RoomStore.setLoading(true)
+
+                // 1) Load cached rooms first for fast UI (shows last message immediately)
+                val cachedRooms = withContext(Dispatchers.IO) {
+                    RoomStore.loadRoomsFromPersistence()
                 }
+                if (cachedRooms.isNotEmpty()) {
+                    RoomStore.setRooms(cachedRooms)
+                    android.util.Log.d("EthoraChat", "📦 Loaded ${cachedRooms.size} rooms from cache")
+                }
+
+                // 2) Fetch fresh rooms from API and replace cache
+                val rooms = withContext(Dispatchers.IO) {
+                    RoomsAPIHelper.getRooms()
+                }
+                RoomStore.setRooms(rooms)
+                android.util.Log.d("EthoraChat", "✅ Loaded ${rooms.size} rooms from API")
+            } catch (e: Exception) {
+                android.util.Log.e("EthoraChat", "❌ Failed to load rooms", e)
+            } finally {
+                RoomStore.setLoading(false)
             }
         } else if (existingRooms.isNotEmpty()) {
             android.util.Log.d("EthoraChat", "⏭️ Rooms already loaded (${existingRooms.size} rooms), skipping API request")
@@ -191,14 +201,13 @@ fun Chat(
                                     try {
                                         delay(2000) // Wait for XMPP to be fully ready
                                         if (!MessageLoader.isSynced()) {
-                                            // Initial sync
-                                            // Matches web: loads 30 messages per room
+                                            // Initial sync; matches web: getHistoryStanza(chat.jid, 30)
                                             val activeRoomJid = RoomStore.currentRoom.value?.jid
                                             MessageLoader.loadInitialMessagesForAllRooms(
                                                 xmppClient = client,
                                                 activeRoomJid = activeRoomJid,
-                                                batchSize = 5, // Match web: batchSize = 5
-                                                messagesPerRoom = 10 // Match web: 10 messages per room (optimized)
+                                                batchSize = 5,
+                                                messagesPerRoom = 30
                                             )
                                         } else {
                                             // Incremental sync after reconnect
@@ -270,14 +279,16 @@ fun Chat(
             }
         }
         
+        // Subscribe to rooms so we recompose when they load (fix: LaunchedEffect was not re-running when rooms were set async)
+        val rooms by RoomStore.rooms.collectAsState(initial = emptyList())
+        
         // Load initial messages for all rooms once after XMPP client is initialized and rooms are loaded
-        // Similar to updateMessagesTillLast in web version
-        LaunchedEffect(xmppClient, RoomStore.rooms.value) {
-            val rooms = RoomStore.rooms.value
+        // Use rooms.size to avoid re-running on every list reference change; run only when client ready and we have rooms
+        LaunchedEffect(xmppClient, rooms.size) {
             val client = xmppClient
+            val roomsList = RoomStore.rooms.value
             
-            // Wait for XMPP client to be fully connected and rooms to be loaded
-            if (client != null && rooms.isNotEmpty()) {
+            if (client != null && roomsList.isNotEmpty()) {
                 try {
                     delay(1000)
                     
@@ -286,13 +297,13 @@ fun Chat(
                         xmppClient = client,
                         activeRoomJid = activeRoomJid,
                         batchSize = 5,
-                        messagesPerRoom = 10
+                        messagesPerRoom = 30
                     )
                     
                     messageLoaderQueue?.start()
                     
                     messagePriorityQueue?.let { queue ->
-                        queue.initialize(rooms)
+                        queue.initialize(roomsList)
                         queue.start()
                     }
                 } catch (e: CancellationException) {

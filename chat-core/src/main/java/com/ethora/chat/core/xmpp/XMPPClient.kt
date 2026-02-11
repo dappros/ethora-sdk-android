@@ -551,7 +551,7 @@ class XMPPClient(
         try {
             val xml = stanza.xml ?: return emptyList()
             
-            Log.d(TAG, "🔍 Parsing MAM result, XML length: ${xml.length}")
+            // Keep MAM parser lightweight: this path can run frequently on large rooms.
             
             // Check if this is a MAM result message
             // Format: <message><result xmlns='urn:xmpp:mam:2'><forwarded><message>...</message></forwarded></result></message>
@@ -561,7 +561,7 @@ class XMPPClient(
             }
             
             // Extract result ID (this is the MAM result ID, not the message ID)
-            val resultIdMatch = "<result[^>]*id=['\"]([^'\"]+)['\"]".toRegex().find(xml)
+            val resultIdMatch = "<result\\b[^>]*\\bid=['\"]([^'\"]+)['\"]".toRegex().find(xml)
             val resultId = resultIdMatch?.groupValues?.get(1) ?: ""
             
             // Extract inner message from MAM structure
@@ -671,7 +671,6 @@ class XMPPClient(
             val actualRoomJid = from.split("/").firstOrNull() ?: roomJID
             
             Log.d(TAG, "  Extracted - ID: $messageId, From: $from, Type: $type, Room: $actualRoomJid")
-            Log.d(TAG, "  Message XML length: ${messageXml.length}, contains <data: ${messageXml.contains("<data")}")
             
             // Extract body - handle multiline and nested content
             val bodyStart = messageXml.indexOf("<body>")
@@ -717,9 +716,6 @@ class XMPPClient(
             }
             
             Log.d(TAG, "  Data XML found: ${dataXml.isNotEmpty()}, length: ${dataXml.length}")
-            if (dataXml.isNotEmpty()) {
-                Log.d(TAG, "  Data XML preview: ${dataXml.take(300)}")
-            }
             
             // Extract attributes - try both quoted and unquoted formats
             val senderFirstName = extractAttribute(dataXml, "senderFirstName")
@@ -732,8 +728,18 @@ class XMPPClient(
             
             Log.d(TAG, "  Extracted user data: firstName=$senderFirstName, lastName=$senderLastName, photoURL=${cleanPhotoURL?.take(50)}, fullName=$fullName, senderJID=$senderJID")
             
-            // Use result ID as message ID if message ID is empty
-            val finalMessageId = if (messageId.isBlank()) resultId else messageId
+            // For MAM pagination, prefer archive/result id (server id) like web component.
+            // Keep inner stanza message id in xmppId for pending reconciliation and dedupe.
+            val archiveMessageId = when {
+                resultId.isNotBlank() -> resultId
+                messageId.isNotBlank() -> messageId
+                else -> timestamp.toString()
+            }
+            val stanzaMessageId = when {
+                messageId.isNotBlank() -> messageId
+                resultId.isNotBlank() -> resultId
+                else -> archiveMessageId
+            }
             
             // Determine user ID - prefer senderJID, then userJid, then username
             val userId = senderJID?.split("@")?.firstOrNull() 
@@ -760,13 +766,13 @@ class XMPPClient(
             
             // Create Message object - use actual room JID from stanza
             val message = Message(
-                id = finalMessageId,
+                id = archiveMessageId,
                 user = user,
                 date = java.util.Date(timestamp),
                 body = body,
                 roomJid = actualRoomJid, // Use room JID extracted from stanza, not parameter
                 timestamp = timestamp,
-                xmppId = finalMessageId,
+                xmppId = stanzaMessageId,
                 xmppFrom = from,
                 isDeleted = isDeleted
             )

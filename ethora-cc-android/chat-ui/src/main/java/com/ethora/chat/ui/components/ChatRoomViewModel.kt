@@ -63,7 +63,7 @@ class ChatRoomViewModel(
                 .map { 
                     val roomMessages = it[room.jid] ?: emptyList()
                     // Re-sort descending: newest at index 0 for LazyColumn(reverseLayout=true)
-                    val sorted = roomMessages.sortedByDescending { it.timestamp ?: it.date.time }
+                    val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
                     android.util.Log.d("ChatRoomViewModel", "Store updated, messages for ${room.jid}: ${roomMessages.size} (displayed: ${sorted.size})")
                     sorted
                 }
@@ -96,7 +96,7 @@ class ChatRoomViewModel(
                 if (persistedMessages.isNotEmpty()) {
                     // Load from persistence
                     MessageStore.setMessagesForRoom(room.jid, persistedMessages)
-                    _messages.value = persistedMessages.sortedByDescending { it.timestamp ?: it.date.time }
+                    _messages.value = persistedMessages.sortedBy { it.timestamp ?: it.date.time }
                     android.util.Log.d("ChatRoomViewModel", "Loaded ${persistedMessages.size} messages from persistence (sorted newest-first)")
                 } else {
                     // Avoid racing the global MessageLoader (which runs shortly after rooms load).
@@ -112,7 +112,7 @@ class ChatRoomViewModel(
                         kotlinx.coroutines.delay(1500)
                         val afterWaitMessages = MessageStore.messages.value[room.jid] ?: emptyList()
                         if (afterWaitMessages.isNotEmpty()) {
-                            _messages.value = afterWaitMessages.sortedByDescending { it.timestamp ?: it.date.time }
+                            _messages.value = afterWaitMessages.sortedBy { it.timestamp ?: it.date.time }
                             android.util.Log.d("ChatRoomViewModel", "Global loader filled messages (${afterWaitMessages.size}), skipping per-room load (sorted newest-first)")
                             return@launch
                         }
@@ -356,14 +356,10 @@ class ChatRoomViewModel(
      * Matches web: loadMoreMessages in ChatRoom.tsx
      */
     fun loadMoreMessages() {
-        val currentHasMore = _hasMoreMessages.value
-        val currentIsLoading = isLoading.value
-        val currentRoom = RoomStore.getRoomByJid(this.room.jid)
-        val historyComplete = currentRoom?.historyComplete == true
-        
-        // Don't load if already loading, no more messages, or history is complete
-        if (isLoadingMoreInProgress || !currentHasMore || currentIsLoading || historyComplete) {
-            android.util.Log.d("ChatRoomViewModel", "Skipping loadMore: isLoadingMore=$isLoadingMoreInProgress, hasMore=$currentHasMore, isLoading=$currentIsLoading, historyComplete=$historyComplete")
+        // historyComplete from initial MAM means "that query finished", NOT "no older messages exist".
+        // Always attempt loadMore when user scrolls up; empty response sets hasMoreMessages=false.
+        if (isLoadingMoreInProgress) {
+            android.util.Log.d("ChatRoomViewModel", "Skipping loadMore: already in progress")
             return
         }
         
@@ -379,19 +375,28 @@ class ChatRoomViewModel(
                     return@launch
                 }
                 
-                // With descending sorting (newest first), the oldest message is at the end of the list
-                val oldestMessage = currentMessages.lastOrNull { it.id != "delimiter-new" }
-                
+                val messagesWithoutDelimiter = currentMessages.filter { it.id != "delimiter-new" }
+                val oldestMessage = messagesWithoutDelimiter.lastOrNull()
                 if (oldestMessage == null) {
                     android.util.Log.d("ChatRoomViewModel", "No valid oldest message found for pagination")
                     isLoadingMoreInProgress = false
                     _isLoadingMore.value = false
                     return@launch
                 }
+
+                val anchorMsg = messagesWithoutDelimiter.lastOrNull { msg ->
+                    !msg.id.startsWith("send-text-message-") && !msg.id.startsWith("pending-")
+                } ?: oldestMessage
+
+                val idStr = anchorMsg.id
+                val numericPart = Regex("\\d{13,}").find(idStr)?.value?.toLongOrNull()
+                val beforeMessageId = when {
+                    numericPart != null -> numericPart.toString()
+                    idStr.toLongOrNull() != null -> idStr
+                    else -> (anchorMsg.timestamp?.toString() ?: anchorMsg.date.time.toString())
+                }
                 
-                val beforeMessageId = oldestMessage.id
-                
-                android.util.Log.d("ChatRoomViewModel", "🚀 Triggering loadMoreMessages for ${room.jid} before message ID: $beforeMessageId")
+                android.util.Log.d("ChatRoomViewModel", "🚀 Triggering loadMoreMessages for ${room.jid} beforeId=$beforeMessageId (anchorId=${anchorMsg.id})")
                 
                 xmppClient?.let { client ->
                     val history = client.getHistory(room.jid, max = 30, beforeMessageId = beforeMessageId)
@@ -416,7 +421,7 @@ class ChatRoomViewModel(
                         // Force UI update to show new messages
                         kotlinx.coroutines.delay(50)
                         val updatedMessages = (MessageStore.messages.value[room.jid] ?: emptyList())
-                            .sortedByDescending { it.timestamp ?: it.date.time }
+                            .sortedBy { it.timestamp ?: it.date.time }
                         _messages.value = updatedMessages
                         android.util.Log.d("ChatRoomViewModel", "   Updated UI with ${updatedMessages.size} total messages")
                         

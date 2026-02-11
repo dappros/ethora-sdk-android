@@ -44,8 +44,8 @@ fun ChatRoomView(
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
-    val hasMoreMessages by viewModel.hasMoreMessages.collectAsState()
     val composingUsers by viewModel.composingUsers.collectAsState()
+    val scrollRestoreAnchor by viewModel.scrollRestoreAnchor.collectAsState()
     
     // Update lastViewedTimestamp when room is opened (set to 0 to mark all as read)
     LaunchedEffect(room.jid) {
@@ -99,7 +99,6 @@ fun ChatRoomView(
     )
     
     // Track if scroll to bottom button should be shown
-    // In reverseLayout, we're at bottom when firstVisibleItemIndex is 0 and scrollOffset is small
     var showScrollToBottom by remember { mutableStateOf(false) }
     
     // Track unread count (messages that arrived while scrolled up)
@@ -107,11 +106,8 @@ fun ChatRoomView(
     var lastMessageCount by remember { mutableStateOf(messages.size) }
     
     // Check scroll position to show/hide scroll to bottom button
-    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
-        // In reverseLayout: index 0 = oldest messages (top), higher indices = newer messages (bottom)
-        // We're at bottom when firstVisibleItemIndex is 0 and scrollOffset is small (< 100px)
-        val isAtBottom = listState.firstVisibleItemIndex == 0 && 
-                         listState.firstVisibleItemScrollOffset < 100
+    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, messages.size) {
+        val isAtBottom = !listState.canScrollForward
         
         // Show button if we're not at bottom and have messages
         val shouldShow = !isAtBottom && messages.isNotEmpty()
@@ -153,20 +149,28 @@ fun ChatRoomView(
         }
     }
     
-    // Auto-scroll to bottom when entering chat (if no saved position)
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            if (savedScrollPosition == null) {
-                // No saved position, scroll to bottom (index 0 in reverse layout = newest messages at bottom)
-                kotlinx.coroutines.delay(100) // Small delay to ensure layout is ready
-                listState.animateScrollToItem(0)
-                android.util.Log.d("ChatRoomView", "Auto-scrolled to bottom (newest messages)")
-            } else {
-                // Restore saved position
-                kotlinx.coroutines.delay(100)
-                listState.scrollToItem(savedScrollPosition)
-                android.util.Log.d("ChatRoomView", "Restored scroll position: $savedScrollPosition")
+    // Auto-scroll to bottom when entering chat (only once per room)
+    var initialAutoScrollDone by remember(room.jid) { mutableStateOf(false) }
+    LaunchedEffect(messages.size, room.jid) {
+        if (!initialAutoScrollDone && messages.isNotEmpty()) {
+            kotlinx.coroutines.delay(100)
+            listState.scrollToItem((messages.size - 1).coerceAtLeast(0))
+            initialAutoScrollDone = true
+            android.util.Log.d("ChatRoomView", "Auto-scrolled to bottom (initial load)")
+        }
+    }
+
+    // Restore scroll position after loading older messages (avoid jumps)
+    LaunchedEffect(scrollRestoreAnchor, isLoadingMore, messages.size) {
+        val anchorId = scrollRestoreAnchor
+        if (anchorId != null && !isLoadingMore) {
+            val anchorIndex = messages.indexOfFirst { it.id == anchorId }
+            if (anchorIndex >= 0) {
+                kotlinx.coroutines.delay(50)
+                listState.scrollToItem(anchorIndex)
+                android.util.Log.d("ChatRoomView", "Restored scroll to anchor $anchorId at index $anchorIndex")
             }
+            viewModel.clearScrollRestoreAnchor()
         }
     }
     
@@ -186,53 +190,42 @@ fun ChatRoomView(
     // User wants: when scroll position reaches 1050px (150px from top of 1200px area), trigger loading
     var lastLoadTrigger by remember { mutableStateOf(0L) }
     
-    // Use snapshotFlow to observe scroll changes more reliably - don't restart on state changes
-    // In reverseLayout: index 0 = newest (bottom), higher indices = older (top)
-    // Trigger when scrolling up and reaching near the top (oldest messages)
-    // Scroll listener for loading older messages
-    LaunchedEffect(listState) {
-        snapshotFlow { 
-            val layoutInfo = listState.layoutInfo
-            val totalItems = layoutInfo.totalItemsCount
-            val visibleItems = layoutInfo.visibleItemsInfo
-            
-            if (totalItems == 0 || visibleItems.isEmpty()) {
-                Triple(0, 0, 0)
-            } else {
-                val topVisibleItemIndex = visibleItems.lastOrNull()?.index ?: 0
-                Triple(topVisibleItemIndex, totalItems, listState.firstVisibleItemScrollOffset)
-            }
+    val isAtTop by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 300
         }
-        .collect { (topVisibleItemIndex, totalItems, _) ->
+    }
+
+    // Scroll listener for loading older messages when scrolling to top (like RN/Telegram)
+    // RN: onEndReached when scrolled to top (inverted list). We use firstVisibleIndex <= 2 for easier trigger.
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }
+        .collect { (firstVisibleIndex, firstVisibleOffset) ->
+            val totalItems = listState.layoutInfo.totalItemsCount
             if (totalItems == 0) return@collect
             
             val currentIsLoadingMore = isLoadingMore
-            val currentIsLoading = isLoading
-            val currentHasMore = hasMoreMessages
-            
-            // Trigger when top visible item is within 5 items of total history
-            val itemThreshold = 5
-            val topItemThreshold = (totalItems - itemThreshold).coerceAtLeast(0)
-            val nearTop = topVisibleItemIndex >= topItemThreshold
-
-            if (nearTop) {
-                android.util.Log.d(
-                    "ChatRoomView",
-                    "📜 Scroll logic: topVisibleItemIndex=$topVisibleItemIndex, total=$totalItems"
-                )
-            }
+            val nearTop = firstVisibleIndex <= 2 && firstVisibleOffset < 300
 
             val now = System.currentTimeMillis()
             val shouldTrigger = nearTop && 
                                !currentIsLoadingMore && 
-                               !currentIsLoading && 
-                               currentHasMore &&
-                               (now - lastLoadTrigger) > 500
+                               (now - lastLoadTrigger) > 600
 
             if (shouldTrigger) {
                 lastLoadTrigger = now
-                android.util.Log.i("ChatRoomView", "🚀 Triggering loadMoreMessages() at totalItems=$totalItems")
-                viewModel.loadMoreMessages()
+                
+                // Need ID of OLDEST message (to load messages before it)
+                // messages are sorted ascending: messages.first()=oldest
+                val oldestMessageId = messages
+                    .filter { it.id != "delimiter-new" }
+                    .firstOrNull()
+                    ?.id
+                
+                android.util.Log.i("ChatRoomView", "🚀 Load more triggered: firstVisibleIndex=$firstVisibleIndex (nearTop=$nearTop), oldestMessageId=$oldestMessageId")
+                viewModel.loadMoreMessages(idOfMessageBefore = oldestMessageId)
             }
         }
     }
@@ -290,7 +283,7 @@ fun ChatRoomView(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 0.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
-                        reverseLayout = true
+                        reverseLayout = false
                     ) {
                         items(
                             count = messages.size,
@@ -306,10 +299,10 @@ fun ChatRoomView(
                             }
                             
                             // Calculate if we should show date separator
-                            // In newest-first list, messages[index+1] is OLDER than messages[index]
-                            // We show separator if day changes between current and NEXT (older) item
-                            val nextMessage = if (index < messages.size - 1) messages[index + 1] else null
-                            val showDateSeparator = nextMessage?.let { next ->
+                            // In oldest-first list, messages[index-1] is OLDER than messages[index]
+                            // We show separator if day changes between current and PREVIOUS (older) item
+                            val prevMessage = if (index > 0) messages[index - 1] else null
+                            val showDateSeparator = prevMessage?.let { prev ->
                                 val currentDate = java.util.Calendar.getInstance().apply {
                                     time = message.date
                                     set(java.util.Calendar.HOUR_OF_DAY, 0)
@@ -317,17 +310,17 @@ fun ChatRoomView(
                                     set(java.util.Calendar.SECOND, 0)
                                     set(java.util.Calendar.MILLISECOND, 0)
                                 }
-                                val nextDate = java.util.Calendar.getInstance().apply {
-                                    time = next.date
+                                val prevDate = java.util.Calendar.getInstance().apply {
+                                    time = prev.date
                                     set(java.util.Calendar.HOUR_OF_DAY, 0)
                                     set(java.util.Calendar.MINUTE, 0)
                                     set(java.util.Calendar.SECOND, 0)
                                     set(java.util.Calendar.MILLISECOND, 0)
                                 }
                                 // Show separator if dates are different
-                                currentDate.get(java.util.Calendar.YEAR) != nextDate.get(java.util.Calendar.YEAR) ||
-                                currentDate.get(java.util.Calendar.DAY_OF_YEAR) != nextDate.get(java.util.Calendar.DAY_OF_YEAR)
-                            } ?: true // Show separator for the very last (oldest) message
+                                currentDate.get(java.util.Calendar.YEAR) != prevDate.get(java.util.Calendar.YEAR) ||
+                                currentDate.get(java.util.Calendar.DAY_OF_YEAR) != prevDate.get(java.util.Calendar.DAY_OF_YEAR)
+                            } ?: true // Show separator for the very first (oldest) message
                             
                             // Show date separator if needed, then the message
                             Column {
@@ -359,14 +352,12 @@ fun ChatRoomView(
                                     }
                                 }
                                 
-                                android.util.Log.d("ChatRoomView", "  Message from: xmppUsername=$messageXmppUsername, userJID=$messageUserJID, isUser=$isUser (current: xmppUsername=$currentUserXmppUsername)")
-                                
                                 // Determine if this is the first message in a group
                                 // Group messages from the same user that are within 5 minutes of each other
-                                // Chronological previous is index + 1 (older)
-                                // Chronological next is index - 1 (newer)
-                                val prevChronological = if (index < messages.size - 1) messages[index + 1] else null
-                                val nextChronological = if (index > 0) messages[index - 1] else null
+                                // Chronological previous is index - 1 (older)
+                                // Chronological next is index + 1 (newer)
+                                val prevChronological = if (index > 0) messages[index - 1] else null
+                                val nextChronological = if (index < messages.size - 1) messages[index + 1] else null
                                 
                                 val isFirstInGroup = when {
                                     // Chronologically first (no older message from same user within window)
@@ -431,7 +422,7 @@ fun ChatRoomView(
                     
                     // History loader overlayed at the top of the messages list when loading more
                     // Positioned over the oldest messages (top of the list in reverseLayout)
-                    if (isLoadingMore) {
+                    if (isLoadingMore && isAtTop) {
                         Box(
                             modifier = Modifier
                                 .align(androidx.compose.ui.Alignment.TopCenter)
@@ -489,7 +480,7 @@ fun ChatRoomView(
                                     onClick = {
                                         // Scroll to bottom (index 0 in reverseLayout = newest messages)
                                         coroutineScope.launch {
-                                            listState.animateScrollToItem(0)
+                                            listState.animateScrollToItem((messages.size - 1).coerceAtLeast(0))
                                             unreadCount = 0 // Reset unread count when scrolling to bottom
                                         }
                                     },
@@ -599,7 +590,7 @@ fun ChatRoomView(
                     
                     // Auto-scroll to bottom on user's own message
                     coroutineScope.launch {
-                        listState.animateScrollToItem(0)
+                        listState.animateScrollToItem((messages.size - 1).coerceAtLeast(0))
                     }
                 }
                 // Stop typing when message is sent

@@ -186,52 +186,32 @@ fun ChatRoomView(
     // User wants: when scroll position reaches 1050px (150px from top of 1200px area), trigger loading
     var lastLoadTrigger by remember { mutableStateOf(0L) }
     
-    // Use snapshotFlow to observe scroll changes more reliably - don't restart on state changes
-    // In reverseLayout: index 0 = newest (bottom), higher indices = older (top)
-    // Trigger when scrolling up and reaching near the top (oldest messages)
-    // Scroll listener for loading older messages
-    LaunchedEffect(listState) {
-        snapshotFlow { 
-            val layoutInfo = listState.layoutInfo
-            val totalItems = layoutInfo.totalItemsCount
-            val visibleItems = layoutInfo.visibleItemsInfo
-            
-            if (totalItems == 0 || visibleItems.isEmpty()) {
-                Triple(0, 0, 0)
-            } else {
-                val topVisibleItemIndex = visibleItems.lastOrNull()?.index ?: 0
-                Triple(topVisibleItemIndex, totalItems, listState.firstVisibleItemScrollOffset)
-            }
+    val isAtTop by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < 300
         }
-        .collect { (topVisibleItemIndex, totalItems, _) ->
+    }
+    
+    // Scroll listener for loading older messages when scrolling to top (like RN/Telegram)
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        }
+        .collect { (firstVisibleIndex, firstVisibleOffset) ->
+            val totalItems = listState.layoutInfo.totalItemsCount
             if (totalItems == 0) return@collect
             
             val currentIsLoadingMore = isLoadingMore
-            val currentIsLoading = isLoading
-            val currentHasMore = hasMoreMessages
-            
-            // Trigger when top visible item is within 5 items of total history
-            val itemThreshold = 5
-            val topItemThreshold = (totalItems - itemThreshold).coerceAtLeast(0)
-            val nearTop = topVisibleItemIndex >= topItemThreshold
-
-            if (nearTop) {
-                android.util.Log.d(
-                    "ChatRoomView",
-                    "📜 Scroll logic: topVisibleItemIndex=$topVisibleItemIndex, total=$totalItems"
-                )
-            }
+            val nearTop = firstVisibleIndex <= 2 && firstVisibleOffset < 300
 
             val now = System.currentTimeMillis()
             val shouldTrigger = nearTop && 
                                !currentIsLoadingMore && 
-                               !currentIsLoading && 
-                               currentHasMore &&
-                               (now - lastLoadTrigger) > 500
+                               (now - lastLoadTrigger) > 600
 
             if (shouldTrigger) {
                 lastLoadTrigger = now
-                android.util.Log.i("ChatRoomView", "🚀 Triggering loadMoreMessages() at totalItems=$totalItems")
+                android.util.Log.i("ChatRoomView", "🚀 Load more triggered: firstVisibleIndex=$firstVisibleIndex (nearTop=$nearTop)")
                 viewModel.loadMoreMessages()
             }
         }
@@ -359,8 +339,6 @@ fun ChatRoomView(
                                     }
                                 }
                                 
-                                android.util.Log.d("ChatRoomView", "  Message from: xmppUsername=$messageXmppUsername, userJID=$messageUserJID, isUser=$isUser (current: xmppUsername=$currentUserXmppUsername)")
-                                
                                 // Determine if this is the first message in a group
                                 // Group messages from the same user that are within 5 minutes of each other
                                 // Chronological previous is index + 1 (older)
@@ -431,7 +409,7 @@ fun ChatRoomView(
                     
                     // History loader overlayed at the top of the messages list when loading more
                     // Positioned over the oldest messages (top of the list in reverseLayout)
-                    if (isLoadingMore) {
+                    if (isLoadingMore && isAtTop) {
                         Box(
                             modifier = Modifier
                                 .align(androidx.compose.ui.Alignment.TopCenter)

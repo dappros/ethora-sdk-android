@@ -62,15 +62,19 @@ class AuthManager(private val context: Context) {
                 val persistedRooms = RoomStore.loadRoomsFromPersistence()
                 if (persistedRooms.isNotEmpty()) {
                     Log.d(TAG, "📂 Found ${persistedRooms.size} persisted rooms")
+                    
+                    // Load messages for each room on IO thread
+                    val persistedMessagesByRoom = persistedRooms.associate { room ->
+                        room.jid to MessageStore.loadMessagesFromPersistence(room.jid)
+                    }
+                    
                     withContext(Dispatchers.Main) {
                         RoomStore.setRooms(persistedRooms)
                         
-                        // Load messages for each room
-                        persistedRooms.forEach { room ->
-                            val messages = MessageStore.loadMessagesFromPersistence(room.jid)
+                        persistedMessagesByRoom.forEach { (jid, messages) ->
                             if (messages.isNotEmpty()) {
-                                MessageStore.setMessagesForRoom(room.jid, messages)
-                                Log.d(TAG, "📂 Loaded ${messages.size} messages for ${room.jid}")
+                                MessageStore.setMessagesForRoom(jid, messages)
+                                Log.d(TAG, "📂 Loaded ${messages.size} messages for $jid")
                             }
                         }
                         
@@ -134,14 +138,19 @@ class AuthManager(private val context: Context) {
             
             Log.d(TAG, "✅ Loaded ${rooms.size} rooms")
             
+            // Load persisted messages for each room on IO thread
+            val persistedMessagesByRoom = withContext(Dispatchers.IO) {
+                rooms.associate { room ->
+                    room.jid to MessageStore.loadMessagesFromPersistence(room.jid)
+                }
+            }
+            
             withContext(Dispatchers.Main) {
                 RoomStore.setRooms(rooms)
                 
-                // Load persisted messages for each room
-                rooms.forEach { room ->
-                    val messages = MessageStore.loadMessagesFromPersistence(room.jid)
+                persistedMessagesByRoom.forEach { (jid, messages) ->
                     if (messages.isNotEmpty()) {
-                        MessageStore.setMessagesForRoom(room.jid, messages)
+                        MessageStore.setMessagesForRoom(jid, messages)
                     }
                 }
             }
