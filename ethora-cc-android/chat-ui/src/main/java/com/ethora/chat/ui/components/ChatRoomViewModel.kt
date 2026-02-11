@@ -389,11 +389,13 @@ class ChatRoomViewModel(
                 } ?: oldestMessage
 
                 val idStr = anchorMsg.id
-                val numericPart = Regex("\\d{13,}").find(idStr)?.value?.toLongOrNull()
-                val beforeMessageId = when {
-                    numericPart != null -> numericPart.toString()
-                    idStr.toLongOrNull() != null -> idStr
-                    else -> (anchorMsg.timestamp?.toString() ?: anchorMsg.date.time.toString())
+                val isOptimistic = idStr.startsWith("send-text-message-") || idStr.startsWith("pending-")
+                // Critical: for server messages use archive id as-is (matches web MAM pagination semantics).
+                // Numeric/timestamp fallback only for optimistic local messages not present in archive.
+                val beforeMessageId = if (!isOptimistic && idStr.isNotBlank()) {
+                    idStr
+                } else {
+                    anchorMsg.timestamp?.toString() ?: anchorMsg.date.time.toString()
                 }
                 
                 android.util.Log.d("ChatRoomViewModel", "🚀 Triggering loadMoreMessages for ${room.jid} beforeId=$beforeMessageId (anchorId=${anchorMsg.id})")
