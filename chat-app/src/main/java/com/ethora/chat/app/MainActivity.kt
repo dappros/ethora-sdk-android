@@ -265,7 +265,7 @@ fun ChatScreen(onLogout: () -> Unit) {
                 val config = ChatConfig(
                     disableHeader = false,
                     disableRooms = false,
-                    disableMedia = true,
+                    disableMedia = false,
                     newArch = true,
                     disableProfilesInteractions = true,
                     baseUrl = "https://api.ethoradev.com/v1",

@@ -1,6 +1,8 @@
 package com.ethora.chat.ui.components
 
 import android.net.Uri
+import android.graphics.Bitmap
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -23,11 +25,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Chat input component with media support
  */
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun ChatInput(
     onSendMessage: (String, String?) -> Unit,
     onSendMedia: ((File, String) -> Unit)? = null,
@@ -45,6 +49,7 @@ fun ChatInput(
     var selectedFile by remember { mutableStateOf<Pair<File, String>?>(null) }
     var isFocused by remember { mutableStateOf(false) }
     var typingJob by remember { mutableStateOf<Job?>(null) }
+    var showAttachSheet by remember { mutableStateOf(false) }
     
     // Update text when editText changes
     LaunchedEffect(editText) {
@@ -69,37 +74,55 @@ fun ChatInput(
         }
     }
     
-    // File picker launcher
-    val filePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+    fun setSelectedFromUri(uri: Uri, fallbackMime: String = "application/octet-stream") {
+        val file = File(context.cacheDir, "temp_${System.currentTimeMillis()}")
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                file.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            val mimeType = context.contentResolver.getType(uri) ?: fallbackMime
+            val maxSizeBytes = 50 * 1024 * 1024L // 50MB
+            val fileSize = file.length()
+            if (fileSize > maxSizeBytes) {
+                android.util.Log.w("ChatInput", "File too large: ${fileSize} bytes (max: $maxSizeBytes)")
+                file.delete()
+                Toast.makeText(context, "File too large (max 50MB)", Toast.LENGTH_SHORT).show()
+                return
+            }
+            selectedFile = Pair(file, mimeType)
+        } catch (e: Exception) {
+            android.util.Log.e("ChatInput", "Error reading selected media", e)
+            Toast.makeText(context, "Failed to open selected file", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val mediaPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
-        uri?.let {
-            val file = File(context.cacheDir, "temp_${System.currentTimeMillis()}")
+        uri?.let { setSelectedFromUri(it) }
+    }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let { setSelectedFromUri(it) }
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicturePreview()
+    ) { bitmap: Bitmap? ->
+        bitmap?.let {
             try {
-                context.contentResolver.openInputStream(it)?.use { input ->
-                    file.outputStream().use { output ->
-                        input.copyTo(output)
-                    }
+                val photoFile = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
+                FileOutputStream(photoFile).use { stream ->
+                    it.compress(Bitmap.CompressFormat.JPEG, 90, stream)
                 }
-                val mimeType = context.contentResolver.getType(it) ?: "application/octet-stream"
-                
-                // Validate file size (max 50MB)
-                val maxSizeBytes = 50 * 1024 * 1024L // 50MB
-                val fileSize = file.length()
-                
-                if (fileSize > maxSizeBytes) {
-                    // Show error - file too large
-                    android.util.Log.w("ChatInput", "File too large: ${fileSize} bytes (max: $maxSizeBytes)")
-                    // TODO: Show error toast/snackbar
-                    file.delete() // Clean up
-                    return@let
-                }
-                
-                // Validate file type (optional - allow all for now)
-                selectedFile = Pair(file, mimeType)
+                selectedFile = Pair(photoFile, "image/jpeg")
             } catch (e: Exception) {
-                android.util.Log.e("ChatInput", "Error copying file", e)
-                // TODO: Show error toast/snackbar
+                android.util.Log.e("ChatInput", "Error saving camera photo", e)
+                Toast.makeText(context, "Failed to capture photo", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -251,7 +274,7 @@ fun ChatInput(
                 // Attach button (hidden in edit mode)
                 if (onSendMedia != null && editText == null) {
                     IconButton(
-                        onClick = { filePickerLauncher.launch("*/*") }
+                        onClick = { showAttachSheet = true }
                     ) {
                         Icon(
                             imageVector = Icons.Default.AttachFile,
@@ -371,6 +394,57 @@ fun ChatInput(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    if (showAttachSheet && onSendMedia != null && editText == null) {
+        ModalBottomSheet(
+            onDismissRequest = { showAttachSheet = false }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Attach media",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                ListItem(
+                    headlineContent = { Text("Media") },
+                    supportingContent = { Text("Photo or video from gallery") },
+                    leadingContent = { Icon(Icons.Default.Image, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        showAttachSheet = false
+                        mediaPickerLauncher.launch(arrayOf("image/*", "video/*"))
+                    }
+                )
+
+                ListItem(
+                    headlineContent = { Text("Camera") },
+                    supportingContent = { Text("Take a photo") },
+                    leadingContent = { Icon(Icons.Default.PhotoCamera, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        showAttachSheet = false
+                        cameraLauncher.launch(null)
+                    }
+                )
+
+                ListItem(
+                    headlineContent = { Text("File") },
+                    supportingContent = { Text("PDF, docs and other files") },
+                    leadingContent = { Icon(Icons.Default.InsertDriveFile, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        showAttachSheet = false
+                        filePickerLauncher.launch(arrayOf("*/*"))
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
             }
         }
     }

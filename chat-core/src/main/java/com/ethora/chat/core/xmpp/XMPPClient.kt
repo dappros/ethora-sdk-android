@@ -723,6 +723,14 @@ class XMPPClient(
             val photoURL = extractAttribute(dataXml, "photoURL")
             val fullName = extractAttribute(dataXml, "fullName")
             val senderJID = extractAttribute(dataXml, "senderJID")
+            val location = extractAttribute(dataXml, "location")
+            val locationPreview = extractAttribute(dataXml, "locationPreview")
+            val mimetype = extractAttribute(dataXml, "mimetype")
+            val isMediafile = extractAttribute(dataXml, "isMediafile")
+            val fileName = extractAttribute(dataXml, "fileName")
+            val originalName = extractAttribute(dataXml, "originalName")
+            val size = extractAttribute(dataXml, "size")
+            val waveForm = extractAttribute(dataXml, "waveForm")
             
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
@@ -774,7 +782,15 @@ class XMPPClient(
                 timestamp = timestamp,
                 xmppId = stanzaMessageId,
                 xmppFrom = from,
-                isDeleted = isDeleted
+                isDeleted = isDeleted,
+                location = location,
+                locationPreview = locationPreview,
+                mimetype = mimetype,
+                isMediafile = isMediafile,
+                fileName = fileName,
+                originalName = originalName,
+                size = size,
+                waveForm = waveForm
             )
             
             messages.add(message)

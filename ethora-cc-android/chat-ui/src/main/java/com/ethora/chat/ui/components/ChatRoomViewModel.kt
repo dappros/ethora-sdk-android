@@ -18,6 +18,7 @@ import java.io.FileOutputStream
 import java.util.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.graphics.BitmapFactory
 
 /**
  * ViewModel for chat room
@@ -204,6 +205,7 @@ class ChatRoomViewModel(
                 )
                 MessageStore.addMessage(room.jid, optimisticMessage)
                 android.util.Log.d("ChatRoomViewModel", "Created optimistic message with pending=true, ID: $messageId, xmppId: $messageId")
+                schedulePendingFallback(messageId)
             } else {
                 android.util.Log.e("ChatRoomViewModel", "Failed to send message - sendMessage returned null")
             }
@@ -470,10 +472,14 @@ class ChatRoomViewModel(
                     android.util.Log.e("ChatRoomViewModel", "File does not exist or cannot be read: ${file.absolutePath}")
                     return@launch
                 }
+
+                val preparedMedia = prepareMediaForUpload(file, mimeType)
+                val uploadFile = preparedMedia.first
+                val uploadMimeType = preparedMedia.second
                 
                 // Validate file size (max 50MB)
                 val maxSizeBytes = 50 * 1024 * 1024L // 50MB
-                val fileSize = file.length()
+                val fileSize = uploadFile.length()
                 if (fileSize > maxSizeBytes) {
                     android.util.Log.e("ChatRoomViewModel", "File too large: ${fileSize} bytes (max: $maxSizeBytes)")
                     return@launch
@@ -481,7 +487,7 @@ class ChatRoomViewModel(
                 
                 // Create optimistic message
                 // Use timestamp-based ID that will be replaced by server echo
-                val messageId = "send-media-message:${System.currentTimeMillis()}"
+                val messageId = "send-media-message-${System.currentTimeMillis()}"
                 val optimisticMessage = Message(
                     id = messageId,
                     body = "media",
@@ -494,23 +500,24 @@ class ChatRoomViewModel(
                     xmppFrom = "${room.jid}/${currentUser.id}",
                     isSystemMessage = "false",
                     isMediafile = "true",
-                    fileName = file.name,
+                    fileName = uploadFile.name,
                     location = "", // Will be set after upload
                     locationPreview = "",
-                    mimetype = mimeType,
-                    originalName = file.name,
-                    size = file.length().toString()
+                    mimetype = uploadMimeType,
+                    originalName = uploadFile.name,
+                    size = uploadFile.length().toString()
                 )
                 MessageStore.addMessage(room.jid, optimisticMessage)
                 android.util.Log.d("ChatRoomViewModel", "Created optimistic media message with pending=true, ID: $messageId")
+                schedulePendingFallback(messageId)
                 
                 // Upload file with retry
-                android.util.Log.d("ChatRoomViewModel", "Uploading file: ${file.name} (${mimeType}), attempt ${retryCount + 1}")
+                android.util.Log.d("ChatRoomViewModel", "Uploading file: ${uploadFile.name} (${uploadMimeType}), attempt ${retryCount + 1}")
                 var uploadResult: com.ethora.chat.core.networking.FileUploadResult? = null
                 var uploadError: Exception? = null
                 
                 try {
-                    uploadResult = AuthAPIHelper.uploadFile(file, mimeType, token)
+                    uploadResult = AuthAPIHelper.uploadFile(uploadFile, uploadMimeType, token)
                 } catch (e: Exception) {
                     uploadError = e
                     android.util.Log.e("ChatRoomViewModel", "File upload exception", e)
@@ -591,6 +598,48 @@ class ChatRoomViewModel(
             } catch (e: Exception) {
                 android.util.Log.e("ChatRoomViewModel", "Error sending media", e)
                 // Message will remain in pending state, will be cleaned up later
+            }
+        }
+    }
+
+    private suspend fun prepareMediaForUpload(file: File, mimeType: String): Pair<File, String> {
+        val isHeic = mimeType.equals("image/heic", ignoreCase = true) ||
+            mimeType.equals("image/heif", ignoreCase = true)
+        if (!isHeic) return file to mimeType
+
+        return withContext(Dispatchers.IO) {
+            try {
+                val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+                if (bitmap == null) {
+                    android.util.Log.w("ChatRoomViewModel", "Failed to decode HEIC/HEIF, fallback to original file")
+                    return@withContext file to mimeType
+                }
+                val converted = File.createTempFile(
+                    "media_jpeg_${System.currentTimeMillis()}",
+                    ".jpg",
+                    file.parentFile
+                )
+                FileOutputStream(converted).use { out ->
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out)
+                }
+                bitmap.recycle()
+                converted to "image/jpeg"
+            } catch (e: Exception) {
+                android.util.Log.w("ChatRoomViewModel", "HEIC conversion failed, fallback to original file", e)
+                file to mimeType
+            }
+        }
+    }
+
+    private fun schedulePendingFallback(messageId: String) {
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(8000)
+            val stillPending = MessageStore
+                .getMessagesForRoom(room.jid)
+                .firstOrNull { it.id == messageId && it.pending == true }
+            if (stillPending != null) {
+                MessageStore.updateMessage(room.jid, stillPending.copy(pending = false))
+                android.util.Log.w("ChatRoomViewModel", "Pending fallback applied for message: $messageId")
             }
         }
     }

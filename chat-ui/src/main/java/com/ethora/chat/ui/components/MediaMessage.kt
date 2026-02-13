@@ -160,24 +160,21 @@ private fun AudioMessage(
             .clickable(onClick = onClick),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .widthIn(max = 300.dp)
                 .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(
-                imageVector = Icons.Default.VolumeUp,
-                contentDescription = "Audio",
-                tint = MaterialTheme.colorScheme.primary
-            )
             Text(
                 text = fileName,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
                 maxLines = 1
+            )
+            AudioPlayerView(
+                audioUrl = audioUrl,
+                modifier = Modifier.fillMaxWidth()
             )
         }
     }

@@ -577,6 +577,9 @@ class XMPPWebSocketConnection(
             val locationPreview = extractAttribute(dataXml, "locationPreview")
             val fileName = extractAttribute(dataXml, "fileName")
             val mimetype = extractAttribute(dataXml, "mimetype")
+            val originalName = extractAttribute(dataXml, "originalName")
+            val size = extractAttribute(dataXml, "size")
+            val waveForm = extractAttribute(dataXml, "waveForm")
             
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
@@ -616,7 +619,10 @@ class XMPPWebSocketConnection(
                 locationPreview = locationPreview,
                 fileName = fileName,
                 mimetype = mimetype,
-                isMediafile = isMediafile
+                isMediafile = isMediafile,
+                originalName = originalName,
+                size = size,
+                waveForm = waveForm
             )
             
             // Add to MessageStore with pending reconciliation

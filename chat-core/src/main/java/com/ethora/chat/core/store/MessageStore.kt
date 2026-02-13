@@ -21,6 +21,7 @@ object MessageStore {
     // Message cache for persistence
     private var messageCache: MessageCache? = null
     private val persistenceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val pendingScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
     /**
      * Initialize with MessageCache for persistence
@@ -179,7 +180,30 @@ object MessageStore {
         persistMessage(roomJid, message)
         updateRoomLastMessage(roomJid, sorted)
         com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
+        if (message.pending == true) {
+            schedulePendingTimeout(roomJid, message.id)
+        }
         return false
+    }
+
+    private fun schedulePendingTimeout(roomJid: String, messageId: String, timeoutMs: Long = 8000L) {
+        pendingScope.launch {
+            kotlinx.coroutines.delay(timeoutMs)
+            val currentMessages = _messages.value.toMutableMap()
+            val roomMessages = currentMessages[roomJid]?.toMutableList() ?: return@launch
+            val index = roomMessages.indexOfFirst { it.id == messageId && it.pending == true }
+            if (index >= 0) {
+                val updated = roomMessages[index].copy(pending = false)
+                roomMessages[index] = updated
+                val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
+                currentMessages[roomJid] = sorted
+                _messages.value = currentMessages
+                persistMessage(roomJid, updated)
+                updateRoomLastMessage(roomJid, sorted)
+                com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
+                android.util.Log.w("MessageStore", "⏱️ Pending timeout applied for message $messageId in $roomJid")
+            }
+        }
     }
     
     /**
@@ -377,8 +401,12 @@ object MessageStore {
         val index = roomMessages.indexOfFirst { it.id == message.id }
         if (index >= 0) {
             roomMessages[index] = message
-            currentMessages[roomJid] = roomMessages
+            val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
+            currentMessages[roomJid] = sorted
             _messages.value = currentMessages
+            persistMessage(roomJid, message)
+            updateRoomLastMessage(roomJid, sorted)
+            com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
         }
     }
 

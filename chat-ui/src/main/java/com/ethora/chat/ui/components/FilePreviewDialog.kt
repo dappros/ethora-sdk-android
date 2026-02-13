@@ -16,6 +16,17 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.ethora.chat.core.models.Message
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.net.URL
+import android.content.Intent
+import android.net.Uri
+import android.os.Environment
+import java.net.URLConnection
 
 /**
  * File preview dialog for viewing media files in full screen
@@ -33,6 +44,9 @@ fun FilePreviewDialog(
     val fileUrl = message.location ?: ""
     val previewUrl = message.locationPreview
     val fileName = message.originalName ?: message.fileName ?: "MediaFile"
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isDownloading by remember { mutableStateOf(false) }
     
     Dialog(
         onDismissRequest = onDismiss,
@@ -69,6 +83,26 @@ fun FilePreviewDialog(
                                         imageVector = Icons.Default.Close,
                                         contentDescription = "Close"
                                     )
+                                }
+                            },
+                            actions = {
+                                IconButton(
+                                    onClick = {
+                                        if (fileUrl.isNotBlank()) {
+                                            scope.launch {
+                                                isDownloading = true
+                                                downloadToDownloads(context, fileUrl, fileName, mimeType)
+                                                isDownloading = false
+                                            }
+                                        }
+                                    },
+                                    enabled = fileUrl.isNotBlank() && !isDownloading
+                                ) {
+                                    if (isDownloading) {
+                                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Download, contentDescription = "Download")
+                                    }
                                 }
                             }
                         )
@@ -125,6 +159,50 @@ fun FilePreviewDialog(
                         }
                     }
                 }
+                mimeType.startsWith("audio/") || mimeType.contains("application/octet-stream") -> {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        TopAppBar(
+                            title = { Text("Audio preview") },
+                            navigationIcon = {
+                                IconButton(onClick = onDismiss) {
+                                    Icon(Icons.Default.Close, contentDescription = "Close")
+                                }
+                            },
+                            actions = {
+                                IconButton(
+                                    onClick = {
+                                        if (fileUrl.isNotBlank()) {
+                                            scope.launch {
+                                                isDownloading = true
+                                                downloadToDownloads(context, fileUrl, fileName, mimeType)
+                                                isDownloading = false
+                                            }
+                                        }
+                                    },
+                                    enabled = fileUrl.isNotBlank() && !isDownloading
+                                ) {
+                                    if (isDownloading) {
+                                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Download, contentDescription = "Download")
+                                    }
+                                }
+                            }
+                        )
+                        if (fileUrl.isNotBlank()) {
+                            AudioPlayerView(
+                                audioUrl = fileUrl,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp)
+                            )
+                        } else {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("Audio url is empty")
+                            }
+                        }
+                    }
+                }
                 mimeType.contains("pdf") || mimeType == "application/pdf" -> {
                     // PDF viewer with loading and error handling
                     var isLoading by remember { mutableStateOf(true) }
@@ -140,6 +218,26 @@ fun FilePreviewDialog(
                                         imageVector = Icons.Default.Close,
                                         contentDescription = "Close"
                                     )
+                                }
+                            },
+                            actions = {
+                                IconButton(
+                                    onClick = {
+                                        if (fileUrl.isNotBlank()) {
+                                            scope.launch {
+                                                isDownloading = true
+                                                downloadToDownloads(context, fileUrl, fileName, mimeType)
+                                                isDownloading = false
+                                            }
+                                        }
+                                    },
+                                    enabled = fileUrl.isNotBlank() && !isDownloading
+                                ) {
+                                    if (isDownloading) {
+                                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Download, contentDescription = "Download")
+                                    }
                                 }
                             }
                         )
@@ -214,6 +312,26 @@ fun FilePreviewDialog(
                                         contentDescription = "Close"
                                     )
                                 }
+                            },
+                            actions = {
+                                IconButton(
+                                    onClick = {
+                                        if (fileUrl.isNotBlank()) {
+                                            scope.launch {
+                                                isDownloading = true
+                                                downloadToDownloads(context, fileUrl, fileName, mimeType)
+                                                isDownloading = false
+                                            }
+                                        }
+                                    },
+                                    enabled = fileUrl.isNotBlank() && !isDownloading
+                                ) {
+                                    if (isDownloading) {
+                                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    } else {
+                                        Icon(Icons.Default.Download, contentDescription = "Download")
+                                    }
+                                }
                             }
                         )
                         
@@ -251,6 +369,57 @@ fun FilePreviewDialog(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+private suspend fun downloadToDownloads(
+    context: android.content.Context,
+    fileUrl: String,
+    fileName: String,
+    mimeType: String
+) {
+    withContext(Dispatchers.IO) {
+        try {
+            val url = URL(fileUrl)
+            val connection = url.openConnection()
+            connection.connect()
+            val ext = URLConnection.guessContentTypeFromName(fileName)
+            val finalName = if (fileName.contains(".")) fileName else {
+                val guessed = ext?.substringAfterLast('/') ?: "bin"
+                "$fileName.$guessed"
+            }
+
+            val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            if (!downloadsDir.exists()) downloadsDir.mkdirs()
+            val file = File(downloadsDir, finalName)
+
+            connection.getInputStream().use { input ->
+                FileOutputStream(file).use { output ->
+                    input.copyTo(output)
+                }
+            }
+
+            val mediaScanIntent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE).apply {
+                data = Uri.fromFile(file)
+            }
+            context.sendBroadcast(mediaScanIntent)
+
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(
+                    context,
+                    "Saved to Downloads",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(
+                    context,
+                    "Failed to download file",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
             }
         }
     }
