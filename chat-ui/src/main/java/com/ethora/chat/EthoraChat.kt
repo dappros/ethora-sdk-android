@@ -245,7 +245,7 @@ fun Chat(
                             }
                             
                             override fun onMessageEdited(client: XMPPClient, roomJid: String, messageId: String, newText: String) {
-                                // Message editing is handled automatically by XMPPClient
+                                com.ethora.chat.core.store.MessageStore.editMessage(roomJid, messageId, newText)
                             }
                             
                             override fun onReactionReceived(client: XMPPClient, roomJid: String, messageId: String, from: String, reactions: List<String>, data: Map<String, String>) {

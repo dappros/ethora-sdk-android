@@ -15,7 +15,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
@@ -49,18 +52,23 @@ fun MessageBubble(
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
-    
+    var rowCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 2.dp)
+            .onGloballyPositioned { rowCoordinates = it }
             .pointerInput(message.id) {
                 detectTapGestures(
                     onLongPress = { offset ->
-                        // Convert offset to screen coordinates
-                        val screenX = offset.x
-                        val screenY = offset.y
-                        onLongPress?.invoke(screenX, screenY)
+                        val coords = rowCoordinates
+                        if (coords != null) {
+                            val windowPos = coords.localToWindow(Offset(offset.x, offset.y))
+                            onLongPress?.invoke(windowPos.x, windowPos.y)
+                        } else {
+                            onLongPress?.invoke(offset.x, offset.y)
+                        }
                     }
                 )
             },

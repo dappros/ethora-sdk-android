@@ -653,27 +653,29 @@ class ChatRoomViewModel(
     }
     
     /**
-     * Edit message
+     * Edit message.
+     * Optimistic update so UI changes immediately; server echo will confirm via onMessageEdited.
      */
     fun editMessage(messageId: String, newText: String) {
+        MessageStore.editMessage(room.jid, messageId, newText)
         viewModelScope.launch {
             try {
                 xmppClient?.editMessage(room.jid, messageId, newText)
-                // MessageStore will be updated via delegate callback
             } catch (e: Exception) {
                 android.util.Log.e("ChatRoomViewModel", "Error editing message", e)
             }
         }
     }
-    
+
     /**
-     * Delete message
+     * Delete message.
+     * Optimistic update so UI updates immediately; server echo will confirm via parseAndHandleDeleteMessage.
      */
     fun deleteMessage(messageId: String) {
+        MessageStore.markMessageAsDeleted(room.jid, messageId)
         viewModelScope.launch {
             try {
                 xmppClient?.deleteMessage(room.jid, messageId)
-                // MessageStore will be updated via delegate callback
             } catch (e: Exception) {
                 android.util.Log.e("ChatRoomViewModel", "Error deleting message", e)
             }

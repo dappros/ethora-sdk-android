@@ -84,6 +84,9 @@ fun ChatRoomView(
     
     // State for replying
     var replyingToMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
+
+    // State for delete confirmation (like web: modal before delete)
+    var deleteConfirmMessageId by remember { mutableStateOf<String?>(null) }
     
     // Selected user for profile view
     val selectedUser by UserStore.selectedUser.collectAsState()
@@ -613,53 +616,71 @@ fun ChatRoomView(
         
         // Context menu
         contextMenuMessage?.let { msg ->
-            val isUserMessage = msg.user.xmppUsername?.let { 
-                viewModel.currentUserXmppUsername?.contains(it) == true 
-            } ?: false
-            
-            val isReply = msg.isReply == true
-            
+            val currentUserXmppUsername = viewModel.currentUserXmppUsername
+            val messageXmppUsername = msg.user.xmppUsername ?: ""
+            val messageUserJID = msg.user.userJID ?: ""
+            val isUserMessage = when {
+                !currentUserXmppUsername.isNullOrBlank() -> {
+                    val containsXmppUsername = messageXmppUsername.isNotBlank() &&
+                        messageXmppUsername.contains(currentUserXmppUsername, ignoreCase = false)
+                    val containsUserJID = messageUserJID.isNotBlank() &&
+                        messageUserJID.contains(currentUserXmppUsername, ignoreCase = false)
+                    containsXmppUsername || containsUserJID
+                }
+                else -> {
+                    val currentUserId = viewModel.currentUserId
+                    val messageUserId = msg.user.id
+                    !currentUserId.isNullOrBlank() && !messageUserId.isNullOrBlank() &&
+                        currentUserId == messageUserId
+                }
+            }
+
             MessageContextMenu(
                 message = msg,
                 isUser = isUserMessage,
-                isReply = isReply,
                 visible = true,
                 x = contextMenuPosition.first,
                 y = contextMenuPosition.second,
-                onDismiss = { 
+                onDismiss = {
                     contextMenuMessage = null
                     contextMenuPosition = Pair(0f, 0f)
                 },
-                onReply = {
-                    replyingToMessage = msg
-                    android.util.Log.d("ChatRoomView", "Reply to message: ${msg.id}")
-                },
                 onCopy = {
-                    // Copy message text to clipboard
                     clipboardManager.setText(AnnotatedString(msg.body))
                 },
                 onEdit = {
-                    // Implement edit - set edit action and show edit input
-                    val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
-                    if (currentUser != null && msg.user.id == currentUser.id) {
-                        // Set edit mode in input
-                        editMessageId = msg.id
-                        editMessageText = msg.body
-                        android.util.Log.d("ChatRoomView", "Edit message: ${msg.id}")
-                    }
+                    editMessageId = msg.id
+                    editMessageText = msg.body
+                    contextMenuMessage = null
+                    contextMenuPosition = Pair(0f, 0f)
                 },
                 onDelete = {
-                    // Implement delete
-                    val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
-                    if (currentUser != null && msg.user.id == currentUser.id) {
-                        viewModel.deleteMessage(msg.id)
-                        android.util.Log.d("ChatRoomView", "Delete message: ${msg.id}")
+                    deleteConfirmMessageId = msg.id
+                    contextMenuMessage = null
+                    contextMenuPosition = Pair(0f, 0f)
+                }
+            )
+        }
+
+        if (deleteConfirmMessageId != null) {
+            AlertDialog(
+                onDismissRequest = { deleteConfirmMessageId = null },
+                title = { Text("Delete message") },
+                text = { Text("Are you sure you want to delete this message?") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            viewModel.deleteMessage(deleteConfirmMessageId!!)
+                            deleteConfirmMessageId = null
+                        }
+                    ) {
+                        Text("Delete", color = MaterialTheme.colorScheme.error)
                     }
                 },
-                onReaction = { emoji ->
-                    // Implement reaction
-                    viewModel.sendReaction(msg.id, emoji)
-                    android.util.Log.d("ChatRoomView", "Add reaction $emoji to message: ${msg.id}")
+                dismissButton = {
+                    TextButton(onClick = { deleteConfirmMessageId = null }) {
+                        Text("Cancel")
+                    }
                 }
             )
         }
