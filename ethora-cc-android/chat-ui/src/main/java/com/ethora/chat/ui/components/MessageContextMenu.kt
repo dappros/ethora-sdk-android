@@ -62,6 +62,7 @@ fun MessageContextMenu(
     val menuWidth = 240.dp
     val menuWidthPx = with(density) { menuWidth.toPx() }
     val menuHeightPx = with(density) { 200.dp.toPx() }
+    val menuHeightAbovePx = with(density) { 140.dp.toPx() }
     val gapPx = with(density) { 8.dp.toPx() }
 
     val spaceBelow = heightPx - boundsBottom - gapPx
@@ -77,9 +78,9 @@ fun MessageContextMenu(
 
     val adjustedY = when {
         spaceBelow >= menuHeightPx -> boundsBottom + gapPx
-        spaceAbove >= menuHeightPx -> boundsTop - gapPx - menuHeightPx
+        spaceAbove >= menuHeightPx -> boundsTop - gapPx - menuHeightAbovePx
         else -> {
-            val fallbackY = if (spaceBelow >= spaceAbove) boundsBottom + gapPx else boundsTop - gapPx - menuHeightPx
+            val fallbackY = if (spaceBelow >= spaceAbove) boundsBottom + gapPx else boundsTop - gapPx - menuHeightAbovePx
             fallbackY.coerceIn(gapPx, (heightPx - menuHeightPx - gapPx).coerceAtLeast(gapPx))
         }
     }
