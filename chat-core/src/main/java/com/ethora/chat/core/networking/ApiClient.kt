@@ -58,19 +58,28 @@ object ApiClient {
             val authInterceptor = Interceptor { chain ->
                 val originalRequest = chain.request()
                 val requestUrl = originalRequest.url.toString()
-                
+                val explicitAuthHeader = originalRequest.header("Authorization")
                 val builder = originalRequest.newBuilder()
-                    .header("Authorization", appToken)
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json")
+                val bodyContentType = originalRequest.body?.contentType()
+                val isMultipart = bodyContentType?.type == "multipart"
+                if (originalRequest.header("Content-Type").isNullOrBlank() && !isMultipart) {
+                    builder.header("Content-Type", "application/json")
+                }
+                if (originalRequest.header("Accept").isNullOrBlank()) {
+                    builder.header("Accept", "application/json")
+                }
                 
                 // Don't add user token for login or sign-up endpoints
                 val isAuthEndpoint = requestUrl.contains("users/login-with-email") || 
                                    requestUrl.contains("users/sign-up-with-email")
-                                   
-                if (!isAuthEndpoint) {
-                    userToken?.let {
-                        builder.header("Authorization", it)
+
+                // Respect per-request Authorization (needed for upload and other custom headers).
+                if (explicitAuthHeader.isNullOrBlank()) {
+                    builder.header("Authorization", appToken)
+                    if (!isAuthEndpoint) {
+                        userToken?.let {
+                            builder.header("Authorization", it)
+                        }
                     }
                 }
                 
@@ -103,7 +112,7 @@ object ApiClient {
                 })
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
-                .writeTimeout(30, TimeUnit.SECONDS)
+                .writeTimeout(120, TimeUnit.SECONDS)
                 .build()
 
             retrofit = Retrofit.Builder()

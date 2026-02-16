@@ -115,6 +115,28 @@ class XMPPClient(
     }
 
     /**
+     * Wait for XMPP to be fully connected (like web ensureConnected).
+     * Polls until isFullyConnected() or timeout. Used before sending media.
+     */
+    suspend fun ensureConnected(timeoutMs: Long = 15000): Boolean {
+        if (isFullyConnected()) return true
+        if (status == ConnectionStatus.OFFLINE || status == ConnectionStatus.ERROR) {
+            Log.w(TAG, "ensureConnected: not connected (status=$status), cannot wait")
+            return false
+        }
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            if (isFullyConnected()) {
+                Log.d(TAG, "ensureConnected: ready after ${System.currentTimeMillis() - start}ms")
+                return true
+            }
+            kotlinx.coroutines.delay(300)
+        }
+        Log.e(TAG, "ensureConnected: timeout after ${timeoutMs}ms, isFullyConnected=${isFullyConnected()}")
+        return isFullyConnected()
+    }
+
+    /**
      * Check if a room has already received a presence response
      */
     fun hasPresenceResponseForRoom(roomJID: String): Boolean {
@@ -400,18 +422,23 @@ class XMPPClient(
     }
     
     /**
-     * Send media message
+     * Send media message.
+     * Like web: wrapWithConnectionCheck -> ensureConnected() then send.
+     * Waits for XMPP to be fully connected before sending (up to 15s).
      */
     suspend fun sendMediaMessage(roomJID: String, mediaData: Map<String, Any>, messageId: String): Boolean {
         return try {
             if (!isFullyConnected()) {
-                Log.e(TAG, "Cannot send media message: not fully connected")
-                return false
+                Log.w(TAG, "Send media: not fully connected yet, waiting for connection (ensureConnected)...")
+                if (!ensureConnected(15000)) {
+                    Log.e(TAG, "Cannot send media message: still not fully connected after wait")
+                    return false
+                }
             }
             
             if (!hasPresenceResponseForRoom(roomJID)) {
                 sendPresenceInRoom(roomJID)
-                kotlinx.coroutines.delay(200)
+                kotlinx.coroutines.delay(500)
             }
             
             if (useWebSocket && webSocketConnection != null) {
@@ -419,8 +446,9 @@ class XMPPClient(
                 if (wsConnection != null) {
                     return wsConnection.sendMediaMessage(roomJID, mediaData, messageId)
                 }
+                Log.e(TAG, "Send media: webSocketConnection was non-null but wsConnection is null")
             } else {
-                Log.e(TAG, "Media messages not supported for TCP connection")
+                Log.e(TAG, "Media messages not supported for TCP connection (useWebSocket=$useWebSocket, wsNull=${webSocketConnection == null})")
                 return false
             }
             false

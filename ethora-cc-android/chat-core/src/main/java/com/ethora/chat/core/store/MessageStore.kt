@@ -9,6 +9,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Message store for managing messages state
@@ -22,6 +24,7 @@ object MessageStore {
     private var messageCache: MessageCache? = null
     private val persistenceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val pendingScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val persistenceMutex = Mutex()
     
     /**
      * Initialize with MessageCache for persistence
@@ -59,19 +62,14 @@ object MessageStore {
     private fun persistMessage(roomJid: String, message: Message) {
         val cache = messageCache ?: return
         persistenceScope.launch {
-            try {
-                cache.saveMessage(message)
-                // Limit to last 50 messages per room (matches web: limitMessagesTransform)
-                val currentMessages = _messages.value[roomJid] ?: emptyList()
-                if (currentMessages.size > 50) {
-                    // Remove oldest messages from persistence
-                    val messagesToKeep = currentMessages.takeLast(50)
-                    // Clear and re-save last 50
-                    cache.clearMessagesForRoom(roomJid)
-                    cache.saveMessages(messagesToKeep)
+            persistenceMutex.withLock {
+                try {
+                    // Keep writes lightweight and serialized to avoid Room/SQLite OOM
+                    // when many messages arrive right after login.
+                    cache.saveMessage(message)
+                } catch (e: Exception) {
+                    android.util.Log.e("MessageStore", "❌ Error persisting message", e)
                 }
-            } catch (e: Exception) {
-                android.util.Log.e("MessageStore", "❌ Error persisting message", e)
             }
         }
     }
@@ -82,16 +80,18 @@ object MessageStore {
     private fun persistMessages(roomJid: String, messages: List<Message>) {
         val cache = messageCache ?: return
         persistenceScope.launch {
-            try {
-                // Limit to last 50 messages per room (matches web: limitMessagesTransform)
-                val messagesToSave = if (messages.size > 50) {
-                    messages.takeLast(50)
-                } else {
-                    messages
+            persistenceMutex.withLock {
+                try {
+                    // Limit to last 50 messages per room (matches web: limitMessagesTransform)
+                    val messagesToSave = if (messages.size > 50) {
+                        messages.takeLast(50)
+                    } else {
+                        messages
+                    }
+                    cache.saveMessages(messagesToSave)
+                } catch (e: Exception) {
+                    android.util.Log.e("MessageStore", "❌ Error persisting messages", e)
                 }
-                cache.saveMessages(messagesToSave)
-            } catch (e: Exception) {
-                android.util.Log.e("MessageStore", "❌ Error persisting messages", e)
             }
         }
     }
@@ -225,7 +225,9 @@ object MessageStore {
         // Find pending message - match by content (text or media)
         val pendingIndex = roomMessages.indexOfFirst { existing ->
             if (existing.pending != true) return@indexOfFirst false
-            if ((now - existing.date.time) > 30000) return@indexOfFirst false // Within 30 seconds (increased for media uploads)
+            val existingIsMedia = existing.isMediafile == "true" || existing.location != null || existing.fileName != null || existing.body == "media"
+            val windowMs = if (existingIsMedia) 60_000L else 30_000L
+            if ((now - existing.date.time) > windowMs) return@indexOfFirst false
             
             // Match by user (more flexible matching)
             val existingUserId = existing.user.id.lowercase()
@@ -247,18 +249,35 @@ object MessageStore {
             if (isMedia || receivedIsMedia) {
                 // Media matching: check location, locationPreview, or fileName
                 // Also match if both have "media" body and same user
+                val normalizeForMatch: (String?) -> String? = { value ->
+                    value
+                        ?.replace("&amp;", "&")
+                        ?.replace("&lt;", "<")
+                        ?.replace("&gt;", ">")
+                        ?.replace("&quot;", "\"")
+                        ?.replace("&apos;", "'")
+                        ?.trim()
+                        ?.takeIf { it.isNotBlank() }
+                }
+                val existingLocation = normalizeForMatch(existing.location)
+                val receivedLocation = normalizeForMatch(receivedMessage.location)
+                val existingPreview = normalizeForMatch(existing.locationPreview)
+                val receivedPreview = normalizeForMatch(receivedMessage.locationPreview)
                 val locationMatch = existing.location != null && 
                                    receivedMessage.location != null && 
-                                   existing.location == receivedMessage.location
+                                   existingLocation == receivedLocation
                 val locationPreviewMatch = existing.locationPreview != null && 
                                           receivedMessage.locationPreview != null && 
-                                          existing.locationPreview == receivedMessage.locationPreview
+                                          existingPreview == receivedPreview
                 val fileNameMatch = existing.fileName != null && 
                                    receivedMessage.fileName != null && 
                                    existing.fileName == receivedMessage.fileName
+                val originalNameMatch = existing.originalName != null &&
+                    receivedMessage.originalName != null &&
+                    existing.originalName == receivedMessage.originalName
                 val mediaBodyMatch = existing.body == "media" && receivedMessage.body == "media"
                 
-                locationMatch || locationPreviewMatch || fileNameMatch || mediaBodyMatch
+                locationMatch || locationPreviewMatch || fileNameMatch || originalNameMatch || mediaBodyMatch
             } else {
                 // Text matching: match by body content
                 existing.body == receivedMessage.body

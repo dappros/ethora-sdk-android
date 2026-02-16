@@ -2,11 +2,13 @@ package com.ethora.chat.ui.components
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.networking.AuthAPIHelper
 import com.ethora.chat.core.store.MessageStore
 import com.ethora.chat.core.store.MessageLoader
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.xmpp.XMPPClient
@@ -487,7 +489,7 @@ class ChatRoomViewModel(
                 
                 // Create optimistic message
                 // Use timestamp-based ID that will be replaced by server echo
-                val messageId = "send-media-message-${System.currentTimeMillis()}"
+                val messageId = "send-media-message:${UUID.randomUUID()}"
                 val optimisticMessage = Message(
                     id = messageId,
                     body = "media",
@@ -514,17 +516,23 @@ class ChatRoomViewModel(
                 // Upload file with retry
                 android.util.Log.d("ChatRoomViewModel", "Uploading file: ${uploadFile.name} (${uploadMimeType}), attempt ${retryCount + 1}")
                 var uploadResult: com.ethora.chat.core.networking.FileUploadResult? = null
-                var uploadError: Exception? = null
                 
+                val baseUrl = ChatStore.config.value?.baseUrl ?: AppConfig.defaultBaseURL
                 try {
-                    uploadResult = AuthAPIHelper.uploadFile(uploadFile, uploadMimeType, token)
+                    uploadResult = AuthAPIHelper.uploadFile(uploadFile, uploadMimeType, token, baseUrl)
                 } catch (e: Exception) {
-                    uploadError = e
                     android.util.Log.e("ChatRoomViewModel", "File upload exception", e)
                 }
                 
                 if (uploadResult == null) {
-                    android.util.Log.e("ChatRoomViewModel", "File upload failed")
+                    if (retryCount < 2) {
+                        android.util.Log.w("ChatRoomViewModel", "File upload failed, retrying... attempt ${retryCount + 2}")
+                        kotlinx.coroutines.delay(1200)
+                        sendMedia(file, mimeType, retryCount + 1)
+                        MessageStore.removeMessage(room.jid, messageId)
+                        return@launch
+                    }
+                    android.util.Log.e("ChatRoomViewModel", "File upload failed after retries")
                     MessageStore.removeMessage(room.jid, messageId)
                     return@launch
                 }
@@ -591,7 +599,7 @@ class ChatRoomViewModel(
                     MessageStore.updateMessage(room.jid, updatedMessage)
                     android.util.Log.d("ChatRoomViewModel", "Updated optimistic message with upload data (pending=true, waiting for server echo to match by location: ${uploadResult.location})")
                 } else {
-                    android.util.Log.e("ChatRoomViewModel", "Failed to send media message via XMPP")
+                    android.util.Log.e("ChatRoomViewModel", "Failed to send media message via XMPP. xmppClient=${xmppClient != null}, isFullyConnected=${xmppClient?.isFullyConnected()} (check XMPPClient/XMPPWebSocket logs for cause)")
                     // Remove failed message
                     MessageStore.removeMessage(room.jid, messageId)
                 }

@@ -136,16 +136,8 @@ fun ChatRoomView(
     
     // Debug logging
     LaunchedEffect(messages.size, isLoading) {
-        android.util.Log.d("ChatRoomView", "Messages in UI: ${messages.size}, isLoading: $isLoading")
         if (messages.isEmpty() && !isLoading) {
             android.util.Log.w("ChatRoomView", "No messages displayed but not loading!")
-        }
-    }
-    
-    // Log message details for debugging
-    LaunchedEffect(messages) {
-        if (messages.isNotEmpty()) {
-            android.util.Log.d("ChatRoomView", "First message: ${messages.first().body.take(50)}, Last: ${messages.last().body.take(50)}")
         }
     }
     

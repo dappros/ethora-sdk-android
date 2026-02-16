@@ -144,23 +144,29 @@ class XMPPWebSocketConnection(
                 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                     Log.d(TAG, "🔌 WebSocket closing: $code - $reason")
+                    this@XMPPWebSocketConnection.webSocket = null
                     isConnected = false
                     isAuthenticated = false
                     authState = AuthState.NOT_STARTED
+                    clientWrapper?.let { delegate?.onXMPPClientDisconnected(it) }
                 }
                 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     Log.d(TAG, "🔌 WebSocket closed: $code - $reason")
+                    this@XMPPWebSocketConnection.webSocket = null
                     isConnected = false
                     isAuthenticated = false
                     authState = AuthState.NOT_STARTED
+                    clientWrapper?.let { delegate?.onXMPPClientDisconnected(it) }
                 }
                 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.e(TAG, "❌ WebSocket failure", t)
+                    this@XMPPWebSocketConnection.webSocket = null
                     isConnected = false
                     isAuthenticated = false
                     authState = AuthState.NOT_STARTED
+                    clientWrapper?.let { delegate?.onXMPPClientDisconnected(it) }
                 }
             })
             
@@ -555,11 +561,11 @@ class XMPPWebSocketConnection(
             // Extract room JID from 'from' attribute (format: room@conference.domain/user@domain/resource)
             val roomJid = from.split("/").firstOrNull() ?: return
             
-            // Verify room exists before processing message (matches web: if (!roomExist) return)
+            // Do not drop messages for unknown rooms: room list can be out of sync briefly.
+            // We still need to process them for pending reconciliation.
             val roomExists = com.ethora.chat.core.store.RoomStore.getRoomByJid(roomJid) != null
             if (!roomExists) {
-                Log.w(TAG, "⚠️ Received message for unknown room: $roomJid, ignoring")
-                return
+                Log.w(TAG, "⚠️ Received message for unknown room: $roomJid, processing anyway")
             }
             
             // Extract user info from 'from' attribute
@@ -652,6 +658,11 @@ class XMPPWebSocketConnection(
     private fun extractAttribute(xml: String, attr: String): String? {
         val regex = "$attr=['\"]([^'\"]+)['\"]".toRegex()
         return regex.find(xml)?.groupValues?.get(1)
+            ?.replace("&amp;", "&")
+            ?.replace("&lt;", "<")
+            ?.replace("&gt;", ">")
+            ?.replace("&quot;", "\"")
+            ?.replace("&apos;", "'")
     }
     
     private fun extractElementText(xml: String, element: String): String? {
@@ -976,7 +987,13 @@ class XMPPWebSocketConnection(
         
         // Get current user's JID for from attribute
         val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
-        val fromJid = "${currentUser?.xmppUsername ?: ""}@$host"
+        val senderJid = when {
+            !currentUser?.userJID.isNullOrBlank() && currentUser?.userJID?.contains("@") == true -> currentUser?.userJID
+            !currentUser?.xmppUsername.isNullOrBlank() && currentUser?.xmppUsername?.contains("@") == true -> currentUser?.xmppUsername
+            !currentUser?.xmppUsername.isNullOrBlank() -> "${currentUser?.xmppUsername}@$host"
+            else -> null
+        }
+        val fromAttribute = senderJid?.let { """ from="$it"""" } ?: ""
         
         // Build data element XML with all media attributes
         val dataAttributes = mediaData.map { (key, value) ->
@@ -989,10 +1006,34 @@ class XMPPWebSocketConnection(
             "$key=\"$escapedValue\""
         }.joinToString(" ")
         
+        // Escape messageId for XML id attribute
+        val safeId = messageId
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&apos;")
         // Matches web version: includes from attribute and store hint
-        val message = """<message id="$messageId" type="groupchat" from="$fromJid" to="$fixedRoomJid"><body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
+        val message = """<message id="$safeId" type="groupchat"$fromAttribute to="$fixedRoomJid"><body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMediaMessage() to $fixedRoomJid")
-        sendRaw(message)
+        val ws = webSocket
+        if (ws == null) {
+            Log.e(TAG, "❌ Failed to send media message: WebSocket is null (isConnected=$isConnected, isAuthenticated=$isAuthenticated)")
+            return false
+        }
+        var sent = ws.send(message)
+        if (!sent) {
+            // One retry: socket state can be briefly inconsistent
+            kotlinx.coroutines.delay(50)
+            val ws2 = webSocket
+            if (ws2 != null) {
+                sent = ws2.send(message)
+            }
+        }
+        if (!sent) {
+            Log.e(TAG, "❌ Failed to send media message: WebSocket.send() returned false (socket may be closed; isConnected=$isConnected)")
+            return false
+        }
         Log.d(TAG, "📤 Sent media message to $fixedRoomJid")
         return true
     }

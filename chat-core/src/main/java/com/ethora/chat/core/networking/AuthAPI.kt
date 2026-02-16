@@ -2,6 +2,9 @@ package com.ethora.chat.core.networking
 
 import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.store.UserStore
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
@@ -31,8 +34,9 @@ interface AuthAPI {
     @POST("files/")
     suspend fun uploadFile(
         @Header("Authorization") token: String,
+        @Header("Accept") accept: String = "*/*",
         @Part file: MultipartBody.Part
-    ): Response<FileUploadResponse>
+    ): Response<JsonObject>
 }
 
 /**
@@ -255,20 +259,130 @@ object AuthAPIHelper {
                 requestFile
             )
             
-            val response = api.uploadFile("Bearer $token", multipartBody)
-            if (response.isSuccessful && response.body() != null) {
-                val body = response.body()!!
-                val result = body.data?.results?.firstOrNull()
-                if (result == null) {
-                   android.util.Log.e("AuthAPIHelper", "File upload succeeded but no results found or data is null.")
+            fun buildAuthHeaders(rawToken: String): LinkedHashSet<String> {
+                return linkedSetOf<String>().apply {
+                    add(rawToken)
+                    if (!rawToken.startsWith("Bearer ", ignoreCase = true)) {
+                        add("Bearer $rawToken")
+                    }
                 }
-                result
-            } else {
-                android.util.Log.e("AuthAPIHelper", "File upload failed: ${response.code()} ${response.message()}")
-                null
             }
+
+            var currentToken = token
+            var hasRefreshedToken = false
+            while (true) {
+                var shouldRetryWithRefreshedToken = false
+                for (authHeader in buildAuthHeaders(currentToken)) {
+                    val response = api.uploadFile(authHeader, "*/*", multipartBody)
+                    if (response.isSuccessful && response.body() != null) {
+                        val body = response.body()!!
+                        val result = parseUploadResult(body)
+                        if (result == null) {
+                            android.util.Log.e("AuthAPIHelper", "File upload succeeded but no parsable result. body=$body")
+                        }
+                        return result
+                    }
+
+                    val code = response.code()
+                    val errorBody = response.errorBody()?.string()
+                    android.util.Log.w(
+                        "AuthAPIHelper",
+                        "File upload failed with auth=${if (authHeader.startsWith("Bearer ")) "bearer" else "raw"}: $code ${response.message()} body=${errorBody ?: "<empty>"}"
+                    )
+
+                    if (code == 401 && !hasRefreshedToken) {
+                        val refreshTokenValue = UserStore.refreshToken.value
+                        if (!refreshTokenValue.isNullOrBlank()) {
+                            try {
+                                val refreshed = refreshToken(refreshTokenValue, baseUrl)
+                                UserStore.updateTokens(refreshed.token, refreshed.refreshToken)
+                                currentToken = refreshed.token
+                                hasRefreshedToken = true
+                                shouldRetryWithRefreshedToken = true
+                                android.util.Log.i("AuthAPIHelper", "Token refreshed after upload 401, retrying upload")
+                                break
+                            } catch (e: Exception) {
+                                android.util.Log.e("AuthAPIHelper", "Token refresh after upload 401 failed", e)
+                            }
+                        }
+                    }
+                }
+
+                if (shouldRetryWithRefreshedToken) {
+                    continue
+                }
+                break
+            }
+
+            android.util.Log.e("AuthAPIHelper", "File upload failed for all authorization header variants (baseUrl=$baseUrl)")
+            null
         } catch (e: Exception) {
             android.util.Log.e("AuthAPIHelper", "File upload exception", e)
+            null
+        }
+    }
+
+    private fun parseUploadResult(root: JsonObject): FileUploadResult? {
+        return try {
+            fun JsonObject.safeObj(key: String): JsonObject? =
+                get(key)?.takeIf { it.isJsonObject }?.asJsonObject
+            fun JsonObject.safeArr(key: String): JsonArray? =
+                get(key)?.takeIf { it.isJsonArray }?.asJsonArray
+            fun firstObjectFromArray(arr: JsonArray?): JsonObject? {
+                if (arr == null || arr.size() == 0) return null
+                return arr.asSequence().firstOrNull { it.isJsonObject }?.asJsonObject
+            }
+            val dataObj = root.safeObj("data")
+            val candidate: JsonObject? =
+                firstObjectFromArray(dataObj?.safeArr("results"))
+                    ?: firstObjectFromArray(root.safeArr("results"))
+                    ?: dataObj?.safeObj("result")
+                    ?: root.safeObj("result")
+                    ?: dataObj?.safeObj("file")
+                    ?: root.safeObj("file")
+                    ?: dataObj?.takeIf { it.has("filename") || it.has("location") }
+                    ?: root.takeIf { it.has("filename") || it.has("location") }
+
+            candidate?.toFileUploadResult()
+        } catch (e: Exception) {
+            android.util.Log.e("AuthAPIHelper", "parseUploadResult failed", e)
+            null
+        }
+    }
+
+    private fun JsonObject.toFileUploadResult(): FileUploadResult? {
+        return try {
+            fun string(name: String): String? =
+                get(name)?.takeIf { !it.isJsonNull }?.asString
+            fun bool(name: String): Boolean? =
+                get(name)?.takeIf { !it.isJsonNull }?.asBoolean
+
+            val filename = string("filename") ?: string("fileName") ?: return null
+            val location = string("location") ?: return null
+            val mimetype = string("mimetype") ?: string("mimeType") ?: "application/octet-stream"
+            val originalName = string("originalName") ?: string("originalname") ?: filename
+            val size = string("size") ?: "0"
+            val createdAt = string("createdAt") ?: string("created_at") ?: System.currentTimeMillis().toString()
+
+            FileUploadResult(
+            filename = filename,
+            location = location,
+            locationPreview = string("locationPreview"),
+            mimetype = mimetype,
+            originalName = originalName,
+            size = size,
+            createdAt = createdAt,
+            expiresAt = string("expiresAt"),
+            isVisible = bool("isVisible"),
+            ownerKey = string("ownerKey"),
+            updatedAt = string("updatedAt"),
+            userId = string("userId"),
+            duration = string("duration"),
+            waveForm = string("waveForm"),
+            attachmentId = string("attachmentId") ?: string("_id") ?: string("id")
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("AuthAPIHelper", "toFileUploadResult failed", e)
             null
         }
     }
