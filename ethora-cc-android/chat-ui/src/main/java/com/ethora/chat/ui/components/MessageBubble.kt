@@ -53,6 +53,8 @@ fun MessageBubble(
 ) {
     val density = LocalDensity.current
     var rowCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var bubbleCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var surfaceCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
 
     Row(
         modifier = modifier
@@ -62,11 +64,12 @@ fun MessageBubble(
             .pointerInput(message.id) {
                 detectTapGestures(
                     onLongPress = { offset ->
-                        val coords = rowCoordinates
-                        if (coords != null) {
-                            val tapRoot = coords.localToRoot(Offset(offset.x, offset.y))
-                            val topLeft = coords.localToRoot(Offset(0f, 0f))
-                            val bottomRight = coords.localToRoot(Offset(coords.size.width.toFloat(), coords.size.height.toFloat()))
+                        val rowCoords = rowCoordinates
+                        val coordsForBounds = surfaceCoordinates ?: bubbleCoordinates ?: rowCoords
+                        if (coordsForBounds != null) {
+                            val tapRoot = (rowCoords ?: coordsForBounds)!!.localToRoot(Offset(offset.x, offset.y))
+                            val topLeft = coordsForBounds.localToRoot(Offset(0f, 0f))
+                            val bottomRight = coordsForBounds.localToRoot(Offset(coordsForBounds.size.width.toFloat(), coordsForBounds.size.height.toFloat()))
                             onLongPress?.invoke(
                                 tapRoot.x, tapRoot.y,
                                 topLeft.x, topLeft.y, bottomRight.x, bottomRight.y
@@ -100,7 +103,8 @@ fun MessageBubble(
         Column(
             modifier = Modifier
                 .weight(1f, fill = false)
-                .widthIn(max = 280.dp), // Slightly reduced for better wrapping
+                .widthIn(max = 280.dp)
+                .onGloballyPositioned { bubbleCoordinates = it },
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
         ) {
             // Username - only show if showUsername is true and not from user
@@ -116,14 +120,16 @@ fun MessageBubble(
             }
             
             Surface(
-                modifier = Modifier.clip(
-                    RoundedCornerShape(
-                        topStart = 20.dp,
-                        topEnd = 20.dp,
-                        bottomStart = if (isUser) 20.dp else (if (showAvatar) 4.dp else 20.dp),
-                        bottomEnd = if (isUser) (if (showAvatar) 4.dp else 20.dp) else 20.dp
+                modifier = Modifier
+                    .clip(
+                        RoundedCornerShape(
+                            topStart = 20.dp,
+                            topEnd = 20.dp,
+                            bottomStart = if (isUser) 20.dp else (if (showAvatar) 4.dp else 20.dp),
+                            bottomEnd = if (isUser) (if (showAvatar) 4.dp else 20.dp) else 20.dp
+                        )
                     )
-                ),
+                    .onGloballyPositioned { surfaceCoordinates = it },
                 color = if (isUser) 
                     MaterialTheme.colorScheme.primary 
                 else 

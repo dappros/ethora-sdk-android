@@ -62,8 +62,10 @@ fun MessageContextMenu(
     val menuWidth = 240.dp
     val menuWidthPx = with(density) { menuWidth.toPx() }
     val menuHeightPx = with(density) { 200.dp.toPx() }
-    // When placing above message, use smaller estimate so menu sits closer (real height ~130–150dp)
-    val menuHeightAbovePx = with(density) { 140.dp.toPx() }
+    // For "above" placement: own message = 3 items (~125dp), other = 1 item "Copy" only (~48dp)
+    val menuHeightAbovePx = with(density) {
+        if (isUser) 125.dp.toPx() else 48.dp.toPx()
+    }
     val gapPx = with(density) { 8.dp.toPx() }
 
     val spaceBelow = heightPx - boundsBottom - gapPx
@@ -77,11 +79,12 @@ fun MessageContextMenu(
         (boundsLeft + gapPx).coerceIn(minX, maxX)
     }
 
+    val rawYAbove = boundsTop - gapPx - menuHeightAbovePx
     val adjustedY = when {
         spaceBelow >= menuHeightPx -> boundsBottom + gapPx
-        spaceAbove >= menuHeightPx -> boundsTop - gapPx - menuHeightAbovePx
+        spaceAbove >= menuHeightPx -> rawYAbove.coerceAtLeast(gapPx)
         else -> {
-            val fallbackY = if (spaceBelow >= spaceAbove) boundsBottom + gapPx else boundsTop - gapPx - menuHeightAbovePx
+            val fallbackY = if (spaceBelow >= spaceAbove) boundsBottom + gapPx else rawYAbove
             fallbackY.coerceIn(gapPx, (heightPx - menuHeightPx - gapPx).coerceAtLeast(gapPx))
         }
     }
