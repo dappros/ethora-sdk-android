@@ -47,7 +47,7 @@ fun MessageBubble(
     showUsername: Boolean = true,
     showTimestamp: Boolean = true,
     onMediaClick: ((Message) -> Unit)? = null,
-    onLongPress: ((Float, Float) -> Unit)? = null,
+    onLongPress: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onAvatarClick: ((User) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -64,10 +64,15 @@ fun MessageBubble(
                     onLongPress = { offset ->
                         val coords = rowCoordinates
                         if (coords != null) {
-                            val windowPos = coords.localToWindow(Offset(offset.x, offset.y))
-                            onLongPress?.invoke(windowPos.x, windowPos.y)
+                            val tapRoot = coords.localToRoot(Offset(offset.x, offset.y))
+                            val topLeft = coords.localToRoot(Offset(0f, 0f))
+                            val bottomRight = coords.localToRoot(Offset(coords.size.width.toFloat(), coords.size.height.toFloat()))
+                            onLongPress?.invoke(
+                                tapRoot.x, tapRoot.y,
+                                topLeft.x, topLeft.y, bottomRight.x, bottomRight.y
+                            )
                         } else {
-                            onLongPress?.invoke(offset.x, offset.y)
+                            onLongPress?.invoke(offset.x, offset.y, offset.x, offset.y, offset.x, offset.y)
                         }
                     }
                 )

@@ -12,6 +12,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -24,6 +25,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.runtime.snapshotFlow
+import androidx.activity.compose.BackHandler
 import kotlinx.coroutines.launch
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.store.ScrollPositionStore
@@ -71,9 +73,12 @@ fun ChatRoomView(
     // State for file preview dialog
     var previewMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
     
-    // State for context menu
+    // State for context menu (tap + message bounds in root coords)
     var contextMenuMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
-    var contextMenuPosition by remember { mutableStateOf(Pair(0f, 0f)) }
+    var contextMenuTap by remember { mutableStateOf(Pair(0f, 0f)) }
+    var contextMenuBounds by remember { mutableStateOf(Pair(0f, 0f) to Pair(0f, 0f)) }
+    var messagesBoxOrigin by remember { mutableStateOf(Pair(0f, 0f)) }
+    var messagesBoxSize by remember { mutableStateOf(Pair(0f, 0f)) }
     
     // State for edit mode
     var editMessageId by remember { mutableStateOf<String?>(null) }
@@ -87,6 +92,12 @@ fun ChatRoomView(
 
     // State for delete confirmation (like web: modal before delete)
     var deleteConfirmMessageId by remember { mutableStateOf<String?>(null) }
+
+    BackHandler(enabled = contextMenuMessage != null) {
+        contextMenuMessage = null
+        contextMenuTap = Pair(0f, 0f)
+        contextMenuBounds = Pair(0f, 0f) to Pair(0f, 0f)
+    }
     
     // Selected user for profile view
     val selectedUser by UserStore.selectedUser.collectAsState()
@@ -264,7 +275,15 @@ fun ChatRoomView(
             }
         
         // Messages list
-        Box(modifier = Modifier.weight(1f)) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .onGloballyPositioned { coords ->
+                    val pos = coords.localToRoot(androidx.compose.ui.geometry.Offset.Zero)
+                    messagesBoxOrigin = Pair(pos.x, pos.y)
+                    messagesBoxSize = Pair(coords.size.width.toFloat(), coords.size.height.toFloat())
+                }
+        ) {
             when {
                 messages.isNotEmpty() -> {
                     // Show messages
@@ -394,9 +413,10 @@ fun ChatRoomView(
                                         showUsername = isFirstInGroup, // Only show username on first message
                                         showTimestamp = true,
                                         onMediaClick = { msg -> previewMessage = msg },
-                                        onLongPress = { x, y ->
+                                        onLongPress = { tapX, tapY, left, top, right, bottom ->
                                             contextMenuMessage = message
-                                            contextMenuPosition = Pair(x, y)
+                                            contextMenuTap = Pair(tapX, tapY)
+                                            contextMenuBounds = Pair(left, top) to Pair(right, bottom)
                                         },
                                         onAvatarClick = { user ->
                                             // Don't show profile for deleted users
@@ -554,6 +574,66 @@ fun ChatRoomView(
                     }
                 }
             }
+            contextMenuMessage?.let { msg ->
+                val (boxLeft, boxTop) = messagesBoxOrigin
+                val (boxW, boxH) = messagesBoxSize
+                val relLeft = contextMenuBounds.first.first - boxLeft
+                val relTop = contextMenuBounds.first.second - boxTop
+                val relRight = contextMenuBounds.second.first - boxLeft
+                val relBottom = contextMenuBounds.second.second - boxTop
+                val currentUserXmppUsername = viewModel.currentUserXmppUsername
+                val messageXmppUsername = msg.user.xmppUsername ?: ""
+                val messageUserJID = msg.user.userJID ?: ""
+                val isUserMessage = when {
+                    !currentUserXmppUsername.isNullOrBlank() -> {
+                        val containsXmppUsername = messageXmppUsername.isNotBlank() &&
+                            messageXmppUsername.contains(currentUserXmppUsername, ignoreCase = false)
+                        val containsUserJID = messageUserJID.isNotBlank() &&
+                            messageUserJID.contains(currentUserXmppUsername, ignoreCase = false)
+                        containsXmppUsername || containsUserJID
+                    }
+                    else -> {
+                        val currentUserId = viewModel.currentUserId
+                        val messageUserId = msg.user.id
+                        !currentUserId.isNullOrBlank() && !messageUserId.isNullOrBlank() &&
+                            currentUserId == messageUserId
+                    }
+                }
+                MessageContextMenu(
+                    message = msg,
+                    isUser = isUserMessage,
+                    visible = true,
+                    tapX = contextMenuTap.first,
+                    tapY = contextMenuTap.second,
+                    boundsLeft = relLeft,
+                    boundsTop = relTop,
+                    boundsRight = relRight,
+                    boundsBottom = relBottom,
+                    containerWidthPx = boxW,
+                    containerHeightPx = boxH,
+                    onDismiss = {
+                        contextMenuMessage = null
+                        contextMenuTap = Pair(0f, 0f)
+                        contextMenuBounds = Pair(0f, 0f) to Pair(0f, 0f)
+                    },
+                    onCopy = {
+                        clipboardManager.setText(AnnotatedString(msg.body))
+                    },
+                    onEdit = {
+                        editMessageId = msg.id
+                        editMessageText = msg.body
+                        contextMenuMessage = null
+                        contextMenuTap = Pair(0f, 0f)
+                        contextMenuBounds = Pair(0f, 0f) to Pair(0f, 0f)
+                    },
+                    onDelete = {
+                        deleteConfirmMessageId = msg.id
+                        contextMenuMessage = null
+                        contextMenuTap = Pair(0f, 0f)
+                        contextMenuBounds = Pair(0f, 0f) to Pair(0f, 0f)
+                    }
+                )
+            }
         }
         
         // Typing indicator
@@ -614,54 +694,6 @@ fun ChatRoomView(
             onDismiss = { previewMessage = null }
         )
         
-        // Context menu
-        contextMenuMessage?.let { msg ->
-            val currentUserXmppUsername = viewModel.currentUserXmppUsername
-            val messageXmppUsername = msg.user.xmppUsername ?: ""
-            val messageUserJID = msg.user.userJID ?: ""
-            val isUserMessage = when {
-                !currentUserXmppUsername.isNullOrBlank() -> {
-                    val containsXmppUsername = messageXmppUsername.isNotBlank() &&
-                        messageXmppUsername.contains(currentUserXmppUsername, ignoreCase = false)
-                    val containsUserJID = messageUserJID.isNotBlank() &&
-                        messageUserJID.contains(currentUserXmppUsername, ignoreCase = false)
-                    containsXmppUsername || containsUserJID
-                }
-                else -> {
-                    val currentUserId = viewModel.currentUserId
-                    val messageUserId = msg.user.id
-                    !currentUserId.isNullOrBlank() && !messageUserId.isNullOrBlank() &&
-                        currentUserId == messageUserId
-                }
-            }
-
-            MessageContextMenu(
-                message = msg,
-                isUser = isUserMessage,
-                visible = true,
-                x = contextMenuPosition.first,
-                y = contextMenuPosition.second,
-                onDismiss = {
-                    contextMenuMessage = null
-                    contextMenuPosition = Pair(0f, 0f)
-                },
-                onCopy = {
-                    clipboardManager.setText(AnnotatedString(msg.body))
-                },
-                onEdit = {
-                    editMessageId = msg.id
-                    editMessageText = msg.body
-                    contextMenuMessage = null
-                    contextMenuPosition = Pair(0f, 0f)
-                },
-                onDelete = {
-                    deleteConfirmMessageId = msg.id
-                    contextMenuMessage = null
-                    contextMenuPosition = Pair(0f, 0f)
-                }
-            )
-        }
-
         if (deleteConfirmMessageId != null) {
             AlertDialog(
                 onDismissRequest = { deleteConfirmMessageId = null },
