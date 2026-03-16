@@ -140,9 +140,197 @@ Then rebuild the app. Values are injected at build time, just like React's `.env
 - ✅ JWT and Google login support
 - ✅ Configurable XMPP settings
 
-## Installation
+## Packaging the chat component for use in any Kotlin project
 
-Add the chat modules to your `build.gradle.kts`:
+The chat is split into two libraries: **chat-core** (API, XMPP, persistence) and **chat-ui** (Compose UI and the `Chat` composable). You publish them to a Maven repository; clients add two dependencies and one Composable screen. **All project-specific data is passed through config** — no `.env` or hardcoded backends. **Updates:** client only changes the version number and syncs.
+
+---
+
+## Client integration guide (instruction for your clients)
+
+Give this section to anyone who embeds your chat in their app.
+
+### Step 1: Add repository and dependencies
+
+In the **root** of the client’s project, open `settings.gradle.kts` (or `settings.gradle`). In `dependencyResolutionManagement { repositories { ... } }` add the repository where you publish the chat (you provide the URL, e.g. GitHub Packages or your Maven server):
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = uri("https://maven.pkg.github.com/YOUR_ORG/ethora-sdk-android") }
+        // Or your Maven repo: maven { url = uri("https://your-server.com/repo") }
+    }
+}
+```
+
+In the **app module** `build.gradle.kts` (the module where the chat screen will live), add:
+
+```kotlin
+dependencies {
+    implementation("com.ethora:chat-core:1.0.0")
+    implementation("com.ethora:chat-ui:1.0.0")
+}
+```
+
+Replace `1.0.0` with the version you give them. Sync the project.
+
+### Step 2: Where to place the chat in the project
+
+The chat is a **single Composable**: you build a `ChatConfig`, call `ChatStore.setConfig` and `ApiClient.setBaseUrl`, then call `Chat(config = config)`. **Where** that Composable appears is up to the client: full screen, one tab, a navigation route, or a bottom sheet.
+
+**Option A — Full screen (one Activity = chat):**
+
+```kotlin
+// In the Activity that should show only chat
+setContent {
+    ChatScreen(config = myChatConfig)
+}
+```
+
+**Option B — One tab in BottomNavigation / TabRow:**
+
+```kotlin
+@Composable
+fun MainScreen() {
+    var selectedTab by remember { mutableStateOf(0) }
+    when (selectedTab) {
+        0 -> HomeScreen()
+        1 -> ChatScreen(config = myChatConfig)
+        2 -> SettingsScreen()
+    }
+    BottomNavigationBar(selectedTab, onTabSelected = { selectedTab = it })
+}
+```
+
+**Option C — One route in Jetpack Navigation:**
+
+```kotlin
+NavHost(navController, startDestination = "home") {
+    composable("home") { HomeScreen() }
+    composable("chat") {
+        ChatScreen(config = myChatConfig)
+    }
+}
+```
+
+So: the client **creates one Composable** (e.g. `ChatScreen`) that receives config and shows the chat. They use that Composable in the place where the chat should appear (Activity, tab, or route). No need to copy any of your source code.
+
+### Step 3: Build config and show the chat
+
+The client implements `ChatScreen` (or similar) like this. All data (URLs, tokens, XMPP, optional DNS fallback) comes from **their** backend or config — they pass it into `ChatConfig`:
+
+```kotlin
+@Composable
+fun ChatScreen(config: ChatConfig) {
+    ChatStore.setConfig(config)
+    ApiClient.setBaseUrl(config.baseUrl ?: AppConfig.defaultBaseURL, config.customAppToken)
+    Chat(config = config, modifier = Modifier.fillMaxSize())
+}
+```
+
+They build `ChatConfig` wherever they get their settings (ViewModel, repository, or static). Example:
+
+```kotlin
+val config = ChatConfig(
+    baseUrl = "https://api.yourproject.com/v1",
+    appId = "your-app-id",
+    customAppToken = "your-app-token",
+    xmppSettings = XMPPSettings(
+        devServer = "wss://xmpp.yourproject.com/ws",
+        host = "xmpp.yourproject.com",
+        conference = "conference.xmpp.yourproject.com"
+    ),
+    jwtLogin = JWTLoginConfig(token = userJwtToken, enabled = true),
+    defaultLogin = true,
+    dnsFallbackOverrides = mapOf(/* host -> IP if needed */),
+    disableHeader = true,
+    newArch = true
+)
+```
+
+Required imports: `com.ethora.chat.Chat`, `com.ethora.chat.core.config.*`, `com.ethora.chat.core.store.ChatStore`, `com.ethora.chat.core.networking.ApiClient`, `androidx.compose.ui.Modifier`.
+
+### Step 4: How to get updates
+
+When you release a new version (e.g. `1.0.1`), the client **only** changes the version in the same two lines and syncs:
+
+```kotlin
+implementation("com.ethora:chat-core:1.0.1")
+implementation("com.ethora:chat-ui:1.0.1")
+```
+
+No code changes in their app if the public API of the chat (e.g. `ChatConfig`, `Chat`) is compatible. They pull the new AARs from your repository on the next build.
+
+---
+
+## For you (SDK author): publishing to a repository and updates
+
+### Publish to Maven Local (for quick tests)
+
+From the root of this repository:
+
+```bash
+./gradlew :chat-core:publishToMavenLocal :chat-ui:publishToMavenLocal
+```
+
+Clients would then add `mavenLocal()` in their `repositories` and use the same `implementation(...)` lines. Use this for local checks only.
+
+### Publish to a Maven repository (for distribution to clients)
+
+To give clients a stable URL and let them update by changing the version:
+
+1. **Choose a repository:** GitHub Packages, your own Maven server (e.g. Nexus, Artifactory), or another host. You need a URL like `https://maven.pkg.github.com/OWNER/REPO` or `https://your-company.com/maven`.
+2. **Configure publishing** in `chat-core/build.gradle.kts` and `chat-ui/build.gradle.kts`: add the repository to the `publishing` block and, if needed, credentials. Example for a generic Maven repo:
+
+```kotlin
+afterEvaluate {
+    publishing {
+        repositories {
+            maven {
+                name = "MyMaven"
+                url = uri("https://your-server.com/maven-repo")
+                credentials {
+                    username = project.findProperty("mavenUser") as String? ?: ""
+                    password = project.findProperty("mavenPassword") as String? ?: ""
+                }
+            }
+        }
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+                groupId = "com.ethora"
+                artifactId = "chat-core"
+                version = libs.versions.versionName.get()
+            }
+        }
+    }
+}
+```
+
+3. **Publish:** run `./gradlew :chat-core:publish :chat-ui:publish` (with `-PmavenUser=... -PmavenPassword=...` if required).
+4. **Give clients:** the repository URL and the dependency coordinates `com.ethora:chat-core:X.Y.Z` and `com.ethora:chat-ui:X.Y.Z`. They add the repo once; for updates they only change `X.Y.Z`.
+
+Version number is taken from `gradle/libs.versions.toml` (`versionName`). Bump it there before each release so clients can request the new version.
+
+---
+
+## Quick reference: client setup (copy-paste checklist)
+
+| Step | Where | What to do |
+|------|--------|------------|
+| 1 | `settings.gradle.kts` | Add `maven { url = uri("YOUR_REPO_URL") }` in `repositories`. |
+| 2 | `app/build.gradle.kts` | Add `implementation("com.ethora:chat-core:VERSION")` and `implementation("com.ethora:chat-ui:VERSION")`. |
+| 3 | Any screen (Activity / tab / route) | Create a Composable that calls `ChatStore.setConfig(config)`, `ApiClient.setBaseUrl(...)`, then `Chat(config = config, modifier = Modifier.fillMaxSize())`. |
+| 4 | Same Composable or ViewModel | Build `ChatConfig` with `baseUrl`, `xmppSettings`, `appId`, `customAppToken`, optional `jwtLogin`, optional `dnsFallbackOverrides`. |
+| Updates | `app/build.gradle.kts` | Change `VERSION` in the two `implementation` lines and sync. |
+
+---
+
+## Installation (when developing the SDK itself)
+
+Add the chat modules as **project** dependencies (same repo):
 
 ```kotlin
 dependencies {
@@ -151,20 +339,7 @@ dependencies {
 }
 ```
 
-Or if using Maven:
-
-```xml
-<dependency>
-    <groupId>com.ethora</groupId>
-    <artifactId>chat-core</artifactId>
-    <version>1.0.0</version>
-</dependency>
-<dependency>
-    <groupId>com.ethora</groupId>
-    <artifactId>chat-ui</artifactId>
-    <version>1.0.0</version>
-</dependency>
-```
+Or use the published artifacts as in the section above (Maven Local or your own Maven repository).
 
 ## Quick Start
 

@@ -1,5 +1,6 @@
 package com.ethora.chat.core.xmpp
 
+import kotlin.jvm.Volatile
 import android.util.Log
 import com.ethora.chat.core.config.XMPPSettings
 import com.ethora.chat.core.models.Message
@@ -33,7 +34,9 @@ import java.util.concurrent.CopyOnWriteArraySet
 class XMPPClient(
     private val username: String,
     private val password: String,
-    private val settings: XMPPSettings? = null
+    private val settings: XMPPSettings? = null,
+    /** DNS fallback overrides (host -> IP). Pass from ChatConfig so XMPP uses same overrides without relying on ChatStore at build time. */
+    private val dnsFallbackOverrides: Map<String, String>? = null
 ) {
     private val TAG = "XMPPClient"
 
@@ -50,6 +53,7 @@ class XMPPClient(
     // Use WebSocket by default if URL starts with ws:// or wss://
     private val useWebSocket: Boolean = devServer.startsWith("ws://") || devServer.startsWith("wss://")
 
+    @Volatile
     private var status: ConnectionStatus = ConnectionStatus.OFFLINE
     private var presencesReady: Boolean = false
 
@@ -194,7 +198,8 @@ class XMPPClient(
                     password = password,
                     host = host,
                     conference = conference,
-                    resource = "default"
+                    resource = "default",
+                    dnsFallbackOverrides = dnsFallbackOverrides
                 )
                 webSocketConnection?.setClientWrapper(this@XMPPClient)
                 webSocketConnection?.setDelegate(object : XMPPClientDelegate {

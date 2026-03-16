@@ -186,7 +186,8 @@ fun Chat(
                         val client = XMPPClient(
                             username = username,
                             password = password,
-                            settings = config.xmppSettings
+                            settings = config.xmppSettings,
+                            dnsFallbackOverrides = config.dnsFallbackOverrides
                         )
                         
                         // Set delegate to handle reconnection and sync

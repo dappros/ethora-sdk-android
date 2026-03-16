@@ -14,11 +14,15 @@ object DnsFallback {
             return try {
                 okhttp3.Dns.SYSTEM.lookup(hostname)
             } catch (e: java.net.UnknownHostException) {
-                android.util.Log.w("DnsFallback", "DNS lookup failed for $hostname, using fallback")
+                android.util.Log.w("DnsFallback", "DNS lookup failed for $hostname, using fallback (overrides=${overrides?.size ?: 0})")
                 val ip = overrides?.get(hostname) ?: when (hostname) {
-                    "api.ethoradev.com", "xmpp.ethoradev.com" -> ETHORADEV_IP
-                    else -> throw e
+                    "api.ethoradev.com", "xmpp.ethoradev.com", "conference.xmpp.ethoradev.com" -> ETHORADEV_IP
+                    else -> {
+                        android.util.Log.e("DnsFallback", "No fallback for hostname=$hostname; overrides keys=${overrides?.keys?.joinToString() ?: "null"}")
+                        throw e
+                    }
                 }
+                android.util.Log.d("DnsFallback", "Resolved $hostname -> $ip")
                 listOf(java.net.InetAddress.getByName(ip))
             }
         }

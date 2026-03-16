@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     kotlin("kapt")
     alias(libs.plugins.hilt)
+    `maven-publish`
 }
 
 android {
@@ -92,4 +93,17 @@ dependencies {
     androidTestImplementation(libs.espresso.core)
     testImplementation(libs.mockito.core)
     testImplementation(libs.mockito.kotlin)
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+                groupId = "com.ethora"
+                artifactId = "chat-core"
+                version = libs.versions.versionName.get()
+            }
+        }
+    }
 }

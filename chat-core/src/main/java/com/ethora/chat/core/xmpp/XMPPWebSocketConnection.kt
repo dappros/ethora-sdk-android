@@ -12,6 +12,7 @@ import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
 import java.io.StringReader
 import java.util.concurrent.TimeUnit
+import kotlin.jvm.Volatile
 
 /**
  * WebSocket-based XMPP connection implementation
@@ -23,19 +24,25 @@ class XMPPWebSocketConnection(
     private val password: String,
     private val host: String,
     private val conference: String,
-    private val resource: String = "default"
+    private val resource: String = "default",
+    /** DNS fallback overrides (host -> IP). Pass from config so DNS is fixed at connection build time. */
+    private val dnsFallbackOverrides: Map<String, String>? = null
 ) {
     private val TAG = "XMPPWebSocket"
     private var webSocket: WebSocket? = null
-    private var isConnected: Boolean = false
-    private var isAuthenticated: Boolean = false
+    @Volatile private var isConnected: Boolean = false
+    @Volatile private var isAuthenticated: Boolean = false
     private val client = OkHttpClient.Builder()
-        .dns(DnsFallback.createDnsFromConfig())
+        .dns(DnsFallback.createDns(dnsFallbackOverrides))
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
-    
+
+    init {
+        Log.d(TAG, "XMPP WebSocket DNS overrides: ${dnsFallbackOverrides?.size ?: 0} hosts")
+    }
+
     private var delegate: XMPPClientDelegate? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
