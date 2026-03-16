@@ -1,9 +1,14 @@
 package com.ethora.chat.app
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.material.icons.Icons
@@ -13,6 +18,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.ethora.chat.Chat
 import com.ethora.chat.core.config.ChatConfig
 import com.ethora.chat.core.config.ChatColors
@@ -22,6 +28,7 @@ import com.ethora.chat.core.models.User
 import com.ethora.chat.core.networking.AuthAPIHelper
 import com.ethora.chat.core.networking.ApiClient
 import com.ethora.chat.core.networking.RoomsAPIHelper
+import com.ethora.chat.core.push.PushNotificationManager
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.store.MessageStore
@@ -36,6 +43,9 @@ import com.ethora.chat.core.xmpp.XMPPClient
 import com.ethora.chat.core.xmpp.XMPPClientDelegate
 import com.ethora.chat.core.xmpp.ConnectionStatus
 import com.ethora.chat.ui.styling.ChatTheme
+import com.google.firebase.FirebaseApp
+import com.google.firebase.installations.FirebaseInstallations
+import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -50,8 +60,107 @@ class MainActivity : ComponentActivity() {
         CHAT
     }
 
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            Log.d(TAG, "Notification permission granted: $granted")
+            if (granted) fetchFcmToken()
+        }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleNotificationIntent(intent)
+    }
+
+    private fun handleNotificationIntent(intent: Intent?) {
+        val jid = intent?.getStringExtra(EthoraPushService.EXTRA_ROOM_JID)
+        if (jid != null) {
+            Log.d(TAG, "Notification intent with room JID: $jid")
+            PushNotificationManager.setPendingNotificationJid(jid)
+        }
+    }
+
+    private fun requestNotificationPermission() {
+        Log.d(TAG, "🔔 Requesting notification permission (SDK=${Build.VERSION.SDK_INT})")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                Log.d(TAG, "🔔 Permission not granted, launching request")
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                Log.d(TAG, "🔔 Permission already granted")
+                fetchFcmToken()
+            }
+        } else {
+            Log.d(TAG, "🔔 SDK < 33, no runtime permission needed")
+            fetchFcmToken()
+        }
+    }
+
+    private fun fetchFcmToken(attempt: Int = 1) {
+        val maxAttempts = 5
+        Log.d(TAG, "🔔 Fetching FCM token (attempt $attempt/$maxAttempts)...")
+
+        if (attempt == 1) {
+            // On first attempt, delete old token and reset Firebase Installation to get clean state
+            FirebaseMessaging.getInstance().deleteToken().addOnCompleteListener { deleteTask ->
+                Log.d(TAG, "🔔 Old token deleted: ${deleteTask.isSuccessful}")
+                requestNewFcmToken(attempt)
+            }
+        } else if (attempt == 3) {
+            // On 3rd attempt, reset Firebase Installations entirely
+            Log.d(TAG, "🔔 Resetting Firebase Installations...")
+            FirebaseInstallations.getInstance().delete().addOnCompleteListener { delTask ->
+                Log.d(TAG, "🔔 Firebase Installation deleted: ${delTask.isSuccessful}")
+                requestNewFcmToken(attempt)
+            }
+        } else {
+            requestNewFcmToken(attempt)
+        }
+    }
+
+    private fun requestNewFcmToken(attempt: Int) {
+        val maxAttempts = 5
+        FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+            if (task.isSuccessful) {
+                val token = task.result
+                Log.d(TAG, "🔔 FCM token obtained: ${token.take(20)}...")
+                PushNotificationManager.setFcmToken(token)
+            } else {
+                Log.e(TAG, "🔔 Failed to get FCM token (attempt $attempt)", task.exception)
+                if (attempt < maxAttempts) {
+                    val delayMs = (attempt * 10000).toLong()
+                    Log.d(TAG, "🔔 Will retry FCM token in ${delayMs}ms...")
+                    CoroutineScope(Dispatchers.Main).launch {
+                        kotlinx.coroutines.delay(delayMs)
+                        fetchFcmToken(attempt + 1)
+                    }
+                } else {
+                    Log.e(TAG, "🔔 Exhausted all $maxAttempts attempts to get FCM token")
+                }
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        PushNotificationManager.initialize(this)
+        handleNotificationIntent(intent)
+
+        // Log Firebase configuration for debugging
+        try {
+            val app = FirebaseApp.getInstance()
+            Log.d(TAG, "🔔 Firebase app: ${app.name}")
+            Log.d(TAG, "🔔 Firebase appId: ${app.options.applicationId}")
+            Log.d(TAG, "🔔 Firebase projectId: ${app.options.projectId}")
+            Log.d(TAG, "🔔 Firebase gcmSenderId: ${app.options.gcmSenderId}")
+            Log.d(TAG, "🔔 Firebase apiKey: ${app.options.apiKey?.take(15)}...")
+        } catch (e: Exception) {
+            Log.e(TAG, "🔔 Firebase not initialized!", e)
+        }
+
+        requestNotificationPermission()
 
         setContent {
             ChatTheme {

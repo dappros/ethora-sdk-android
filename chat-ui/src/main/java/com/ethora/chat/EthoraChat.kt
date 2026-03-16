@@ -26,6 +26,7 @@ import com.ethora.chat.core.store.MessagePriorityQueue
 import com.ethora.chat.core.store.IncrementalHistoryLoader
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
+import com.ethora.chat.core.push.PushNotificationManager
 import com.ethora.chat.core.xmpp.XMPPClientDelegate
 import com.ethora.chat.core.xmpp.ConnectionStatus
 import com.ethora.chat.ui.components.ChatRoomView
@@ -341,11 +342,64 @@ fun Chat(
             }
         }
         
+        // Push: subscribe device to backend when FCM token and user are available
+        val fcmToken by PushNotificationManager.fcmToken.collectAsState()
+        LaunchedEffect(fcmToken, currentUser?.walletAddress) {
+            val token = fcmToken
+            if (token != null && currentUser != null) {
+                android.util.Log.d("EthoraChat", "🔔 Push: subscribing to backend (token=${token.take(10)}...)")
+                val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
+                withContext(Dispatchers.IO) {
+                    PushNotificationManager.subscribeToBackend(token, baseUrl = baseUrl)
+                }
+            }
+        }
+        
+        // Push: subscribe to all rooms via MUC-SUB after XMPP connected and rooms loaded
+        LaunchedEffect(xmppClient, rooms.size, fcmToken) {
+            val client = xmppClient
+            val roomsList = RoomStore.rooms.value
+            if (client != null && roomsList.isNotEmpty()) {
+                // Wait for XMPP to be fully connected (up to 30s)
+                var waited = 0L
+                while (!client.isFullyConnected() && waited < 30000) {
+                    delay(500)
+                    waited += 500
+                }
+                if (client.isFullyConnected()) {
+                    android.util.Log.d("EthoraChat", "🔔 Push: subscribing to ${roomsList.size} rooms via MUC-SUB")
+                    withContext(Dispatchers.IO) {
+                        PushNotificationManager.subscribeToRooms(
+                            client,
+                            roomsList.map { it.jid }
+                        )
+                    }
+                } else {
+                    android.util.Log.w("EthoraChat", "🔔 Push: XMPP not fully connected after 30s, skipping MUC-SUB")
+                }
+            }
+        }
+        
+        // Push: handle pending notification JID → open the room
+        val pendingJid by PushNotificationManager.pendingNotificationJid.collectAsState()
+        var selectedRoom by remember { mutableStateOf<com.ethora.chat.core.models.Room?>(null) }
+        
+        LaunchedEffect(pendingJid, rooms.size) {
+            val jid = pendingJid
+            if (jid != null && rooms.isNotEmpty()) {
+                val room = rooms.find { it.jid == jid }
+                if (room != null) {
+                    android.util.Log.d("EthoraChat", "Opening room from push notification: $jid")
+                    RoomStore.setCurrentRoom(room)
+                    selectedRoom = room
+                    PushNotificationManager.clearPendingNotificationJid()
+                }
+            }
+        }
+
         // Show room list or single room based on config
         if (config.disableRooms == true) {
-            // Single room mode - use roomJID if provided, otherwise use first default room
             val targetRoom = roomJID?.let { jid ->
-                // Find room by JID from RoomStore
                 com.ethora.chat.core.store.RoomStore.getRoomByJid(jid)
             } ?: config.defaultRooms?.firstOrNull()
             
@@ -358,15 +412,11 @@ fun Chat(
                 )
             }
         } else {
-            // Room list mode
-            var selectedRoom by remember { mutableStateOf<com.ethora.chat.core.models.Room?>(null) }
-            
             if (selectedRoom != null) {
                 ChatRoomView(
                     room = selectedRoom!!,
                     xmppClient = xmppClient,
                     onBack = { 
-                        // Mark room as closed and clear current room
                         selectedRoom?.let { room ->
                             com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, System.currentTimeMillis())
                         }

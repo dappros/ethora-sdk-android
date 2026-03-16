@@ -4,6 +4,7 @@ import android.util.Log
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
 import kotlinx.coroutines.*
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.*
 import okio.ByteString
 import org.xmlpull.v1.XmlPullParser
@@ -55,6 +56,8 @@ class XMPPWebSocketConnection(
     
     private var delegate: XMPPClientDelegate? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
+    private var disconnectRequested: Boolean = false
     
     private var authState: AuthState = AuthState.NOT_STARTED
     
@@ -144,11 +147,9 @@ class XMPPWebSocketConnection(
                 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                     Log.d(TAG, "🔌 WebSocket closing: $code - $reason")
-                    this@XMPPWebSocketConnection.webSocket = null
                     isConnected = false
                     isAuthenticated = false
                     authState = AuthState.NOT_STARTED
-                    clientWrapper?.let { delegate?.onXMPPClientDisconnected(it) }
                 }
                 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -157,7 +158,11 @@ class XMPPWebSocketConnection(
                     isConnected = false
                     isAuthenticated = false
                     authState = AuthState.NOT_STARTED
-                    clientWrapper?.let { delegate?.onXMPPClientDisconnected(it) }
+                    if (!disconnectRequested) {
+                        scope.launch {
+                            clientWrapper?.let { delegate?.onXMPPClientDisconnected(it) }
+                        }
+                    }
                 }
                 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -166,7 +171,11 @@ class XMPPWebSocketConnection(
                     isConnected = false
                     isAuthenticated = false
                     authState = AuthState.NOT_STARTED
-                    clientWrapper?.let { delegate?.onXMPPClientDisconnected(it) }
+                    if (!disconnectRequested) {
+                        scope.launch {
+                            clientWrapper?.let { delegate?.onXMPPClientDisconnected(it) }
+                        }
+                    }
                 }
             })
             
@@ -1246,6 +1255,12 @@ class XMPPWebSocketConnection(
             val iqId = extractAttribute(xml, "id") ?: ""
             val type = extractAttribute(xml, "type") ?: ""
             
+            // Route IQ responses to pending collectors (MUC-SUB, etc.)
+            if (iqId.isNotEmpty() && mamCollectors.containsKey(iqId)) {
+                val stanza = XMPPStanza(type = type, id = iqId, from = extractAttribute(xml, "from"), to = extractAttribute(xml, "to"))
+                mamCollectors[iqId]?.invoke(stanza)
+            }
+
             // Handle MAM query completion (contains <fin> element)
             // Matches web: onGetLastMessageArchive in stanzaHandlers.ts
             if (type == "result" && xml.contains("<fin")) {
@@ -1658,10 +1673,56 @@ class XMPPWebSocketConnection(
     /**
      * Disconnect
      */
+    /**
+     * Subscribe to room messages via MUC-SUB (urn:xmpp:mucsub:0).
+     * Matches RN: subscribeToRoomMessages.xmpp.ts
+     */
+    suspend fun subscribeToRoomMessages(roomJid: String): Boolean {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot subscribe to room: not authenticated")
+            return false
+        }
+
+        val fixedRoomJid = if (roomJid.contains("@")) roomJid
+            else "$roomJid@conference.$host"
+
+        val nick = username.split("@").firstOrNull() ?: username
+        val id = "newSubscription:${System.currentTimeMillis()}"
+
+        val stanza = """<iq to="$fixedRoomJid" type="set" id="$id"><subscribe xmlns="urn:xmpp:mucsub:0" nick="$nick"><event node="urn:xmpp:mucsub:nodes:messages"/></subscribe></iq>"""
+
+        return suspendCancellableCoroutine { cont ->
+            val collector: (XMPPStanza) -> Unit = { stanzaResp ->
+                if (stanzaResp.id == id) {
+                    if (stanzaResp.type == "result") {
+                        cont.resume(true) {}
+                    } else {
+                        cont.resume(false) {}
+                    }
+                }
+            }
+
+            registerMAMCollector(id, collector)
+
+            scope.launch {
+                delay(5000)
+                if (cont.isActive) {
+                    unregisterMAMCollector(id)
+                    cont.resume(false) {}
+                }
+            }
+
+            sendRaw(stanza)
+            Log.d(TAG, "📋 Sent MUC-SUB subscribe for $fixedRoomJid (id=$id)")
+        }.also {
+            unregisterMAMCollector(id)
+        }
+    }
+
     fun disconnect() {
         Log.d(TAG, "🔌 Disconnecting WebSocket...")
+        disconnectRequested = true
         webSocket?.close(1000, "Normal closure")
-        webSocket = null
         isConnected = false
         isAuthenticated = false
         authState = AuthState.NOT_STARTED

@@ -198,6 +198,7 @@ class XMPPClient(
                 webSocketConnection?.setClientWrapper(this@XMPPClient)
                 webSocketConnection?.setDelegate(object : XMPPClientDelegate {
                     override fun onXMPPClientConnected(client: XMPPClient) {
+                        reconnectAttempts = 0
                         setStatus(ConnectionStatus.ONLINE)
                         scope.launch {
                             try {
@@ -214,6 +215,7 @@ class XMPPClient(
                         setStatus(ConnectionStatus.OFFLINE)
                         presencesReady = false
                         delegate?.onXMPPClientDisconnected(this@XMPPClient)
+                        handleReconnection()
                     }
                     
                     override fun onMessageReceived(client: XMPPClient, message: Message) {
@@ -454,6 +456,23 @@ class XMPPClient(
             false
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send media message", e)
+            false
+        }
+    }
+
+    /**
+     * Subscribe to room messages via MUC-SUB for push notifications.
+     * Delegates to WebSocket connection.
+     */
+    suspend fun subscribeToRoomMessages(roomJid: String): Boolean {
+        if (!isFullyConnected()) {
+            Log.w(TAG, "Cannot subscribe to room: not fully connected")
+            return false
+        }
+        return if (useWebSocket) {
+            webSocketConnection?.subscribeToRoomMessages(roomJid) ?: false
+        } else {
+            Log.w(TAG, "MUC-SUB not supported for TCP connection")
             false
         }
     }
