@@ -407,6 +407,12 @@ fun ChatScreen(
 | `baseUrl` | `baseUrl` | `String?` | API base URL |
 | `customAppToken` | `customAppToken` | `String?` | API authentication token |
 
+### Network / DNS fallback
+
+| Android Config | Type | Description |
+|----------------|------|-------------|
+| `dnsFallbackOverrides` | `Map<String, String>?` | When system DNS fails (e.g. on emulator), use these hostname→IP pairs. See [DNS fallback](#dns-fallback-emulator--restricted-networks) below. |
+
 ### Styling
 
 | Web Config | Android Config | Type | Description |
@@ -441,6 +447,84 @@ fun ChatScreen(
 |------------|----------------|------|-------------|
 | `chatHeaderAdditional.enabled` | `chatHeaderAdditional.enabled` | `Boolean` | Enable custom header element |
 | `chatHeaderAdditional.element` | `chatHeaderAdditional.element` | `@Composable () -> Unit` | Custom composable for header |
+
+### DNS fallback (emulator / restricted networks)
+
+On emulators or in restricted networks, system DNS may fail to resolve your API/XMPP hostnames (`Unable to resolve host "api.example.com"`). You can pass a **DNS fallback map** through **config** so that when resolution fails, the SDK uses the IP addresses you provide. The same config works for any backend (Ethora, Preshent, Vital, or your own).
+
+#### 1. How to get the IP address for a hostname
+
+Run one of these on your **development machine** (Mac, Windows, or Linux). Use the same network as the device/emulator if possible.
+
+**macOS / Linux (Terminal):**
+
+```bash
+# Option 1: nslookup (usually preinstalled)
+nslookup api.yourdomain.com
+# In the output, use the "Address" line under "Non-authoritative answer"
+
+# Option 2: dig (macOS: built-in; Linux: often preinstalled)
+dig +short api.yourdomain.com
+
+# Option 3: host
+host api.yourdomain.com
+```
+
+**Windows (Command Prompt or PowerShell):**
+
+```cmd
+nslookup api.yourdomain.com
+```
+
+In the output, take the **IPv4 address** (e.g. `34.174.203.35`) for each hostname you use: API host, XMPP host, and conference host (e.g. `api.yourdomain.com`, `xmpp.yourdomain.com`, `conference.xmpp.yourdomain.com`).
+
+#### 2. Pass DNS fallback through config (not .env)
+
+Configuration is done via **`ChatConfig`**. There is no dependency on `.env` in your app: you can build the map from remote config, feature flags, or hardcoded values.
+
+**Type:** `dnsFallbackOverrides: Map<String, String>?`  
+**Meaning:** for each hostname that might fail to resolve, map it to the IP address to use as fallback.
+
+**Example:**
+
+```kotlin
+val config = ChatConfig(
+    baseUrl = "https://api.yourproject.com/v1",
+    xmppSettings = XMPPSettings(
+        devServer = "wss://xmpp.yourproject.com/ws",
+        host = "xmpp.yourproject.com",
+        conference = "conference.xmpp.yourproject.com"
+    ),
+    dnsFallbackOverrides = mapOf(
+        "api.yourproject.com" to "34.174.203.35",
+        "xmpp.yourproject.com" to "34.174.203.35",
+        "conference.xmpp.yourproject.com" to "34.174.203.35"
+    ),
+    // ... other options
+)
+
+ChatStore.setConfig(config)
+ApiClient.setBaseUrl(config.baseUrl ?: AppConfig.defaultBaseURL, config.customAppToken)
+```
+
+**Rules:**
+
+- **Keys** = exact hostnames used in your `baseUrl` and `xmppSettings` (no `https://`, no path, no port).
+- **Values** = IPv4 (or IPv6) strings.
+- **Optional:** pass `null` or an empty map if you don't need DNS fallback (e.g. on a real device with working DNS).
+- Works for **any project** (Ethora, Preshent, Vital, custom): same config field, different hostnames and IPs.
+
+**Minimal example (one host for both API and XMPP):**
+
+```kotlin
+dnsFallbackOverrides = mapOf(
+    "api.example.com" to "1.2.3.4",
+    "xmpp.example.com" to "1.2.3.4",
+    "conference.xmpp.example.com" to "1.2.3.4"
+)
+```
+
+The SDK uses system DNS first; only if resolution throws (e.g. `UnknownHostException`) does it use `dnsFallbackOverrides` for that hostname. Ethora hosts (`api.ethoradev.com`, `xmpp.ethoradev.com`) have a built-in fallback in the SDK; for all other hosts you supply the map via config.
 
 ## Advanced Usage
 

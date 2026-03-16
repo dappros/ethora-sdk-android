@@ -48,9 +48,8 @@ android {
         buildConfigField("String", "DEFAULT_LOGIN_PASSWORD", "\"${env("DEFAULT_LOGIN_PASSWORD", "Qwerty123")}\"")
         buildConfigField("String", "USER_TOKEN", "\"${env("USER_TOKEN", env("CHAT_TOKEN", ""))}\"")
         buildConfigField("Boolean", "USE_PRESHENT_JWT_AUTH", "${env("USE_PRESHENT_JWT_AUTH", "false").lowercase() == "true"}")
-        // Optional: IP for DNS fallback when emulator can't resolve (e.g. xmpp-dev.preshent.com). Get IP via: nslookup xmpp-dev.preshent.com
-        buildConfigField("String", "DNS_FALLBACK_XMPP_PRESHENT", "\"${env("DNS_FALLBACK_XMPP_PRESHENT", "")}\"")
-        buildConfigField("String", "DNS_FALLBACK_API_PRESHENT", "\"${env("DNS_FALLBACK_API_PRESHENT", "")}\"")
+        // Optional: DNS fallback for any project. Format: host1=ip1,host2=ip2 (get IP: nslookup hostname)
+        buildConfigField("String", "DNS_FALLBACK_OVERRIDES", "\"${env("DNS_FALLBACK_OVERRIDES", "")}\"")
     }
 
     buildTypes {

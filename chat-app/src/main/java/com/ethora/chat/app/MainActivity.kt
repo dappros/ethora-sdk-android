@@ -185,15 +185,13 @@ class MainActivity : ComponentActivity() {
                     val userToken = BuildConfig.USER_TOKEN.takeIf { it.isNotBlank() }
                     val enableLiveInit = userToken != null
                     val dnsOverrides = remember {
-                        buildMap<String, String> {
-                            if (BuildConfig.DNS_FALLBACK_XMPP_PRESHENT.isNotBlank()) {
-                                put("xmpp-dev.preshent.com", BuildConfig.DNS_FALLBACK_XMPP_PRESHENT)
-                                put("conference.xmpp-dev.preshent.com", BuildConfig.DNS_FALLBACK_XMPP_PRESHENT)
+                        BuildConfig.DNS_FALLBACK_OVERRIDES
+                            .split(",")
+                            .mapNotNull { part ->
+                                val kv = part.split("=", limit = 2).map { it.trim() }
+                                if (kv.size == 2 && kv[0].isNotBlank() && kv[1].isNotBlank()) kv[0] to kv[1] else null
                             }
-                            if (BuildConfig.DNS_FALLBACK_API_PRESHENT.isNotBlank()) {
-                                put("api-dev.preshent.com", BuildConfig.DNS_FALLBACK_API_PRESHENT)
-                            }
-                        }
+                            .toMap()
                     }
                     val appConfig = remember(userToken, dnsOverrides) {
                         ChatConfig(
