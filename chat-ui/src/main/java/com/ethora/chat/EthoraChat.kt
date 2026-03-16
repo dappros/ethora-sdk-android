@@ -59,13 +59,11 @@ fun Chat(
     val localStorage = remember { LocalStorage(context) }
     
     ChatStore.setConfig(config)
-    
-    // Set base URL and app token if provided
-    LaunchedEffect(config.baseUrl, config.customAppToken) {
-        config.baseUrl?.let { baseUrl ->
-            ApiClient.setBaseUrl(baseUrl, config.customAppToken)
-        }
-    }
+
+    // Set base URL and app token immediately (mirrors React: setBaseURL in LoginWrapper useEffect)
+    // Must run before any API call - config values replace defaults project-wide
+    val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
+    ApiClient.setBaseUrl(baseUrl, config.customAppToken)
     
     // Auto-login with stored JWT token on app start (if no user provided)
     LaunchedEffect(Unit) {
@@ -75,16 +73,15 @@ fun Chat(
             if (storedJWTToken != null) {
                 android.util.Log.d("EthoraChat", "🔐 Found stored JWT token, attempting auto-login...")
                 try {
-                    val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
                     val loginResponse = withContext(Dispatchers.IO) {
-                        AuthAPIHelper.loginViaJWT(storedJWTToken, baseUrl)
+                        AuthAPIHelper.loginViaJWT(storedJWTToken)
                     }
                     loginResponse?.let { response ->
                         UserStore.setUser(response)
                         // Save JWT token (update if different)
                         localStorage.saveJWTToken(storedJWTToken)
-                        // Start automatic token refresh
-                        TokenManager.startAutoRefresh(baseUrl)
+                        // Start automatic token refresh (uses config baseUrl)
+                        TokenManager.startAutoRefresh()
                         android.util.Log.d("EthoraChat", "✅ Auto-login successful with stored JWT token")
                     } ?: run {
                         // Token invalid, clear it
@@ -121,17 +118,15 @@ fun Chat(
             jwtLogin?.enabled == true -> {
                 val token = jwtLogin.token
                 if (token != null) {
-                    val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
                     val loginResponse = withContext(Dispatchers.IO) {
-                        AuthAPIHelper.loginViaJWT(token, baseUrl)
+                        AuthAPIHelper.loginViaJWT(token)
                     }
                     loginResponse?.let { response ->
                         UserStore.setUser(response)
                         // Save JWT token for future auto-login
                         localStorage.saveJWTToken(token)
-                        // Start automatic token refresh
-                        val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
-                        TokenManager.startAutoRefresh(baseUrl)
+                        // Start automatic token refresh (uses config baseUrl)
+                        TokenManager.startAutoRefresh()
                         android.util.Log.d("EthoraChat", "✅ JWT login successful, token saved")
                     }
                 }
@@ -348,9 +343,8 @@ fun Chat(
             val token = fcmToken
             if (token != null && currentUser != null) {
                 android.util.Log.d("EthoraChat", "🔔 Push: subscribing to backend (token=${token.take(10)}...)")
-                val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
                 withContext(Dispatchers.IO) {
-                    PushNotificationManager.subscribeToBackend(token, baseUrl = baseUrl)
+                    PushNotificationManager.subscribeToBackend(token)
                 }
             }
         }

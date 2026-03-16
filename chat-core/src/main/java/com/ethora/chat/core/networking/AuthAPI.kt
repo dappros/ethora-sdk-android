@@ -2,6 +2,7 @@ package com.ethora.chat.core.networking
 
 import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.UserStore
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
@@ -178,7 +179,7 @@ object AuthAPIHelper {
     suspend fun loginWithEmail(
         email: String,
         password: String,
-        baseUrl: String = AppConfig.defaultBaseURL
+        baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): LoginResponse {
         android.util.Log.d("AuthAPIHelper", "🌐 loginWithEmail: $baseUrl/users/login-with-email")
         val api = ApiClient.createService<AuthAPI>(baseUrl)
@@ -205,7 +206,7 @@ object AuthAPIHelper {
      */
     suspend fun refreshToken(
         refreshToken: String,
-        baseUrl: String = AppConfig.defaultBaseURL
+        baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): RefreshTokenResponse {
         val api = ApiClient.createService<AuthAPI>(baseUrl)
         val response = api.refreshToken(RefreshTokenRequest(refreshToken))
@@ -221,7 +222,7 @@ object AuthAPIHelper {
      */
     suspend fun loginViaJWT(
         token: String,
-        baseUrl: String = AppConfig.defaultBaseURL
+        baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): LoginResponse? {
         return try {
             val api = ApiClient.createService<AuthAPI>(baseUrl)
@@ -244,7 +245,7 @@ object AuthAPIHelper {
         file: java.io.File,
         mimeType: String,
         token: String,
-        baseUrl: String = AppConfig.defaultBaseURL
+        baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): FileUploadResult? {
         return try {
             val api = ApiClient.createService<AuthAPI>(baseUrl)

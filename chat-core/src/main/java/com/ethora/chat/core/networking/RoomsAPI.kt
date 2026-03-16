@@ -2,6 +2,7 @@ package com.ethora.chat.core.networking
 
 import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.models.ApiRoom
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.RoomType
 import com.ethora.chat.core.models.createRoomFromApi
@@ -81,9 +82,9 @@ object RoomsAPIHelper {
      * Get user rooms
      */
     suspend fun getRooms(
-        baseUrl: String = AppConfig.defaultBaseURL,
-        appId: String = AppConfig.defaultAppId,
-        conferenceDomain: String = "conference.xmpp.ethoradev.com"
+        baseUrl: String = ChatStore.getEffectiveBaseUrl(),
+        appId: String = ChatStore.getEffectiveAppId(),
+        conferenceDomain: String = ChatStore.getEffectiveConference()
     ): List<Room> {
         val api = ApiClient.createService<RoomsAPI>(baseUrl)
         val response = api.getRooms(appId)
@@ -106,8 +107,8 @@ object RoomsAPIHelper {
         description: String? = null,
         picture: String? = null,
         members: List<String>? = null,
-        baseUrl: String = AppConfig.defaultBaseURL,
-        appId: String = AppConfig.defaultAppId
+        baseUrl: String = ChatStore.getEffectiveBaseUrl(),
+        appId: String = ChatStore.getEffectiveAppId()
     ): ApiRoom {
         val api = ApiClient.createService<RoomsAPI>(baseUrl)
         val response = api.createRoom(
@@ -135,7 +136,7 @@ object RoomsAPIHelper {
         messageId: String,
         category: String,
         text: String? = null,
-        baseUrl: String = AppConfig.defaultBaseURL
+        baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ) {
         val api = ApiClient.createService<RoomsAPI>(baseUrl)
         val response = api.reportMessage(
@@ -152,8 +153,8 @@ object RoomsAPIHelper {
      */
     suspend fun createPrivateRoom(
         username: String,
-        baseUrl: String = AppConfig.defaultBaseURL,
-        appId: String = AppConfig.defaultAppId
+        baseUrl: String = ChatStore.getEffectiveBaseUrl(),
+        appId: String = ChatStore.getEffectiveAppId()
     ): ApiRoom {
         val api = ApiClient.createService<RoomsAPI>(baseUrl)
         val response = api.createPrivateRoom(

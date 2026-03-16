@@ -2,6 +2,7 @@ package com.ethora.chat.core.networking
 
 import android.util.Log
 import com.ethora.chat.core.config.AppConfig
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.UserStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,7 +33,7 @@ object TokenManager {
      * Start automatic token refresh
      * Checks token expiration and refreshes if needed
      */
-    fun startAutoRefresh(baseUrl: String = AppConfig.defaultBaseURL) {
+    fun startAutoRefresh(baseUrl: String = ChatStore.getEffectiveBaseUrl()) {
         stopAutoRefresh()
         
         refreshJob = scope.launch {
@@ -95,7 +96,7 @@ object TokenManager {
      * Refresh token if needed (called before API calls)
      */
     suspend fun ensureValidToken(
-        baseUrl: String = AppConfig.defaultBaseURL
+        baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): Boolean {
         val refreshToken = UserStore.refreshToken.value
         val currentToken = UserStore.token.value

@@ -6,6 +6,24 @@ plugins {
     id("com.google.gms.google-services")
 }
 
+// Load .env file (like React's env) - values are injected into BuildConfig at build time
+fun loadEnv(): Map<String, String> {
+    val envFile = file("${projectDir}/.env")
+    if (!envFile.exists()) return emptyMap()
+    return envFile.readLines()
+        .filter { it.contains("=") && !it.trimStart().startsWith("#") }
+        .associate { line ->
+            val (key, value) = line.split("=", limit = 2)
+            val v = value.trim()
+            val unquoted = if (v.length >= 2 && v.first() == '"' && v.last() == '"') v.drop(1).dropLast(1) else v
+            key.trim() to unquoted.trim()
+        }
+}
+
+val env = loadEnv()
+
+fun env(key: String, default: String) = env[key]?.takeIf { it.isNotBlank() } ?: default
+
 android {
     namespace = "com.ethora.chat.app"
     compileSdk = libs.versions.compileSdk.get().toInt()
@@ -18,6 +36,15 @@ android {
         versionName = libs.versions.versionName.get()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Injected from .env file (React-style)
+        buildConfigField("String", "API_BASE_URL", "\"${env("API_BASE_URL", "https://api.ethoradev.com/v1")}\"")
+        buildConfigField("String", "APP_ID", "\"${env("APP_ID", "646cc8dc96d4a4dc8f7b2f2d")}\"")
+        buildConfigField("String", "XMPP_DEV_SERVER", "\"${env("XMPP_DEV_SERVER", "wss://xmpp.ethoradev.com:5443/ws")}\"")
+        buildConfigField("String", "XMPP_HOST", "\"${env("XMPP_HOST", "xmpp.ethoradev.com")}\"")
+        buildConfigField("String", "XMPP_CONFERENCE", "\"${env("XMPP_CONFERENCE", "conference.xmpp.ethoradev.com")}\"")
+        buildConfigField("String", "DEFAULT_LOGIN_EMAIL", "\"${env("DEFAULT_LOGIN_EMAIL", "yukiraze9@gmail.com")}\"")
+        buildConfigField("String", "DEFAULT_LOGIN_PASSWORD", "\"${env("DEFAULT_LOGIN_PASSWORD", "Qwerty123")}\"")
     }
 
     buildTypes {
@@ -41,6 +68,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {

@@ -2,6 +2,129 @@
 
 A fully-featured chat component for Android that mirrors the functionality of the web version, built with Jetpack Compose and Kotlin.
 
+---
+
+## Installation & Running the App
+
+### Prerequisites
+
+- **Android Studio** (Arctic Fox or newer, recommended: latest stable)
+- **JDK 17** or higher
+- **Android SDK** (API 34 or higher recommended)
+- An **Android device** or **emulator** (API 24+)
+
+### Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/dappros/ethora-sdk-android.git
+cd ethora-sdk-android
+```
+
+### Step 2: Open in Android Studio
+
+1. Launch **Android Studio**
+2. Select **File → Open**
+3. Choose the `ethora-sdk-android` folder
+4. Wait for Gradle sync to complete (first run may take a few minutes)
+
+### Step 3: Configure Environment (Optional)
+
+The app uses a `.env` file for configuration, similar to React projects. Values are injected at build time.
+
+1. Copy the example file (if `.env` does not exist):
+   ```bash
+   cp chat-app/.env.example chat-app/.env
+   ```
+2. Edit `chat-app/.env` to set your API URL, XMPP server, and other values:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `API_BASE_URL` | Backend API base URL | `https://api.ethoradev.com/v1` |
+| `APP_ID` | Ethora app ID | `646cc8dc96d4a4dc8f7b2f2d` |
+| `XMPP_DEV_SERVER` | XMPP WebSocket URL | `wss://xmpp.ethoradev.com:5443/ws` |
+| `XMPP_HOST` | XMPP server host | `xmpp.ethoradev.com` |
+| `XMPP_CONFERENCE` | Conference domain | `conference.xmpp.ethoradev.com` |
+| `DEFAULT_LOGIN_EMAIL` | Test login email | `yukiraze9@gmail.com` |
+| `DEFAULT_LOGIN_PASSWORD` | Test login password | `Qwerty123` |
+
+If `.env` is missing, defaults are used. **Do not commit secrets to `.env`** — add it to `.gitignore` if it contains sensitive data.
+
+### Step 4: Configure Firebase (Optional, for Push Notifications)
+
+If you want push notifications:
+
+1. Add your `google-services.json` to `chat-app/` (replace the existing one)
+2. Ensure the `package_name` in the JSON matches `com.ethora.chat.app` (or your custom `applicationId` in `chat-app/build.gradle.kts`)
+3. Register your app's SHA-1 fingerprint in [Firebase Console](https://console.firebase.google.com/) → Project Settings → Your App → Add fingerprint
+
+Get your debug SHA-1:
+```bash
+./gradlew :chat-app:signingReport
+```
+
+### Step 5: Build the Project
+
+```bash
+# Mac/Linux
+./gradlew :chat-app:assembleDebug
+
+# Windows
+gradlew.bat :chat-app:assembleDebug
+```
+
+Or in Android Studio: **Build → Make Project** (Ctrl+F9 / Cmd+F9)
+
+### Step 6: Run the App
+
+**Option A — From Android Studio**
+
+1. Select the **chat-app** run configuration
+2. Choose a device or emulator
+3. Click **Run** (green play button) or press **Shift+F10**
+
+**Option B — From command line**
+
+```bash
+# Install and launch on connected device/emulator
+# Mac/Linux:
+./gradlew :chat-app:installDebug
+adb shell am start -n com.ethora.chat.app/.MainActivity
+
+# Windows: use gradlew.bat instead of ./gradlew
+```
+
+### Default Login
+
+The sample app uses credentials from `.env` (or defaults):
+- **Email:** `yukiraze9@gmail.com`
+- **Password:** `Qwerty123`
+
+You can change these in `MainActivity.kt` or use your own Ethora account.
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| **Gradle sync failed** | Ensure you have a stable internet connection. Try **File → Invalidate Caches → Restart**. |
+| **No devices found** | Start an emulator from **Tools → Device Manager**, or connect a physical device with USB debugging enabled. |
+| **Build fails with SDK error** | Open **File → Project Structure** and verify Android SDK path and API level. |
+| **App crashes on launch** | Check Logcat for errors. Ensure `google-services.json` is valid if using push notifications. |
+
+### Custom API & XMPP Server
+
+To use your own backend, edit `chat-app/.env`:
+
+```
+API_BASE_URL=https://api.yourdomain.com/v1
+XMPP_DEV_SERVER=wss://xmpp.yourdomain.com:5443/ws
+XMPP_HOST=xmpp.yourdomain.com
+XMPP_CONFERENCE=conference.xmpp.yourdomain.com
+```
+
+Then rebuild the app. Values are injected at build time, just like React's `.env`.
+
+---
+
 ## Features
 
 - ✅ Real-time messaging via XMPP WebSocket
@@ -414,35 +537,25 @@ Chat(
 )
 ```
 
-## Environment Variables
+## Environment Variables (.env)
 
-For production, use environment variables or BuildConfig:
+The **chat-app** module supports a `.env` file (like React), loaded at build time.
 
-```kotlin
-// In your build.gradle.kts
-android {
-    buildTypes {
-        release {
-            buildConfigField("String", "ETHORA_CHAT_BASE_URL", "\"https://api.ethoradev.com\"")
-            buildConfigField("String", "ETHORA_API_TOKEN", "\"your-token\"")
-            buildConfigField("String", "ETHORA_APP_XMPP_SERVICE", "\"wss://xmpp.ethoradev.com:5443/ws\"")
-            buildConfigField("String", "ETHORA_XMPP_HOST", "\"xmpp.ethoradev.com\"")
-            buildConfigField("String", "ETHORA_XMPP_SERVICE", "\"conference.xmpp.ethoradev.com\"")
-        }
-    }
-}
+Create or edit `chat-app/.env`:
 
-// In your code
-val config = ChatConfig(
-    baseUrl = BuildConfig.ETHORA_CHAT_BASE_URL,
-    customAppToken = BuildConfig.ETHORA_API_TOKEN,
-    xmppSettings = XMPPSettings(
-        devServer = BuildConfig.ETHORA_APP_XMPP_SERVICE,
-        host = BuildConfig.ETHORA_XMPP_HOST,
-        conference = BuildConfig.ETHORA_XMPP_SERVICE
-    )
-)
 ```
+API_BASE_URL=https://api.ethoradev.com/v1
+APP_ID=646cc8dc96d4a4dc8f7b2f2d
+XMPP_DEV_SERVER=wss://xmpp.ethoradev.com:5443/ws
+XMPP_HOST=xmpp.ethoradev.com
+XMPP_CONFERENCE=conference.xmpp.ethoradev.com
+DEFAULT_LOGIN_EMAIL=your@email.com
+DEFAULT_LOGIN_PASSWORD=yourpassword
+```
+
+Values are injected into `BuildConfig`. If `.env` is missing, defaults are used. See `chat-app/.env.example` for the full list.
+
+**Integrating into your own app?** Add the same Gradle logic from `chat-app/build.gradle.kts` (the `loadEnv()` function and `buildConfigField` entries) to read from your app's `.env`.
 
 ## Permissions
 

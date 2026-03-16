@@ -500,7 +500,7 @@ class ChatRoomViewModel(
                 android.util.Log.d("ChatRoomViewModel", "Uploading file: ${uploadFile.name} (${uploadMimeType}), attempt ${retryCount + 1}")
                 var uploadResult: com.ethora.chat.core.networking.FileUploadResult? = null
                 
-                val baseUrl = ChatStore.config.value?.baseUrl ?: AppConfig.defaultBaseURL
+                val baseUrl = ChatStore.getEffectiveBaseUrl()
                 try {
                     uploadResult = AuthAPIHelper.uploadFile(uploadFile, uploadMimeType, token, baseUrl)
                 } catch (e: Exception) {

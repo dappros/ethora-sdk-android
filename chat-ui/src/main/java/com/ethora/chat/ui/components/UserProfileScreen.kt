@@ -16,6 +16,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.ethora.chat.core.config.AppConfig
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.RoomType
 import com.ethora.chat.core.models.User
@@ -131,7 +132,7 @@ fun UserProfileScreen(
                                 // Convert to Room and add to store
                                 val newRoom = createRoomFromApi(
                                     apiRoom = apiRoom,
-                                    conferenceDomain = AppConfig.defaultConferenceDomain,
+                                    conferenceDomain = ChatStore.getEffectiveConference(),
                                     usersArrayLength = 2
                                 )
                                 

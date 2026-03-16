@@ -21,15 +21,18 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.ethora.chat.Chat
 import com.ethora.chat.core.config.ChatConfig
-import com.ethora.chat.core.config.ChatColors
+import com.ethora.chat.core.config.EnableRoomsRetryConfig
 import com.ethora.chat.core.config.XMPPSettings
+import com.ethora.chat.core.config.ChatColors
 import com.ethora.chat.core.config.UserLoginConfig
 import com.ethora.chat.core.models.User
-import com.ethora.chat.core.networking.AuthAPIHelper
+import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.networking.ApiClient
+import com.ethora.chat.core.networking.AuthAPIHelper
 import com.ethora.chat.core.networking.RoomsAPIHelper
 import com.ethora.chat.core.push.PushNotificationManager
 import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.store.MessageStore
 import com.ethora.chat.core.store.ScrollPositionStore
@@ -174,8 +177,28 @@ class MainActivity : ComponentActivity() {
                     
                     // Persistent states
                     val scope = rememberCoroutineScope()
-                    var email by remember { mutableStateOf("yukiraze9@gmail.com") }
-                    var password by remember { mutableStateOf("Qwerty123") }
+                    var email by remember { mutableStateOf(BuildConfig.DEFAULT_LOGIN_EMAIL) }
+                    var password by remember { mutableStateOf(BuildConfig.DEFAULT_LOGIN_PASSWORD) }
+
+                    // Config: loaded from .env at build time (like React's env), set early for all API calls
+                    val appConfig = remember {
+                        ChatConfig(
+                            baseUrl = BuildConfig.API_BASE_URL,
+                            appId = BuildConfig.APP_ID,
+                            xmppSettings = XMPPSettings(
+                                devServer = BuildConfig.XMPP_DEV_SERVER,
+                                host = BuildConfig.XMPP_HOST,
+                                conference = BuildConfig.XMPP_CONFERENCE
+                            ),
+                            disableHeader = false,
+                            disableMedia = false,
+                            newArch = true,
+                            disableProfilesInteractions = true,
+                            enableRoomsRetry = EnableRoomsRetryConfig(enabled = true, helperText = "Initializing room")
+                        )
+                    }
+                    ChatStore.setConfig(appConfig)
+                    ApiClient.setBaseUrl(appConfig.baseUrl ?: AppConfig.defaultBaseURL, appConfig.customAppToken)
 
                     // Initial Persistence Setup
                     LaunchedEffect(Unit) {
@@ -236,7 +259,7 @@ class MainActivity : ComponentActivity() {
                                     scope.launch {
                                         try {
                                             val response = withContext(Dispatchers.IO) {
-                                                AuthAPIHelper.loginWithEmail(email, password, baseUrl = "https://api.ethoradev.com/v1")
+                                                AuthAPIHelper.loginWithEmail(email, password)
                                             }
                                             UserStore.setUser(response)
                                             ApiClient.setUserToken(response.token)
@@ -253,6 +276,7 @@ class MainActivity : ComponentActivity() {
                         }
                         AppScreen.CHAT -> {
                             ChatScreen(
+                                config = appConfig,
                                 onLogout = {
                                     LogoutService.performLogout()
                                 }
@@ -337,7 +361,7 @@ fun LoginScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(onLogout: () -> Unit) {
+fun ChatScreen(config: ChatConfig, onLogout: () -> Unit) {
     var selectedTab by remember { mutableStateOf(0) }
     
     Scaffold(
@@ -370,25 +394,6 @@ fun ChatScreen(onLogout: () -> Unit) {
     ) { padding ->
         Box(modifier = Modifier.padding(padding)) {
             if (selectedTab == 0) {
-                // Main Chat component from chat-ui
-                val config = ChatConfig(
-                    disableHeader = false,
-                    disableRooms = false,
-                    disableMedia = false,
-                    newArch = true,
-                    disableProfilesInteractions = true,
-                    baseUrl = "https://api.ethoradev.com/v1",
-                    xmppSettings = XMPPSettings(
-                        devServer = "wss://xmpp.ethoradev.com:5443/ws",
-                        host = "xmpp.ethoradev.com",
-                        conference = "conference.xmpp.ethoradev.com"
-                    ),
-                    enableRoomsRetry = com.ethora.chat.core.config.EnableRoomsRetryConfig(
-                        enabled = true,
-                        helperText = "Initializing room"
-                    )
-                )
-                
                 Chat(config = config)
             } else {
                 com.ethora.chat.ui.components.LogsView()

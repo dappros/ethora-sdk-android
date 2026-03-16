@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import com.ethora.chat.core.config.AppConfig
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.networking.PushAPIHelper
 import com.ethora.chat.core.xmpp.XMPPClient
 import kotlinx.coroutines.*
@@ -64,8 +65,8 @@ object PushNotificationManager {
      */
     suspend fun subscribeToBackend(
         fcmToken: String,
-        appId: String = AppConfig.defaultAppId,
-        baseUrl: String = AppConfig.defaultBaseURL
+        appId: String = ChatStore.getEffectiveAppId(),
+        baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): Boolean {
         return PushAPIHelper.subscribeToPush(fcmToken, appId, baseUrl)
     }

@@ -19,7 +19,8 @@ data class ChatConfig(
     val userLogin: UserLoginConfig? = null,
     val customLogin: CustomLoginConfig? = null,
 
-    // API & XMPP Settings
+    // API & XMPP Settings (mirrors React IConfig)
+    val appId: String? = null,
     val baseUrl: String? = null,
     val customAppToken: String? = null,
     val xmppSettings: XMPPSettings? = null,
@@ -112,6 +113,7 @@ data class ChatConfig(
         private var jwtLogin: JWTLoginConfig? = null
         private var userLogin: UserLoginConfig? = null
         private var customLogin: CustomLoginConfig? = null
+        private var appId: String? = null
         private var baseUrl: String? = null
         private var customAppToken: String? = null
         private var xmppSettings: XMPPSettings? = null
@@ -166,6 +168,7 @@ data class ChatConfig(
         fun jwtLogin(value: JWTLoginConfig) = apply { this.jwtLogin = value }
         fun userLogin(value: UserLoginConfig) = apply { this.userLogin = value }
         fun customLogin(value: CustomLoginConfig) = apply { this.customLogin = value }
+        fun appId(value: String) = apply { this.appId = value }
         fun baseUrl(value: String) = apply { this.baseUrl = value }
         fun customAppToken(value: String) = apply { this.customAppToken = value }
         fun xmppSettings(value: XMPPSettings) = apply { this.xmppSettings = value }
@@ -221,6 +224,7 @@ data class ChatConfig(
             jwtLogin = jwtLogin,
             userLogin = userLogin,
             customLogin = customLogin,
+            appId = appId,
             baseUrl = baseUrl,
             customAppToken = customAppToken,
             xmppSettings = xmppSettings,

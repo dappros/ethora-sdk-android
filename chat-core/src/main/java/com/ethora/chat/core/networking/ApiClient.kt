@@ -17,6 +17,9 @@ object ApiClient {
     private var userToken: String? = null
     internal var storedBaseUrl: String = AppConfig.defaultBaseURL
 
+    /** Public getter for use in inline function defaults (avoids internal visibility in inline) */
+    fun getStoredBaseUrl(): String = storedBaseUrl
+
     /**
      * Set app token
      */
@@ -44,7 +47,7 @@ object ApiClient {
     /**
      * Get Retrofit instance
      */
-    fun getRetrofit(baseUrl: String = storedBaseUrl): Retrofit {
+    fun getRetrofit(baseUrl: String = getStoredBaseUrl()): Retrofit {
         // Ensure baseUrl ends with a trailing slash (required by Retrofit)
         val normalizedBaseUrl = if (baseUrl.endsWith("/")) baseUrl else "$baseUrl/"
         
@@ -127,14 +130,14 @@ object ApiClient {
     /**
      * Create API service
      */
-    fun <T> createService(serviceClass: Class<T>, baseUrl: String = storedBaseUrl): T {
+    fun <T> createService(serviceClass: Class<T>, baseUrl: String = getStoredBaseUrl()): T {
         return getRetrofit(baseUrl).create(serviceClass)
     }
     
     /**
      * Create API service (inline version for convenience)
      */
-    inline fun <reified T> createService(baseUrl: String = AppConfig.defaultBaseURL): T {
+    inline fun <reified T> createService(baseUrl: String = getStoredBaseUrl()): T {
         return getRetrofit(baseUrl).create(T::class.java)
     }
 }

@@ -1,6 +1,7 @@
 package com.ethora.chat.core.networking
 
 import com.ethora.chat.core.config.AppConfig
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.UserStore
 import retrofit2.Response
 import retrofit2.http.Body
@@ -27,8 +28,8 @@ object PushAPIHelper {
 
     suspend fun subscribeToPush(
         fcmToken: String,
-        appId: String = AppConfig.defaultAppId,
-        baseUrl: String = AppConfig.defaultBaseURL
+        appId: String = ChatStore.getEffectiveAppId(),
+        baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): Boolean {
         return try {
             val userToken = UserStore.currentUser.value?.token

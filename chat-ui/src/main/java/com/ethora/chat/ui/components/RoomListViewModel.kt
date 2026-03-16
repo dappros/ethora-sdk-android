@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ethora.chat.core.config.AppConfig
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.RoomType
 import com.ethora.chat.core.models.createRoomFromApi
@@ -87,7 +88,7 @@ class RoomListViewModel : ViewModel() {
                             val mimeType = getMimeType(pictureFile.name)
                             val token = UserStore.currentUser.value?.token
                             if (token != null) {
-                                val baseUrl = AppConfig.defaultBaseURL
+                                val baseUrl = ChatStore.getEffectiveBaseUrl()
                                 val uploadResult = AuthAPIHelper.uploadFile(
                                     file = pictureFile,
                                     mimeType = mimeType,
@@ -116,7 +117,7 @@ class RoomListViewModel : ViewModel() {
                 // Step 3: Convert to Room and add to store (matches web: handleRoomCreation)
                 val newRoom = createRoomFromApi(
                     apiRoom = apiRoom,
-                    conferenceDomain = AppConfig.defaultConferenceDomain,
+                    conferenceDomain = ChatStore.getEffectiveConference(),
                     usersArrayLength = members?.size ?: 0
                 )
                 
