@@ -21,6 +21,7 @@ class XMPPWebSocketConnection(
     private val username: String,
     private val password: String,
     private val host: String,
+    private val conference: String,
     private val resource: String = "default"
 ) {
     private val TAG = "XMPPWebSocket"
@@ -28,27 +29,6 @@ class XMPPWebSocketConnection(
     private var isConnected: Boolean = false
     private var isAuthenticated: Boolean = false
     private val client = OkHttpClient.Builder()
-        .dns(object : okhttp3.Dns {
-            override fun lookup(hostname: String): List<java.net.InetAddress> {
-                android.util.Log.d("XMPPWebSocket", "🔍 DNS lookup for: $hostname")
-                return try {
-                    val addresses = okhttp3.Dns.SYSTEM.lookup(hostname)
-                    android.util.Log.d("XMPPWebSocket", "   ✅ Resolved $hostname to ${addresses.map { it.hostAddress }}")
-                    addresses
-                } catch (e: java.net.UnknownHostException) {
-                    android.util.Log.w("XMPPWebSocket", "   ⚠️ DNS lookup failed for $hostname, using fallback")
-                    when (hostname) {
-                        "api.ethoradev.com" -> listOf(java.net.InetAddress.getByName("3.139.111.222")).also {
-                            android.util.Log.d("XMPPWebSocket", "   ✅ Fallback resolve for $hostname: 3.139.111.222")
-                        }
-                        "xmpp.ethoradev.com" -> listOf(java.net.InetAddress.getByName("3.139.111.222")).also {
-                            android.util.Log.d("XMPPWebSocket", "   ✅ Fallback resolve for $hostname: 3.139.111.222")
-                        }
-                        else -> throw e
-                    }
-                }
-            }
-        })
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
@@ -872,7 +852,7 @@ class XMPPWebSocketConnection(
         val fixedRoomJid = if (roomJid.contains("@")) {
             roomJid
         } else {
-            "$roomJid@conference.xmpp.ethoradev.com"
+            "$roomJid@$conference"
         }
         
         val id = if (isTyping) "typing-${System.currentTimeMillis()}" else "stop-typing-${System.currentTimeMillis()}"
@@ -925,7 +905,7 @@ class XMPPWebSocketConnection(
         val fixedRoomJid = if (roomJid.contains("@")) {
             roomJid
         } else {
-            "$roomJid@conference.xmpp.ethoradev.com"
+            "$roomJid@$conference"
         }
         
         // Get current user info
@@ -962,8 +942,8 @@ class XMPPWebSocketConnection(
         
         // Build data element (matches web version exactly)
         // Web version uses devServer URL as xmlns (unusual but that's what they do)
-        // Format: xmlns="wss://xmpp.ethoradev.com:5443/ws" (without quotes in the actual XML)
-        val dataElement = """<data xmlns="wss://xmpp.ethoradev.com:5443/ws" senderFirstName="$escapedFirstName" senderLastName="$escapedLastName" fullName="$escapedFullName" photoURL="$escapedPhotoURL" senderJID="$escapedSenderJID" senderWalletAddress="$escapedWalletAddress" roomJid="$escapedRoomJid" isSystemMessage="false" tokenAmount="0" quickReplies="" notDisplayedValue="" showInChannel="${showInChannel}" isReply="${isReply}" mainMessage="$escapedMainMessage" push="true"/>"""
+        // xmlns uses devServer URL (from config)
+        val dataElement = """<data xmlns="$wsUrl" senderFirstName="$escapedFirstName" senderLastName="$escapedLastName" fullName="$escapedFullName" photoURL="$escapedPhotoURL" senderJID="$escapedSenderJID" senderWalletAddress="$escapedWalletAddress" roomJid="$escapedRoomJid" isSystemMessage="false" tokenAmount="0" quickReplies="" notDisplayedValue="" showInChannel="${showInChannel}" isReply="${isReply}" mainMessage="$escapedMainMessage" push="true"/>"""
         
         val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$dataElement<body>$escapedBody</body></message>"""
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMessage() to $fixedRoomJid")
@@ -991,7 +971,7 @@ class XMPPWebSocketConnection(
         val fixedRoomJid = if (roomJid.contains("@")) {
             roomJid
         } else {
-            "$roomJid@conference.xmpp.ethoradev.com"
+            "$roomJid@$conference"
         }
         
         // Get current user's JID for from attribute
@@ -1064,7 +1044,7 @@ class XMPPWebSocketConnection(
         val fixedRoomJid = if (roomJid.contains("@")) {
             roomJid
         } else {
-            "$roomJid@conference.xmpp.ethoradev.com"
+            "$roomJid@$conference"
         }
 
         // Build RSM <before> element - matches Swift/Web logic
@@ -1105,7 +1085,7 @@ class XMPPWebSocketConnection(
         val fixedRoomJid = if (roomJid.contains("@")) {
             roomJid
         } else {
-            "$roomJid@conference.xmpp.ethoradev.com"
+            "$roomJid@$conference"
         }
 
         val id = "edit-message-${System.currentTimeMillis()}"
@@ -1131,7 +1111,7 @@ class XMPPWebSocketConnection(
         val fixedRoomJid = if (roomJid.contains("@")) {
             roomJid
         } else {
-            "$roomJid@conference.xmpp.ethoradev.com"
+            "$roomJid@$conference"
         }
 
         val id = "deleteMessageStanza"
@@ -1157,13 +1137,13 @@ class XMPPWebSocketConnection(
         val fixedRoomJid = if (roomJid.contains("@")) {
             roomJid
         } else {
-            "$roomJid@conference.xmpp.ethoradev.com"
+            "$roomJid@$conference"
         }
 
         val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
         val senderFirstName = currentUser?.firstName ?: ""
         val senderLastName = currentUser?.lastName ?: ""
-        val fromJid = clientWrapper?.let { "${currentUser?.xmppUsername ?: ""}@xmpp.ethoradev.com" } ?: ""
+        val fromJid = clientWrapper?.let { "${currentUser?.xmppUsername ?: ""}@$host" } ?: ""
         
         val id = "message-reaction:${System.currentTimeMillis()}"
         
@@ -1594,7 +1574,7 @@ class XMPPWebSocketConnection(
         val fixedRoomJid = if (roomJid.contains("@")) {
             roomJid
         } else {
-            "$roomJid@conference.xmpp.ethoradev.com"
+            "$roomJid@$conference"
         }
         
         // Get current user's local part (username without domain)
@@ -1644,7 +1624,7 @@ class XMPPWebSocketConnection(
         val fixedRoomJid = if (roomJid.contains("@")) {
             roomJid
         } else {
-            "$roomJid@conference.xmpp.ethoradev.com"
+            "$roomJid@$conference"
         }
         
         val iq = """<iq type="set" to="$fixedRoomJid" id="GetArchive"><query xmlns="urn:xmpp:mam:2"><set xmlns="http://jabber.org/protocol/rsm"><max>1</max><before></before></set></query></iq>"""
@@ -1684,7 +1664,7 @@ class XMPPWebSocketConnection(
         }
 
         val fixedRoomJid = if (roomJid.contains("@")) roomJid
-            else "$roomJid@conference.$host"
+            else "$roomJid@$conference"
 
         val nick = username.split("@").firstOrNull() ?: username
         val id = "newSubscription:${System.currentTimeMillis()}"

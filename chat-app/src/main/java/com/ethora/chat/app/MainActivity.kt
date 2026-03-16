@@ -22,9 +22,10 @@ import androidx.core.content.ContextCompat
 import com.ethora.chat.Chat
 import com.ethora.chat.core.config.ChatConfig
 import com.ethora.chat.core.config.EnableRoomsRetryConfig
+import com.ethora.chat.core.config.JWTLoginConfig
+import com.ethora.chat.core.config.RefreshTokensConfig
 import com.ethora.chat.core.config.XMPPSettings
 import com.ethora.chat.core.config.ChatColors
-import com.ethora.chat.core.config.UserLoginConfig
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.networking.ApiClient
@@ -180,9 +181,19 @@ class MainActivity : ComponentActivity() {
                     var email by remember { mutableStateOf(BuildConfig.DEFAULT_LOGIN_EMAIL) }
                     var password by remember { mutableStateOf(BuildConfig.DEFAULT_LOGIN_PASSWORD) }
 
-                    // Config: loaded from .env at build time (aligned with React/preshent), set early for all API calls
-                    val appConfig = remember {
+                    // Config: aligned with preshent-mobile/WorkspaceDetailsChatScreen.tsx (React IConfig)
+                    val userToken = BuildConfig.USER_TOKEN.takeIf { it.isNotBlank() }
+                    val enableLiveInit = userToken != null
+                    val appConfig = remember(userToken) {
                         ChatConfig(
+                            disableHeader = true,
+                            disableRooms = false, // true for single-room (preshent); false for test app room list
+                            disableMedia = false,
+                            disableProfilesInteractions = true,
+                            newArch = true,
+                            botMessageAutoScroll = true,
+                            initBeforeLoad = enableLiveInit,
+                            setRoomJidInPath = true,
                             baseUrl = BuildConfig.API_BASE_URL,
                             appId = BuildConfig.APP_ID,
                             customAppToken = BuildConfig.API_TOKEN.takeIf { it.isNotBlank() },
@@ -191,20 +202,26 @@ class MainActivity : ComponentActivity() {
                                 host = BuildConfig.XMPP_HOST,
                                 conference = BuildConfig.XMPP_CONFERENCE
                             ),
-                            disableHeader = false,
-                            disableMedia = false,
-                            newArch = true,
-                            disableProfilesInteractions = true,
-                            enableRoomsRetry = EnableRoomsRetryConfig(enabled = true, helperText = "Initializing room")
+                            jwtLogin = if (enableLiveInit) JWTLoginConfig(token = userToken!!, enabled = true) else null,
+                            defaultLogin = enableLiveInit,
+                            enableRoomsRetry = EnableRoomsRetryConfig(
+                                enabled = enableLiveInit,
+                                helperText = "Initializing room"
+                            ),
+                            refreshTokens = RefreshTokensConfig(enabled = false),
+                            customTypingIndicator = com.ethora.chat.core.config.CustomTypingIndicatorConfig(enabled = true),
+                            blockMessageSendingWhenProcessing = com.ethora.chat.core.config.BlockMessageSendingConfig(
+                                enabled = true,
+                                timeout = 90_000L
+                            )
                         )
                     }
                     ChatStore.setConfig(appConfig)
                     ApiClient.setBaseUrl(appConfig.baseUrl ?: AppConfig.defaultBaseURL, appConfig.customAppToken)
 
-                    // Initial Persistence Setup
+                    // Initial Persistence Setup & Auth
                     LaunchedEffect(Unit) {
                         try {
-                            // Initialize persistence managers (once per app lifetime)
                             val persistenceManager = ChatPersistenceManager(this@MainActivity)
                             val chatDatabase = ChatDatabase.getDatabase(this@MainActivity)
                             val messageCache = MessageCache(chatDatabase)
@@ -217,20 +234,44 @@ class MainActivity : ComponentActivity() {
                             val localStorage = LocalStorage(this@MainActivity)
                             MessageLoader.initialize(localStorage)
                             
-                            // Load persisted user if any (but still show login if user wants to test login)
-                            val persistedUser = withContext(Dispatchers.IO) {
+                            // 1) Persisted user?
+                            var persistedUser = withContext(Dispatchers.IO) {
                                 UserStore.loadUserFromPersistence()
                             }
-                            
                             if (persistedUser != null) {
                                 UserStore.setUser(persistedUser)
                                 ApiClient.setUserToken(persistedUser.token ?: "")
+                                currentScreen = AppScreen.CHAT
+                                return@LaunchedEffect
                             }
                             
+                            // 2) User token in config (jwtLogin) → auto-login
+                            val token = userToken
+                            if (token != null) {
+                                try {
+                                    val response = withContext(Dispatchers.IO) {
+                                        AuthAPIHelper.loginViaJWT(token)
+                                    }
+                                    response?.let {
+                                        UserStore.setUser(it)
+                                        ApiClient.setUserToken(it.token)
+                                        LocalStorage(this@MainActivity).saveJWTToken(token)
+                                        com.ethora.chat.core.networking.TokenManager.startAutoRefresh()
+                                        currentScreen = AppScreen.CHAT
+                                        return@LaunchedEffect
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "JWT auto-login failed", e)
+                                    errorMessage = "Auto-login failed: ${e.message}"
+                                }
+                            }
+                            
+                            // 3) No token → show login
                             currentScreen = AppScreen.LOGIN
                         } catch (e: Exception) {
                             Log.e(TAG, "Initialization failed", e)
                             errorMessage = "Initialization failed: ${e.message}"
+                            currentScreen = AppScreen.LOGIN
                         }
                     }
 

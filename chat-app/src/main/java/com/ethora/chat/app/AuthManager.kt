@@ -9,7 +9,12 @@ import com.ethora.chat.core.persistence.ChatDatabase
 import com.ethora.chat.core.persistence.ChatPersistenceManager
 import com.ethora.chat.core.persistence.LocalStorage
 import com.ethora.chat.core.persistence.MessageCache
-import com.ethora.chat.core.store.*
+import com.ethora.chat.core.store.ChatStore
+import com.ethora.chat.core.store.MessageLoader
+import com.ethora.chat.core.store.MessageStore
+import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.core.store.ScrollPositionStore
+import com.ethora.chat.core.store.UserStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -107,7 +112,7 @@ class AuthManager(private val context: Context) {
                 val loginResponse = AuthAPIHelper.loginWithEmail(
                     email = email,
                     password = password,
-                    baseUrl = "https://api.ethoradev.com/v1"
+                    baseUrl = ChatStore.getEffectiveBaseUrl()
                 )
                 
                 withContext(Dispatchers.Main) {

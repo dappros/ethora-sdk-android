@@ -193,6 +193,7 @@ class XMPPClient(
                     username = username,
                     password = password,
                     host = host,
+                    conference = conference,
                     resource = "default"
                 )
                 webSocketConnection?.setClientWrapper(this@XMPPClient)

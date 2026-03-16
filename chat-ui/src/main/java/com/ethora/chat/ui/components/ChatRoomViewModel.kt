@@ -523,7 +523,8 @@ class ChatRoomViewModel(
                 android.util.Log.d("ChatRoomViewModel", "File uploaded: ${uploadResult.location}")
                 
                 // Prepare media data for XMPP
-                val senderJID = currentUser.xmppUsername?.let { "$it@xmpp.ethoradev.com" } ?: ""
+                val xmppHost = ChatStore.getEffectiveXmppSettings().host
+                val senderJID = currentUser.xmppUsername?.let { "$it@$xmppHost" } ?: ""
                 val mediaData = mapOf<String, Any>(
                     "senderJID" to senderJID,
                     "senderFirstName" to (currentUser.firstName ?: ""),
