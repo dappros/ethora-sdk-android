@@ -278,15 +278,24 @@ fun Chat(
         // Subscribe to rooms so we recompose when they load (fix: LaunchedEffect was not re-running when rooms were set async)
         val rooms by RoomStore.rooms.collectAsState(initial = emptyList())
         
-        // Load initial messages for all rooms once after XMPP client is initialized and rooms are loaded
-        // Use rooms.size to avoid re-running on every list reference change; run only when client ready and we have rooms
+        // Load initial messages once XMPP is fully connected (avoids "Cannot get history: not fully connected")
         LaunchedEffect(xmppClient, rooms.size) {
             val client = xmppClient
             val roomsList = RoomStore.rooms.value
             
             if (client != null && roomsList.isNotEmpty()) {
                 try {
-                    delay(1000)
+                    // Wait for XMPP to be fully connected (up to 30s) before loading history
+                    var waited = 0L
+                    while (!client.isFullyConnected() && waited < 30000) {
+                        delay(500)
+                        waited += 500
+                    }
+                    if (!client.isFullyConnected()) {
+                        android.util.Log.w("EthoraChat", "XMPP not fully connected after 30s, skipping message load")
+                        return@LaunchedEffect
+                    }
+                    delay(500) // brief pause after connect
                     
                     val activeRoomJid = RoomStore.currentRoom.value?.jid
                     MessageLoader.loadInitialMessagesForAllRooms(

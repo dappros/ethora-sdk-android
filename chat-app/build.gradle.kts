@@ -47,6 +47,7 @@ android {
         buildConfigField("String", "DEFAULT_LOGIN_EMAIL", "\"${env("DEFAULT_LOGIN_EMAIL", "yukiraze9@gmail.com")}\"")
         buildConfigField("String", "DEFAULT_LOGIN_PASSWORD", "\"${env("DEFAULT_LOGIN_PASSWORD", "Qwerty123")}\"")
         buildConfigField("String", "USER_TOKEN", "\"${env("USER_TOKEN", env("CHAT_TOKEN", ""))}\"")
+        buildConfigField("Boolean", "USE_PRESHENT_JWT_AUTH", "${env("USE_PRESHENT_JWT_AUTH", "false").lowercase() == "true"}")
     }
 
     buildTypes {

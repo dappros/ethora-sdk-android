@@ -202,7 +202,11 @@ class MainActivity : ComponentActivity() {
                                 host = BuildConfig.XMPP_HOST,
                                 conference = BuildConfig.XMPP_CONFERENCE
                             ),
-                            jwtLogin = if (enableLiveInit) JWTLoginConfig(token = userToken!!, enabled = true) else null,
+                            jwtLogin = if (enableLiveInit) JWTLoginConfig(
+                                token = userToken!!,
+                                enabled = true,
+                                usePreshentStyle = BuildConfig.USE_PRESHENT_JWT_AUTH
+                            ) else null,
                             defaultLogin = enableLiveInit,
                             enableRoomsRetry = EnableRoomsRetryConfig(
                                 enabled = enableLiveInit,

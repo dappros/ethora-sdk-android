@@ -27,6 +27,11 @@ object ChatStore {
     }
 
     /**
+     * Get current config (for auth style etc.)
+     */
+    fun getConfig(): ChatConfig? = _config.value
+
+    /**
      * Effective base URL: config.baseUrl or AppConfig default.
      * Use this everywhere instead of hardcoded AppConfig.defaultBaseURL.
      */
