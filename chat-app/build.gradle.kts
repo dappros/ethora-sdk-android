@@ -37,12 +37,13 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Injected from .env file (React-style)
-        buildConfigField("String", "API_BASE_URL", "\"${env("API_BASE_URL", "https://api.ethoradev.com/v1")}\"")
+        // Injected from .env (aligned with React VITE_ETHORA_* / preshent-mobile PRESHENT_*)
+        buildConfigField("String", "API_BASE_URL", "\"${env("API_BASE_URL", env("CHAT_BASE_URL", "https://api.ethoradev.com/v1"))}\"")
         buildConfigField("String", "APP_ID", "\"${env("APP_ID", "646cc8dc96d4a4dc8f7b2f2d")}\"")
-        buildConfigField("String", "XMPP_DEV_SERVER", "\"${env("XMPP_DEV_SERVER", "wss://xmpp.ethoradev.com:5443/ws")}\"")
+        buildConfigField("String", "API_TOKEN", "\"${env("API_TOKEN", "")}\"")
+        buildConfigField("String", "XMPP_DEV_SERVER", "\"${env("APP_XMPP_SERVICE", env("XMPP_DEV_SERVER", "wss://xmpp.ethoradev.com:5443/ws"))}\"")
         buildConfigField("String", "XMPP_HOST", "\"${env("XMPP_HOST", "xmpp.ethoradev.com")}\"")
-        buildConfigField("String", "XMPP_CONFERENCE", "\"${env("XMPP_CONFERENCE", "conference.xmpp.ethoradev.com")}\"")
+        buildConfigField("String", "XMPP_CONFERENCE", "\"${env("XMPP_SERVICE", env("XMPP_CONFERENCE", "conference.xmpp.ethoradev.com"))}\"")
         buildConfigField("String", "DEFAULT_LOGIN_EMAIL", "\"${env("DEFAULT_LOGIN_EMAIL", "yukiraze9@gmail.com")}\"")
         buildConfigField("String", "DEFAULT_LOGIN_PASSWORD", "\"${env("DEFAULT_LOGIN_PASSWORD", "Qwerty123")}\"")
     }

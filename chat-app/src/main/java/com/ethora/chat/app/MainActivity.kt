@@ -180,11 +180,12 @@ class MainActivity : ComponentActivity() {
                     var email by remember { mutableStateOf(BuildConfig.DEFAULT_LOGIN_EMAIL) }
                     var password by remember { mutableStateOf(BuildConfig.DEFAULT_LOGIN_PASSWORD) }
 
-                    // Config: loaded from .env at build time (like React's env), set early for all API calls
+                    // Config: loaded from .env at build time (aligned with React/preshent), set early for all API calls
                     val appConfig = remember {
                         ChatConfig(
                             baseUrl = BuildConfig.API_BASE_URL,
                             appId = BuildConfig.APP_ID,
+                            customAppToken = BuildConfig.API_TOKEN.takeIf { it.isNotBlank() },
                             xmppSettings = XMPPSettings(
                                 devServer = BuildConfig.XMPP_DEV_SERVER,
                                 host = BuildConfig.XMPP_HOST,

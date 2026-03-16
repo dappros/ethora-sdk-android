@@ -35,19 +35,20 @@ The app uses a `.env` file for configuration, similar to React projects. Values 
    ```bash
    cp chat-app/.env.example chat-app/.env
    ```
-2. Edit `chat-app/.env` to set your API URL, XMPP server, and other values:
+2. Edit `chat-app/.env`. Structure aligns with React (`VITE_ETHORA_*`) and preshent-mobile (`PRESHENT_*`):
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `API_BASE_URL` | Backend API base URL | `https://api.ethoradev.com/v1` |
-| `APP_ID` | Ethora app ID | `646cc8dc96d4a4dc8f7b2f2d` |
-| `XMPP_DEV_SERVER` | XMPP WebSocket URL | `wss://xmpp.ethoradev.com:5443/ws` |
-| `XMPP_HOST` | XMPP server host | `xmpp.ethoradev.com` |
-| `XMPP_CONFERENCE` | Conference domain | `conference.xmpp.ethoradev.com` |
-| `DEFAULT_LOGIN_EMAIL` | Test login email | `yukiraze9@gmail.com` |
-| `DEFAULT_LOGIN_PASSWORD` | Test login password | `Qwerty123` |
+| Variable | Maps to (React) | Description | Default |
+|----------|-----------------|-------------|---------|
+| `API_BASE_URL` | `VITE_ETHORA_CHAT_BASE_URL` | Backend API base URL | `https://api.ethoradev.com/v1` |
+| `APP_ID` | `VITE_ETHORA_APP_ID` | Ethora app ID | `646cc8dc96d4a4dc8f7b2f2d` |
+| `API_TOKEN` | `VITE_ETHORA_API_TOKEN` | App JWT token (Authorization header) | — |
+| `APP_XMPP_SERVICE` | `VITE_ETHORA_APP_XMPP_SERVICE` | XMPP WebSocket URL | `wss://xmpp.ethoradev.com:5443/ws` |
+| `XMPP_SERVICE` | `VITE_ETHORA_XMPP_SERVICE` | Conference domain | `conference.xmpp.ethoradev.com` |
+| `XMPP_HOST` | `VITE_ETHORA_XMPP_HOST` | XMPP server host | `xmpp.ethoradev.com` |
+| `DEFAULT_LOGIN_EMAIL` | — | Test login email | `yukiraze9@gmail.com` |
+| `DEFAULT_LOGIN_PASSWORD` | — | Test login password | `Qwerty123` |
 
-If `.env` is missing, defaults are used. **Do not commit secrets to `.env`** — add it to `.gitignore` if it contains sensitive data.
+Legacy names (`XMPP_DEV_SERVER`, `XMPP_CONFERENCE`) are supported. If `.env` is missing, defaults are used. **Do not commit `API_TOKEN`** — add `.env` to `.gitignore` if it contains secrets.
 
 ### Step 4: Configure Firebase (Optional, for Push Notifications)
 
@@ -541,19 +542,20 @@ Chat(
 
 The **chat-app** module supports a `.env` file (like React), loaded at build time.
 
-Create or edit `chat-app/.env`:
+Create or edit `chat-app/.env` (same structure as React `VITE_ETHORA_*` / preshent-mobile `PRESHENT_*`):
 
 ```
 API_BASE_URL=https://api.ethoradev.com/v1
 APP_ID=646cc8dc96d4a4dc8f7b2f2d
-XMPP_DEV_SERVER=wss://xmpp.ethoradev.com:5443/ws
+API_TOKEN=JWT <your-app-token>
+APP_XMPP_SERVICE=wss://xmpp.ethoradev.com:5443/ws
+XMPP_SERVICE=conference.xmpp.ethoradev.com
 XMPP_HOST=xmpp.ethoradev.com
-XMPP_CONFERENCE=conference.xmpp.ethoradev.com
 DEFAULT_LOGIN_EMAIL=your@email.com
 DEFAULT_LOGIN_PASSWORD=yourpassword
 ```
 
-Values are injected into `BuildConfig`. If `.env` is missing, defaults are used. See `chat-app/.env.example` for the full list.
+Legacy names `XMPP_DEV_SERVER` and `XMPP_CONFERENCE` are supported. Values are injected into `BuildConfig`. If `.env` is missing, defaults are used. See `chat-app/.env.example` for the full list. **Do not commit `API_TOKEN`** — add `.env` to `.gitignore`.
 
 **Integrating into your own app?** Add the same Gradle logic from `chat-app/build.gradle.kts` (the `loadEnv()` function and `buildConfigField` entries) to read from your app's `.env`.
 
