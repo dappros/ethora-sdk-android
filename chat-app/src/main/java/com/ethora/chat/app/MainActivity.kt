@@ -184,7 +184,18 @@ class MainActivity : ComponentActivity() {
                     // Config: aligned with preshent-mobile/WorkspaceDetailsChatScreen.tsx (React IConfig)
                     val userToken = BuildConfig.USER_TOKEN.takeIf { it.isNotBlank() }
                     val enableLiveInit = userToken != null
-                    val appConfig = remember(userToken) {
+                    val dnsOverrides = remember {
+                        buildMap<String, String> {
+                            if (BuildConfig.DNS_FALLBACK_XMPP_PRESHENT.isNotBlank()) {
+                                put("xmpp-dev.preshent.com", BuildConfig.DNS_FALLBACK_XMPP_PRESHENT)
+                                put("conference.xmpp-dev.preshent.com", BuildConfig.DNS_FALLBACK_XMPP_PRESHENT)
+                            }
+                            if (BuildConfig.DNS_FALLBACK_API_PRESHENT.isNotBlank()) {
+                                put("api-dev.preshent.com", BuildConfig.DNS_FALLBACK_API_PRESHENT)
+                            }
+                        }
+                    }
+                    val appConfig = remember(userToken, dnsOverrides) {
                         ChatConfig(
                             disableHeader = true,
                             disableRooms = false, // true for single-room (preshent); false for test app room list
@@ -202,6 +213,7 @@ class MainActivity : ComponentActivity() {
                                 host = BuildConfig.XMPP_HOST,
                                 conference = BuildConfig.XMPP_CONFERENCE
                             ),
+                            dnsFallbackOverrides = dnsOverrides.ifEmpty { null },
                             jwtLogin = if (enableLiveInit) JWTLoginConfig(
                                 token = userToken!!,
                                 enabled = true,
@@ -260,7 +272,9 @@ class MainActivity : ComponentActivity() {
                                         UserStore.setUser(it)
                                         ApiClient.setUserToken(it.token)
                                         LocalStorage(this@MainActivity).saveJWTToken(token)
-                                        com.ethora.chat.core.networking.TokenManager.startAutoRefresh()
+                                        if (appConfig.refreshTokens?.enabled == true) {
+                                            com.ethora.chat.core.networking.TokenManager.startAutoRefresh()
+                                        }
                                         currentScreen = AppScreen.CHAT
                                         return@LaunchedEffect
                                     }

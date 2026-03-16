@@ -4,6 +4,7 @@ import android.util.Log
 import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.UserStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -65,6 +66,8 @@ object TokenManager {
                             // If refresh fails, token might be expired - user will need to re-login
                         }
                     }
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Error in token refresh check", e)
                 }

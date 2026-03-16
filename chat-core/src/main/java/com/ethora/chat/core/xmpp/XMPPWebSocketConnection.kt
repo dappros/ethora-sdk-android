@@ -2,6 +2,7 @@ package com.ethora.chat.core.xmpp
 
 import android.util.Log
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.networking.DnsFallback
 import com.ethora.chat.core.models.User
 import kotlinx.coroutines.*
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -29,6 +30,7 @@ class XMPPWebSocketConnection(
     private var isConnected: Boolean = false
     private var isAuthenticated: Boolean = false
     private val client = OkHttpClient.Builder()
+        .dns(DnsFallback.createDnsFromConfig())
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)

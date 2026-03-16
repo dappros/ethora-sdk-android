@@ -236,12 +236,13 @@ object AuthAPIHelper {
      * Login with JWT token.
      * Supports two API styles:
      * - Ethora: users/login-with-jwt + Authorization header
-     * - Preshent: users/client + x-custom-token header (use usePreshentStyle=true)
+     * - Preshent: users/client + x-custom-token header (use usePreshentStyle=true or baseUrl contains preshent.com)
      */
     suspend fun loginViaJWT(
         token: String,
         baseUrl: String = ChatStore.getEffectiveBaseUrl(),
         usePreshentStyle: Boolean = ChatStore.getConfig()?.jwtLogin?.usePreshentStyle == true
+            || baseUrl.contains("preshent.com", ignoreCase = true)
     ): LoginResponse? {
         return try {
             val api = ApiClient.createService<AuthAPI>(baseUrl)

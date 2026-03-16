@@ -181,6 +181,16 @@ class ChatRoomViewModel(
             android.util.Log.d("ChatRoomViewModel", "  User: ${currentUser.firstName} ${currentUser.lastName}, xmppUsername: ${currentUser.xmppUsername}")
             android.util.Log.d("ChatRoomViewModel", "  XMPP Client: ${xmppClient != null}, isFullyConnected: ${xmppClient?.isFullyConnected()}")
             
+            xmppClient?.let { client ->
+                if (!client.isFullyConnected()) {
+                    android.util.Log.d("ChatRoomViewModel", "  XMPP not ready yet, waiting up to 15s for connection...")
+                    if (!client.ensureConnected(15_000)) {
+                        android.util.Log.e("ChatRoomViewModel", "Cannot send message: XMPP not connected after 15s")
+                        return@launch
+                    }
+                }
+            }
+            
             val messageId = xmppClient?.sendMessage(
                 roomJID = room.jid,
                 messageBody = text,

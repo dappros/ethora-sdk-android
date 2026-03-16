@@ -24,6 +24,8 @@ data class ChatConfig(
     val baseUrl: String? = null,
     val customAppToken: String? = null,
     val xmppSettings: XMPPSettings? = null,
+    /** Optional DNS fallback: hostname -> IP when system DNS fails (e.g. emulator). Example: "xmpp-dev.preshent.com" -> "1.2.3.4" */
+    val dnsFallbackOverrides: Map<String, String>? = null,
 
     // Room Settings
     val disableRooms: Boolean? = null,
@@ -117,6 +119,7 @@ data class ChatConfig(
         private var baseUrl: String? = null
         private var customAppToken: String? = null
         private var xmppSettings: XMPPSettings? = null
+        private var dnsFallbackOverrides: Map<String, String>? = null
         private var disableRooms: Boolean? = null
         private var defaultLogin: Boolean? = null
         private var disableInteractions: Boolean? = null
@@ -172,6 +175,7 @@ data class ChatConfig(
         fun baseUrl(value: String) = apply { this.baseUrl = value }
         fun customAppToken(value: String) = apply { this.customAppToken = value }
         fun xmppSettings(value: XMPPSettings) = apply { this.xmppSettings = value }
+        fun dnsFallbackOverrides(value: Map<String, String>) = apply { this.dnsFallbackOverrides = value }
         fun disableRooms(value: Boolean) = apply { this.disableRooms = value }
         fun defaultLogin(value: Boolean) = apply { this.defaultLogin = value }
         fun disableInteractions(value: Boolean) = apply { this.disableInteractions = value }
@@ -228,6 +232,7 @@ data class ChatConfig(
             baseUrl = baseUrl,
             customAppToken = customAppToken,
             xmppSettings = xmppSettings,
+            dnsFallbackOverrides = dnsFallbackOverrides,
             disableRooms = disableRooms,
             defaultLogin = defaultLogin,
             disableInteractions = disableInteractions,
