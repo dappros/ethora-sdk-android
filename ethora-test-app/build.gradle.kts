@@ -43,6 +43,7 @@ android {
         buildConfigField("String", "USER_TOKEN", "\"${env("USER_TOKEN", "")}\"")
         buildConfigField("String", "DEFAULT_LOGIN_EMAIL", "\"${env("DEFAULT_LOGIN_EMAIL", "admin@example.com")}\"")
         buildConfigField("String", "DEFAULT_LOGIN_PASSWORD", "\"${env("DEFAULT_LOGIN_PASSWORD", "admin123")}\"")
+        buildConfigField("String", "DNS_FALLBACK_OVERRIDES", "\"${env("DNS_FALLBACK_OVERRIDES", "")}\"")
     }
 
     buildTypes {

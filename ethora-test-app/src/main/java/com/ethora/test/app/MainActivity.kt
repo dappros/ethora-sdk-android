@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -74,7 +75,17 @@ class MainActivity : ComponentActivity() {
                 var loggedInUser by remember { mutableStateOf<User?>(null) }
                 val scope = rememberCoroutineScope()
 
-                val appConfig = remember(loggedInUser) {
+                val dnsOverrides = remember {
+                    BuildConfig.DNS_FALLBACK_OVERRIDES
+                        .split(",")
+                        .mapNotNull { part ->
+                            val kv = part.split("=", limit = 2).map { it.trim() }
+                            if (kv.size == 2 && kv[0].isNotBlank() && kv[1].isNotBlank()) kv[0] to kv[1] else null
+                        }
+                        .toMap()
+                        .takeIf { it.isNotEmpty() }
+                }
+                val appConfig = remember(loggedInUser, dnsOverrides) {
                     ChatConfig(
                         appId = BuildConfig.APP_ID,
                         baseUrl = BuildConfig.API_BASE_URL,
@@ -89,6 +100,7 @@ class MainActivity : ComponentActivity() {
                             host = BuildConfig.XMPP_HOST,
                             conference = BuildConfig.XMPP_CONFERENCE
                         ),
+                        dnsFallbackOverrides = dnsOverrides,
                         userLogin = loggedInUser?.let { user ->
                             UserLoginConfig(enabled = true, user = user)
                         },
@@ -168,10 +180,24 @@ class MainActivity : ComponentActivity() {
                             }
                         ) { padding ->
                             Box(modifier = Modifier.padding(padding)) {
-                                when (selectedTab) {
-                                    0 -> HomeTab()
-                                    1 -> ChatTab(config = appConfig, roomJid = singleRoomJid)
-                                    2 -> LogsTab()
+                                // Keep ChatTab always composed when on CHAT screen so JWT login
+                                // is not cancelled when switching to Home/Logs tabs
+                                Box(modifier = Modifier.fillMaxSize()) {
+                                    ChatTab(config = appConfig, roomJid = singleRoomJid)
+                                }
+                                // Overlay other tabs when selected (Chat stays mounted underneath)
+                                if (selectedTab != 1) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(MaterialTheme.colorScheme.surface)
+                                    ) {
+                                        when (selectedTab) {
+                                            0 -> HomeTab()
+                                            2 -> LogsTab()
+                                            else -> { }
+                                        }
+                                    }
                                 }
                             }
                         }
