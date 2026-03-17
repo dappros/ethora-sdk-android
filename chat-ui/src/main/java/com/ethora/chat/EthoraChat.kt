@@ -153,14 +153,20 @@ fun Chat(
     // Get current user from store
     val currentUser by UserStore.currentUser.collectAsState()
     
-    // Load rooms once globally (similar to web: if (roomsList && Object.keys(roomsList).length > 0))
-    LaunchedEffect(currentUser) {
-        val existingRooms = RoomStore.rooms.value
-        if (currentUser != null && existingRooms.isEmpty()) {
-            try {
-                RoomStore.setLoading(true)
+    // Load rooms (cache-first, then refresh from API) similar to chat-app/AuthManager.loadRooms().
+    // Important: do NOT skip API refresh just because cache is non-empty (stale rooms issue).
+    var didFetchRoomsFromApi by remember(currentUser?.id) { mutableStateOf(false) }
+    LaunchedEffect(currentUser?.id) {
+        if (currentUser == null) return@LaunchedEffect
+        if (didFetchRoomsFromApi) return@LaunchedEffect
 
-                // 1) Load cached rooms first for fast UI (shows last message immediately)
+        didFetchRoomsFromApi = true
+        try {
+            RoomStore.setLoading(true)
+
+            // 1) Cache first for fast UI
+            val existingRooms = RoomStore.rooms.value
+            if (existingRooms.isEmpty()) {
                 val cachedRooms = withContext(Dispatchers.IO) {
                     RoomStore.loadRoomsFromPersistence()
                 }
@@ -168,20 +174,17 @@ fun Chat(
                     RoomStore.setRooms(cachedRooms)
                     android.util.Log.d("EthoraChat", "📦 Loaded ${cachedRooms.size} rooms from cache")
                 }
-
-                // 2) Fetch fresh rooms from API and replace cache
-                val rooms = withContext(Dispatchers.IO) {
-                    RoomsAPIHelper.getRooms()
-                }
-                RoomStore.setRooms(rooms)
-                android.util.Log.d("EthoraChat", "✅ Loaded ${rooms.size} rooms from API")
-            } catch (e: Exception) {
-                android.util.Log.e("EthoraChat", "❌ Failed to load rooms", e)
-            } finally {
-                RoomStore.setLoading(false)
             }
-        } else if (existingRooms.isNotEmpty()) {
-            android.util.Log.d("EthoraChat", "⏭️ Rooms already loaded (${existingRooms.size} rooms), skipping API request")
+
+            // 2) Always refresh from API (chats/my)
+            val rooms = withContext(Dispatchers.IO) {
+                RoomsAPIHelper.getRooms()
+            }
+            RoomStore.setRooms(rooms)
+            android.util.Log.d("EthoraChat", "✅ Loaded ${rooms.size} rooms from API")
+        } catch (e: Exception) {
+            android.util.Log.e("EthoraChat", "❌ Failed to load rooms", e)
+        } finally {
             RoomStore.setLoading(false)
         }
     }
