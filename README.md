@@ -1,12 +1,14 @@
 # Ethora Chat Component (Android)
 
-Install and run chat in your Android app using one dependency.
+This SDK gives you a ready-to-use chat UI + chat core for Android (Jetpack Compose).
 
-## Client Quick Start (JitPack)
+## Install Option 1: JitPack
+
+JitPack build page (already available): `https://jitpack.io/#dappros/ethora-sdk-android/v1.0.0`
 
 ### 1. Add JitPack repository
 
-In project-level `settings.gradle.kts`:
+Project-level `settings.gradle.kts`:
 
 ```kotlin
 dependencyResolutionManagement {
@@ -21,28 +23,53 @@ dependencyResolutionManagement {
 
 ### 2. Add dependency
 
+App module `build.gradle.kts`:
+
+```kotlin
+dependencies {
+    implementation("com.github.dappros.ethora-sdk-android:ethora-component:1.0.0")
+}
+```
+
+If you need to pin to a specific commit instead of a tag, replace `1.0.0` with a commit hash.
+
+## Install Option 2: Manual Source Copy
+
+Use this if you do not want JitPack and want SDK sources inside your app repo.
+
+### 1. Copy folders into your Android project
+
+Copy these folders from this repo into your project root:
+
+- `ethora-component`
+- `chat-core`
+- `chat-ui`
+
+Keep this structure so `ethora-component` can find shared sources:
+
+- `<your-project>/ethora-component`
+- `<your-project>/chat-core`
+- `<your-project>/chat-ui`
+
+### 2. Include module
+
+In your app project `settings.gradle.kts`:
+
+```kotlin
+include(":ethora-component")
+```
+
+### 3. Add local module dependency
+
 In app module `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.dappros.ethora-sdk-android:ethora-component:<TAG>")
+    implementation(project(":ethora-component"))
 }
 ```
 
-Use one of these versions:
-
-- Recommended: a release tag, for example `v1.0.0`
-- Fallback: a commit hash, for example `9763836`
-
-Commit-hash example:
-
-```kotlin
-dependencies {
-    implementation("com.github.dappros.ethora-sdk-android:ethora-component:9763836")
-}
-```
-
-## Required Android permissions
+### 4. Ensure permissions
 
 In `AndroidManifest.xml`:
 
@@ -51,14 +78,14 @@ In `AndroidManifest.xml`:
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 ```
 
-## Compose Usage (Single Room)
+## Chat Configuration
 
-The idea is simple:
+The most reliable integration flow is:
 
-1. Build `ChatConfig` once with `remember(...)`.
-2. Push config into `ChatStore`.
-3. Set API base URL and app token in `ApiClient`.
-4. Render `Chat(...)` with a specific `roomJID`.
+1. Create `ChatConfig` in `remember(...)`.
+2. Apply config with `ChatStore.setConfig(...)`.
+3. Set API URL/token with `ApiClient.setBaseUrl(...)`.
+4. Render `Chat(...)`.
 
 ```kotlin
 import androidx.compose.runtime.Composable
@@ -122,47 +149,68 @@ fun EthoraChatScreen(
 }
 ```
 
-## How this config behaves
+### Config Notes
 
-- `disableRooms = true` puts the UI in single-room mode.
-- `roomTitleOverrides` lets you show a clean header title instead of raw room JID.
-- `chatInfoButtonDisabled` and `backButtonDisabled` simplify header actions.
-- `jwtLogin` is applied only when you actually have a JWT token.
-- `customAppToken` is passed to backend requests through `ApiClient.setBaseUrl(...)`.
-- `dnsFallbackOverrides` is useful for emulator or restricted DNS environments.
+- `disableRooms = true` + `roomJID` in `Chat(...)` gives you single-room mode.
+- `jwtLogin` is used when `enabled = true` and token is provided.
+- `chatHeaderSettings.roomTitleOverrides` lets you replace raw JID in header.
+- `dnsFallbackOverrides` helps when emulator DNS cannot resolve your hosts.
+- `customAppToken` is forwarded via `ApiClient.setBaseUrl(...)`.
 
-## Local Module Usage (Inside This Repo)
+## Unread Counter Hook
 
-If your app lives inside this repo, you can use the module directly:
+SDK exports a composable hook:
+
+- `useUnread(maxCount: Int = 10): UnreadState`
+- `UnreadState.totalCount` (Int)
+- `UnreadState.displayCount` (String, for example `10+`)
+
+### Example: show unread badge in host app tab bar
 
 ```kotlin
-dependencies {
-    implementation(project(":ethora-component"))
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import com.ethora.chat.useUnread
+
+@Composable
+fun ChatTabBadge() {
+    val unread = useUnread(maxCount = 99)
+
+    BadgedBox(
+        badge = {
+            if (unread.totalCount > 0) {
+                Badge { Text(unread.displayCount) }
+            }
+        }
+    ) {
+        Text("Chat")
+    }
 }
 ```
 
-## Build Library
+### Important behavior
+
+- The unread state comes from SDK `RoomStore`.
+- Unread values are meaningful after chat data is loaded (the `Chat(...)` flow has initialized rooms/session).
+- If chat is not initialized yet, unread will be `0`.
+
+## Build / Validate
 
 ```bash
 ./gradlew :ethora-component:assemble
 ```
 
-## Publish to Maven Local
+## JitPack Build File
 
-```bash
-./gradlew :ethora-component:publishToMavenLocal
-```
+This repo includes `jitpack.yml` and is configured for:
 
-Then consume with:
+- `groupId`: `com.github.dappros.ethora-sdk-android`
+- `artifactId`: `ethora-component`
+
+Client dependency format:
 
 ```kotlin
-repositories {
-    mavenLocal()
-    google()
-    mavenCentral()
-}
-
-dependencies {
-    implementation("com.ethora:ethora-component:1.0.0")
-}
+implementation("com.github.dappros.ethora-sdk-android:ethora-component:1.0.0")
 ```
