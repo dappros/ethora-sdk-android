@@ -18,6 +18,9 @@ import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material3.Button
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -34,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.ethora.chat.useUnread
 import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.config.ChatConfig
 import com.ethora.chat.core.config.ChatHeaderSettingsConfig
@@ -66,6 +70,7 @@ private enum class AppScreen {
 class MainActivity : ComponentActivity() {
     private val singleRoomJid = "699c6923429c2757ac8ab6a4_playground-room-1"
 
+    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -112,9 +117,9 @@ class MainActivity : ComponentActivity() {
                             conference = BuildConfig.XMPP_CONFERENCE
                         ),
                         dnsFallbackOverrides = dnsOverrides,
-                        userLogin = loggedInUser?.let { user ->
-                            UserLoginConfig(enabled = true, user = user)
-                        },
+                        // userLogin = loggedInUser?.let { user ->
+                        //    UserLoginConfig(enabled = true, user = user)
+                        // },
                         jwtLogin = if (hasJwtToken) {
                             JWTLoginConfig(
                                 token = BuildConfig.USER_TOKEN,
@@ -166,6 +171,8 @@ class MainActivity : ComponentActivity() {
                     }
 
                     AppScreen.CHAT -> {
+                        val unread = useUnread()
+
                         Scaffold(
                             bottomBar = {
                                 NavigationBar {
@@ -178,7 +185,22 @@ class MainActivity : ComponentActivity() {
                                     NavigationBarItem(
                                         selected = selectedTab == 1,
                                         onClick = { selectedTab = 1 },
-                                        icon = { androidx.compose.material3.Icon(Icons.Default.Chat, contentDescription = "Chat") },
+                                        icon = {
+                                            BadgedBox(
+                                                badge = {
+                                                    if (unread.totalCount > 0) {
+                                                        Badge {
+                                                            Text(unread.displayCount)
+                                                        }
+                                                    }
+                                                }
+                                            ) {
+                                                androidx.compose.material3.Icon(
+                                                    Icons.Default.Chat,
+                                                    contentDescription = "Chat"
+                                                )
+                                            }
+                                        },
                                         label = { Text("Chat") }
                                     )
                                     NavigationBarItem(
