@@ -49,6 +49,7 @@ class XMPPWebSocketConnection(
     private var disconnectRequested: Boolean = false
     
     private var authState: AuthState = AuthState.NOT_STARTED
+    private var useLegacyStreamOpen: Boolean = false
     
     enum class AuthState {
         NOT_STARTED,
@@ -187,11 +188,17 @@ class XMPPWebSocketConnection(
      * Send stream open (RFC 7395 format: <open> element for WebSocket)
      */
     private suspend fun sendStreamOpen() {
-        // RFC 7395: Use <open> element for WebSocket, not <stream:stream>
-        val streamOpen = """<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='$host' version='1.0'/>"""
+        val streamOpen = if (!useLegacyStreamOpen) {
+            // RFC 7395: Use <open> element for WebSocket, not <stream:stream>.
+            // Use double quotes only: some servers reject single-quoted attrs (seen as invalid-xml).
+            """<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="$host" version="1.0"/>"""
+        } else {
+            // Legacy XMPP stream open (some deployments behind WS gateways still expect this).
+            """<stream:stream xmlns="jabber:client" xmlns:stream="http://etherx.jabber.org/streams" to="$host" version="1.0">"""
+        }
         sendRaw(streamOpen)
         authState = AuthState.STREAM_OPENED
-        Log.d(TAG, "📤 Sent stream open (RFC 7395): $streamOpen")
+        Log.d(TAG, "📤 Sent stream open (${if (useLegacyStreamOpen) "legacy" else "RFC7395"}): ${streamOpen.take(200)}")
     }
     
     /**
@@ -205,6 +212,17 @@ class XMPPWebSocketConnection(
             
             when (authState) {
                 AuthState.STREAM_OPENED -> {
+                    // If server immediately rejects our framing as invalid XML, retry once with legacy open.
+                    if (!useLegacyStreamOpen &&
+                        xml.contains("<stream:error") &&
+                        (xml.contains("invalid-xml") || xml.contains("invalid_xml"))
+                    ) {
+                        Log.w(TAG, "⚠️ Server returned <invalid-xml/> after <open/>. Retrying with legacy <stream:stream>.")
+                        useLegacyStreamOpen = true
+                        // Restart stream on the same socket.
+                        sendStreamOpen()
+                        return
+                    }
                     // Check for server <open> response or stream features
                     if (xml.contains("<open") && xml.contains("urn:ietf:params:xml:ns:xmpp-framing")) {
                         Log.d(TAG, "📥 Received server <open> response")
@@ -436,7 +454,6 @@ class XMPPWebSocketConnection(
             }
             
             // Handle normal stanzas - parse real-time messages
-            // Preshent-mobile: не проверяет type, обрабатывает любое message без result/composing/paused
             // Принимаем type=groupchat ИЛИ отсутствующий type (MUC default), from в формате room/user
             val fromAttr = extractAttribute(xml, "from") ?: ""
             val isMucMessage = fromAttr.contains("/")
@@ -447,7 +464,6 @@ class XMPPWebSocketConnection(
                 isMucMessage
             if (isRealtimeEligible) {
                 Log.d(TAG, "📥 Incoming real-time message candidate: from=$fromAttr, type=$stanzaType")
-                // Не требуем строго <body> — preshent принимает сообщения с <data>
                 parseAndHandleRealtimeMessage(xml)
             }
             
@@ -548,12 +564,10 @@ class XMPPWebSocketConnection(
             val isMediafile = extractAttribute(dataXml, "isMediafile")
             val location = extractAttribute(dataXml, "location")
             
-            // Preshent-mobile: принимаем сообщения с body, media, или <data> (даже пустой)
             val hasBody = body.isNotBlank()
             val hasMedia = isMediafile == "true" || location != null
             val hasData = dataXml.isNotBlank()
             
-            // Preshent: id = xmppId || Date.now() — используем сгенерированный если нет
             val effectiveMessageId = if (messageId.isNotBlank()) messageId else "msg-${System.currentTimeMillis()}"
 
             if (!hasBody && !hasMedia && !hasData) {
@@ -578,7 +592,6 @@ class XMPPWebSocketConnection(
             // Extract user info from <data> element if present (already extracted above)
             val senderFirstName = extractAttribute(dataXml, "senderFirstName")
             val senderLastName = extractAttribute(dataXml, "senderLastName")
-            // Preshent использует "photo", Vitall — "photoURL"
             val photoURL = extractAttribute(dataXml, "photoURL") ?: extractAttribute(dataXml, "photo")
             val fullName = extractAttribute(dataXml, "fullName")
             val senderJID = extractAttribute(dataXml, "senderJID")

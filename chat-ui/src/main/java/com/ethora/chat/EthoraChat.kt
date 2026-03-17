@@ -70,7 +70,6 @@ fun Chat(
     val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
     ApiClient.setBaseUrl(baseUrl, config.customAppToken)
 
-    // Persistence first (preshent-mobile style): load persisted user, then JWT only if needed
     LaunchedEffect(Unit) {
         if (user == null && UserStore.currentUser.value == null) {
             // 1) Load persisted user – show cached messages immediately with correct ownership
@@ -210,9 +209,8 @@ fun Chat(
                                 // Sync messages when reconnected (after offline)
                                 CoroutineScope(Dispatchers.IO).launch {
                                     try {
-                                        delay(2000) // Wait for XMPP to be fully ready
+                                        delay(300)
                                         if (!MessageLoader.isSynced()) {
-                                            // Initial sync; matches web: getHistoryStanza(chat.jid, 30)
                                             val activeRoomJid = RoomStore.currentRoom.value?.jid
                                             MessageLoader.loadInitialMessagesForAllRooms(
                                                 xmppClient = client,
@@ -302,17 +300,10 @@ fun Chat(
             
             if (client != null && roomsList.isNotEmpty()) {
                 try {
-                    // Wait for XMPP to be fully connected (up to 30s) before loading history
-                    var waited = 0L
-                    while (!client.isFullyConnected() && waited < 30000) {
-                        delay(500)
-                        waited += 500
-                    }
-                    if (!client.isFullyConnected()) {
-                        android.util.Log.w("EthoraChat", "XMPP not fully connected after 30s, skipping message load")
+                    if (!client.ensureConnected(timeoutMs = 5000)) {
+                        android.util.Log.w("EthoraChat", "XMPP not ready within 5s, skipping initial message load for now")
                         return@LaunchedEffect
                     }
-                    delay(150)
                     
                     val activeRoomJid = currentRoom?.jid
                     MessageLoader.loadInitialMessagesForAllRooms(
@@ -380,13 +371,7 @@ fun Chat(
             val client = xmppClient
             val roomsList = RoomStore.rooms.value
             if (client != null && roomsList.isNotEmpty()) {
-                // Wait for XMPP to be fully connected (up to 30s)
-                var waited = 0L
-                while (!client.isFullyConnected() && waited < 30000) {
-                    delay(500)
-                    waited += 500
-                }
-                if (client.isFullyConnected()) {
+                if (client.ensureConnected(timeoutMs = 5000)) {
                     android.util.Log.d("EthoraChat", "🔔 Push: subscribing to ${roomsList.size} rooms via MUC-SUB")
                     withContext(Dispatchers.IO) {
                         PushNotificationManager.subscribeToRooms(
@@ -395,7 +380,7 @@ fun Chat(
                         )
                     }
                 } else {
-                    android.util.Log.w("EthoraChat", "🔔 Push: XMPP not fully connected after 30s, skipping MUC-SUB")
+                    android.util.Log.w("EthoraChat", "🔔 Push: XMPP not ready within 5s, skipping MUC-SUB for now")
                 }
             }
         }
