@@ -267,7 +267,7 @@ fun ChatInput(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -351,7 +351,7 @@ fun ChatInput(
                             }
                         },
                         modifier = Modifier
-                            .size(48.dp)
+                            .size(44.dp)
                             .offset(y = (-3).dp),
                         containerColor = MaterialTheme.colorScheme.primary,
                         elevation = FloatingActionButtonDefaults.elevation(
@@ -363,7 +363,7 @@ fun ChatInput(
                             imageVector = Icons.Default.Send,
                             contentDescription = "Send",
                             tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 } else {
@@ -371,12 +371,12 @@ fun ChatInput(
                     IconButton(
                         onClick = { },
                         modifier = Modifier
-                            .size(48.dp)
+                            .size(44.dp)
                             .offset(y = (-3).dp),
                         enabled = false
                     ) {
                         Surface(
-                            modifier = Modifier.size(48.dp),
+                            modifier = Modifier.size(44.dp),
                             shape = CircleShape,
                             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                         ) {
@@ -388,7 +388,7 @@ fun ChatInput(
                                     imageVector = Icons.Default.Send,
                                     contentDescription = "Send",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                    modifier = Modifier.size(22.dp)
+                                    modifier = Modifier.size(20.dp)
                                 )
                             }
                         }
