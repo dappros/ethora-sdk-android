@@ -23,7 +23,7 @@ interface AuthAPI {
 
     @POST("users/client")
     suspend fun loginViaJWT(
-        @Header("Authorization") token: String
+        @Header("x-custom-token") token: String
     ): Response<LoginResponse>
 
     @POST("users/refresh-token")
@@ -217,7 +217,7 @@ object AuthAPIHelper {
         }
     }
 
-    /** Login with JWT token via users/client + Authorization header. */
+    /** Login with JWT token via users/client + x-custom-token header. */
     suspend fun loginViaJWT(
         token: String,
         baseUrl: String = ChatStore.getEffectiveBaseUrl()
