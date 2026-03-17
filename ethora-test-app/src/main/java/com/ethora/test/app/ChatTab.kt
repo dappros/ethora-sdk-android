@@ -5,6 +5,6 @@ import com.ethora.chat.Chat
 import com.ethora.chat.core.config.ChatConfig
 
 @Composable
-fun ChatTab(config: ChatConfig) {
-    Chat(config = config, roomJID = null)
+fun ChatTab(config: ChatConfig, roomJid: String? = null) {
+    Chat(config = config, roomJID = roomJid)
 }

@@ -68,7 +68,7 @@ private enum class AppScreen {
 }
 
 class MainActivity : ComponentActivity() {
-    private val singleRoomJid = "699c6923429c2757ac8ab6a4_playground-room-1"
+    private val singleRoomJid = "6998429ba125477a74a7dcef_test-room-v"
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -111,13 +111,15 @@ class MainActivity : ComponentActivity() {
                             chatInfoButtonDisabled = true,
                             backButtonDisabled = true
                         ),
-                        disableProfilesInteractions = true,
                         xmppSettings = XMPPSettings(
                             xmppServerUrl = BuildConfig.XMPP_DEV_SERVER,
                             host = BuildConfig.XMPP_HOST,
                             conference = BuildConfig.XMPP_CONFERENCE
                         ),
                         dnsFallbackOverrides = dnsOverrides,
+                        // userLogin = loggedInUser?.let { user ->
+                        //    UserLoginConfig(enabled = true, user = user)
+                        // },
                         jwtLogin = if (hasJwtToken) {
                             JWTLoginConfig(
                                 token = BuildConfig.USER_TOKEN,
@@ -214,7 +216,7 @@ class MainActivity : ComponentActivity() {
                                 // Keep ChatTab always composed when on CHAT screen so JWT login
                                 // is not cancelled when switching to Home/Logs tabs
                                 Box(modifier = Modifier.fillMaxSize()) {
-                                    ChatTab(config = appConfig)
+                                    ChatTab(config = appConfig, roomJid = singleRoomJid)
                                 }
                                 // Overlay other tabs when selected (Chat stays mounted underneath)
                                 if (selectedTab != 1) {
