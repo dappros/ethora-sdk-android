@@ -419,49 +419,32 @@ fun Chat(
 
         // Show room list or single room based on config
         if (config.disableRooms == true) {
-            val requestedSingleRoomJid = roomJID ?: config.defaultRooms?.firstOrNull()?.jid
-            val normalizedSingleRoomJid = remember(requestedSingleRoomJid, config.xmppSettings?.conference) {
-                requestedSingleRoomJid?.let { normalizeRoomJid(it, config.xmppSettings?.conference) }
-            }
-
             val targetRoom = remember(rooms, normalizedSingleRoomJid) {
                 normalizedSingleRoomJid?.let { jid ->
                     findRoomByJid(RoomStore.rooms.value, jid)
                 }
             }
 
-            val fallbackRoom = remember(normalizedSingleRoomJid, requestedSingleRoomJid, config.chatHeaderSettings) {
-                normalizedSingleRoomJid?.let { jid ->
-                    Room(
-                        id = jid.substringBefore("@"),
-                        jid = jid,
-                        name = resolveRoomTitle(jid, requestedSingleRoomJid, config),
-                        title = resolveRoomTitle(jid, requestedSingleRoomJid, config)
-                    )
-                }
+            LaunchedEffect(targetRoom?.jid) {
+                RoomStore.setCurrentRoom(targetRoom)
             }
 
-            val roomToRender = targetRoom ?: fallbackRoom
-
-            LaunchedEffect(roomToRender?.jid) {
-                roomToRender?.let { room ->
-                    if (RoomStore.getRoomByJid(room.jid) == null) {
-                        RoomStore.addRoom(room)
-                    }
-                    RoomStore.setCurrentRoom(room)
-                }
-            }
-
-            if (roomToRender != null) {
+            if (targetRoom != null) {
                 ChatRoomView(
-                    room = roomToRender,
+                    room = targetRoom,
                     xmppClient = xmppClient,
                     onBack = { /* Single-room mode: back is controlled by host app */ },
                     modifier = modifier
                 )
             } else {
                 Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No room configured")
+                    val hasRequestedRoom = normalizedSingleRoomJid != null
+                    val loading = RoomStore.isLoading.value
+                    when {
+                        !hasRequestedRoom -> Text("No room configured")
+                        loading -> Text("Loading room...")
+                        else -> Text("Room unavailable or access denied")
+                    }
                 }
             }
         } else {

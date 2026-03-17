@@ -48,6 +48,7 @@ import com.ethora.chat.core.xmpp.XMPPClientDelegate
 import com.ethora.chat.core.xmpp.ConnectionStatus
 import com.ethora.chat.ui.styling.ChatTheme
 import com.google.firebase.FirebaseApp
+import com.google.firebase.FirebaseOptions
 import com.google.firebase.installations.FirebaseInstallations
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.CoroutineScope
@@ -57,6 +58,7 @@ import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val TAG = "MainActivity"
+    private var isFirebaseEnabled = false
 
     enum class AppScreen {
         INITIALIZING,
@@ -67,7 +69,7 @@ class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             Log.d(TAG, "Notification permission granted: $granted")
-            if (granted) fetchFcmToken()
+            if (granted && isFirebaseEnabled) fetchFcmToken()
         }
 
     override fun onNewIntent(intent: Intent) {
@@ -84,6 +86,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestNotificationPermission() {
+        if (!isFirebaseEnabled) {
+            Log.i(TAG, "🔔 Firebase is not configured, skipping notification permission/token setup")
+            return
+        }
         Log.d(TAG, "🔔 Requesting notification permission (SDK=${Build.VERSION.SDK_INT})")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -102,6 +108,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun fetchFcmToken(attempt: Int = 1) {
+        if (!isFirebaseEnabled) {
+            Log.i(TAG, "🔔 Firebase is not configured, skipping FCM token fetch")
+            return
+        }
         val maxAttempts = 5
         Log.d(TAG, "🔔 Fetching FCM token (attempt $attempt/$maxAttempts)...")
 
@@ -124,6 +134,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestNewFcmToken(attempt: Int) {
+        if (!isFirebaseEnabled) {
+            Log.i(TAG, "🔔 Firebase is not configured, skipping FCM token request")
+            return
+        }
         val maxAttempts = 5
         FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
             if (task.isSuccessful) {
@@ -152,16 +166,21 @@ class MainActivity : ComponentActivity() {
         PushNotificationManager.initialize(this)
         handleNotificationIntent(intent)
 
-        // Log Firebase configuration for debugging
-        try {
-            val app = FirebaseApp.getInstance()
-            Log.d(TAG, "🔔 Firebase app: ${app.name}")
-            Log.d(TAG, "🔔 Firebase appId: ${app.options.applicationId}")
-            Log.d(TAG, "🔔 Firebase projectId: ${app.options.projectId}")
-            Log.d(TAG, "🔔 Firebase gcmSenderId: ${app.options.gcmSenderId}")
-            Log.d(TAG, "🔔 Firebase apiKey: ${app.options.apiKey?.take(15)}...")
-        } catch (e: Exception) {
-            Log.e(TAG, "🔔 Firebase not initialized!", e)
+        isFirebaseEnabled = initializeFirebaseIfConfigured()
+        if (isFirebaseEnabled) {
+            // Log Firebase configuration for debugging
+            try {
+                val app = FirebaseApp.getInstance()
+                Log.d(TAG, "🔔 Firebase app: ${app.name}")
+                Log.d(TAG, "🔔 Firebase appId: ${app.options.applicationId}")
+                Log.d(TAG, "🔔 Firebase projectId: ${app.options.projectId}")
+                Log.d(TAG, "🔔 Firebase gcmSenderId: ${app.options.gcmSenderId}")
+                Log.d(TAG, "🔔 Firebase apiKey: ${app.options.apiKey?.take(15)}...")
+            } catch (e: Exception) {
+                Log.e(TAG, "🔔 Firebase init verification failed", e)
+            }
+        } else {
+            Log.i(TAG, "🔔 No Firebase configuration found. Push token setup disabled.")
         }
 
         requestNotificationPermission()
@@ -336,6 +355,20 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun initializeFirebaseIfConfigured(): Boolean {
+        if (FirebaseApp.getApps(this).isNotEmpty()) {
+            return true
+        }
+
+        val options = FirebaseOptions.fromResource(this)
+        if (options == null) {
+            return false
+        }
+
+        FirebaseApp.initializeApp(this, options)
+        return FirebaseApp.getApps(this).isNotEmpty()
     }
 }
 
