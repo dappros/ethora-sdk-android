@@ -105,17 +105,19 @@ class MainActivity : ComponentActivity() {
                     ChatConfig(
                         appId = BuildConfig.APP_ID,
                         baseUrl = BuildConfig.API_BASE_URL,
-                        disableRooms = fakse,
-                     
+                        disableRooms = true,
+                        chatHeaderSettings = ChatHeaderSettingsConfig(
+                            roomTitleOverrides = mapOf(singleRoomJid to "Playground Room 1"),
+                            chatInfoButtonDisabled = true,
+                            backButtonDisabled = true
+                        ),
+                        disableProfilesInteractions = true,
                         xmppSettings = XMPPSettings(
                             xmppServerUrl = BuildConfig.XMPP_DEV_SERVER,
                             host = BuildConfig.XMPP_HOST,
                             conference = BuildConfig.XMPP_CONFERENCE
                         ),
                         dnsFallbackOverrides = dnsOverrides,
-                        // userLogin = loggedInUser?.let { user ->
-                        //    UserLoginConfig(enabled = true, user = user)
-                        // },
                         jwtLogin = if (hasJwtToken) {
                             JWTLoginConfig(
                                 token = BuildConfig.USER_TOKEN,
@@ -212,7 +214,7 @@ class MainActivity : ComponentActivity() {
                                 // Keep ChatTab always composed when on CHAT screen so JWT login
                                 // is not cancelled when switching to Home/Logs tabs
                                 Box(modifier = Modifier.fillMaxSize()) {
-                                    ChatTab(config = appConfig, roomJid = singleRoomJid)
+                                    ChatTab(config = appConfig)
                                 }
                                 // Overlay other tabs when selected (Chat stays mounted underneath)
                                 if (selectedTab != 1) {
