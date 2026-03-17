@@ -43,7 +43,15 @@ import com.ethora.chat.core.config.XMPPSettings
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.networking.ApiClient
 import com.ethora.chat.core.networking.AuthAPIHelper
+import com.ethora.chat.core.persistence.ChatDatabase
+import com.ethora.chat.core.persistence.ChatPersistenceManager
+import com.ethora.chat.core.persistence.LocalStorage
+import com.ethora.chat.core.persistence.MessageCache
 import com.ethora.chat.core.store.ChatStore
+import com.ethora.chat.core.store.MessageLoader
+import com.ethora.chat.core.store.MessageStore
+import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.core.store.ScrollPositionStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.ui.styling.ChatTheme
 import kotlinx.coroutines.Dispatchers
@@ -60,6 +68,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize persistence and stores (required for message cache + room state)
+        initChatStores(this)
 
         setContent {
             ChatTheme {
@@ -205,6 +216,19 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun initChatStores(context: android.content.Context) {
+        val appContext = context.applicationContext
+        val persistenceManager = ChatPersistenceManager(appContext)
+        val chatDatabase = ChatDatabase.getDatabase(appContext)
+        val messageCache = MessageCache(chatDatabase)
+
+        RoomStore.initialize(persistenceManager)
+        UserStore.initialize(persistenceManager)
+        MessageStore.initialize(messageCache)
+        ScrollPositionStore.initialize(appContext)
+        MessageLoader.initialize(LocalStorage(appContext))
     }
 }
 

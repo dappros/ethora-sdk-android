@@ -436,13 +436,19 @@ class XMPPWebSocketConnection(
             }
             
             // Handle normal stanzas - parse real-time messages
-            if (xml.contains("<message") && stanzaType == "groupchat" && !xml.contains("urn:xmpp:mam:2")) {
-                // Check if it's a typing indicator first
-                // Use more flexible check for body to handle attributes like xml:lang
-                if (!xml.contains("<composing") && !xml.contains("<paused") && xml.contains("<body")) {
-                    // This is a real-time message (not MAM result, not typing indicator)
-                    parseAndHandleRealtimeMessage(xml)
-                }
+            // Preshent-mobile: не проверяет type, обрабатывает любое message без result/composing/paused
+            // Принимаем type=groupchat ИЛИ отсутствующий type (MUC default), from в формате room/user
+            val fromAttr = extractAttribute(xml, "from") ?: ""
+            val isMucMessage = fromAttr.contains("/")
+            val isRealtimeEligible = xml.contains("<message") &&
+                !xml.contains("urn:xmpp:mam:2") &&
+                !xml.contains("<composing") && !xml.contains("<paused") &&
+                (stanzaType == "groupchat" || stanzaType.isNullOrBlank()) &&
+                isMucMessage
+            if (isRealtimeEligible) {
+                Log.d(TAG, "📥 Incoming real-time message candidate: from=$fromAttr, type=$stanzaType")
+                // Не требуем строго <body> — preshent принимает сообщения с <data>
+                parseAndHandleRealtimeMessage(xml)
             }
             
             // Handle normal stanzas
@@ -542,17 +548,16 @@ class XMPPWebSocketConnection(
             val isMediafile = extractAttribute(dataXml, "isMediafile")
             val location = extractAttribute(dataXml, "location")
             
-            // Allow messages with body OR media files (media messages have body="media" or empty body)
+            // Preshent-mobile: принимаем сообщения с body, media, или <data> (даже пустой)
             val hasBody = body.isNotBlank()
             val hasMedia = isMediafile == "true" || location != null
+            val hasData = dataXml.isNotBlank()
             
-            if (messageId.isBlank()) {
-                Log.d(TAG, "⚠️ Skipping message: missing messageId")
-                return
-            }
+            // Preshent: id = xmppId || Date.now() — используем сгенерированный если нет
+            val effectiveMessageId = if (messageId.isNotBlank()) messageId else "msg-${System.currentTimeMillis()}"
 
-            if (!hasBody && !hasMedia) {
-                Log.d(TAG, "⚠️ Skipping message: no body and no media, messageId=$messageId. XML: ${xml.take(1000)}")
+            if (!hasBody && !hasMedia && !hasData) {
+                Log.d(TAG, "⚠️ Skipping message: no body, media, or data, messageId=$messageId. XML: ${xml.take(500)}")
                 return
             }
             
@@ -573,7 +578,8 @@ class XMPPWebSocketConnection(
             // Extract user info from <data> element if present (already extracted above)
             val senderFirstName = extractAttribute(dataXml, "senderFirstName")
             val senderLastName = extractAttribute(dataXml, "senderLastName")
-            val photoURL = extractAttribute(dataXml, "photoURL")
+            // Preshent использует "photo", Vitall — "photoURL"
+            val photoURL = extractAttribute(dataXml, "photoURL") ?: extractAttribute(dataXml, "photo")
             val fullName = extractAttribute(dataXml, "fullName")
             val senderJID = extractAttribute(dataXml, "senderJID")
             
@@ -609,13 +615,13 @@ class XMPPWebSocketConnection(
             
             // Create Message object with media fields
             val message = Message(
-                id = messageId,
+                id = effectiveMessageId,
                 user = user,
                 date = java.util.Date(),
                 body = body,
                 roomJid = roomJid,
                 timestamp = System.currentTimeMillis(),
-                xmppId = messageId,
+                xmppId = effectiveMessageId,
                 xmppFrom = from,
                 pending = false, // Real-time messages are not pending
                 isDeleted = isDeleted,
@@ -647,7 +653,7 @@ class XMPPWebSocketConnection(
                 Log.d(TAG, "✅ Matched pending message via ID matching")
             }
             
-            Log.d(TAG, "📨 Parsed real-time message: ID=$messageId, From=$from, Body=${body.take(50)}, isMedia=$hasMedia, wasPending=$wasPending")
+            Log.d(TAG, "📨 Parsed real-time message: ID=$effectiveMessageId, From=$from, Body=${body.take(50)}, isMedia=$hasMedia, wasPending=$wasPending")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing real-time message", e)
         }

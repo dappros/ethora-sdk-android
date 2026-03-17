@@ -68,6 +68,9 @@ object MessageLoader {
         syncInProgress = true
         
         try {
+            RoomsPresenceInitializer.initRoomsPresence(xmppClient, rooms)
+            delay(100)
+            
             val roomsToLoad = rooms.filter { room ->
                 val existingMessages = MessageStore.messages.value[room.jid] ?: emptyList()
                 existingMessages.isEmpty()
@@ -109,8 +112,7 @@ object MessageLoader {
                                 if (xmppClient.isFullyConnected()) {
                                     Log.d(TAG, "  📍 Sending presence to ${room.jid}")
                                     xmppClient.sendPresenceInRoom(room.jid)
-                                    // 2. Wait 100ms (as requested)
-                                    delay(100)
+                                    delay(50)
                                 }
                                 
                                 // 3. Request History
@@ -132,7 +134,7 @@ object MessageLoader {
                 
                 processedIndex += batchSize
                 if (processedIndex < prioritizedRooms.size) {
-                    delay(250) // Small delay between batches
+                    delay(80)
                 }
             }
 

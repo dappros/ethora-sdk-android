@@ -45,13 +45,22 @@ fun ChatRoomView(
     val viewModel = remember(room.jid, xmppClient) { ChatRoomViewModel(room, xmppClient) }
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val currentUser by UserStore.currentUser.collectAsState()
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
     val composingUsers by viewModel.composingUsers.collectAsState()
     val scrollRestoreAnchor by viewModel.scrollRestoreAnchor.collectAsState()
     
-    // Update lastViewedTimestamp when room is opened (set to 0 to mark all as read)
-    LaunchedEffect(room.jid) {
+    // Update lastViewedTimestamp when room is opened; send presence to receive real-time messages
+    LaunchedEffect(room.jid, xmppClient) {
         com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, 0)
+        xmppClient?.let { client ->
+            if (client.isFullyConnected()) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    client.sendPresenceInRoom(room.jid)
+                }
+                android.util.Log.d("ChatRoomView", "Room opened: $room.jid, sent presence")
+            }
+        }
         android.util.Log.d("ChatRoomView", "Room opened: $room.jid, set lastViewedTimestamp to 0")
     }
     
@@ -301,6 +310,23 @@ fun ChatRoomView(
                 }
         ) {
             when {
+                // Loader only when loading AND no messages (persistence first: show cached messages immediately)
+                isLoading && messages.isEmpty() -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(32.dp),
+                        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.padding(bottom = 12.dp))
+                        Text(
+                            text = "Loading messages...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                }
                 messages.isNotEmpty() -> {
                     // Show messages
                     LazyColumn(
@@ -553,18 +579,6 @@ fun ChatRoomView(
                                 }
                             }
                         }
-                    }
-                }
-                isLoading && messages.isEmpty() -> {
-                    // Show loading indicator only if we have no messages
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(32.dp),
-                        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        CircularProgressIndicator()
                     }
                 }
                 else -> {

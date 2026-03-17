@@ -94,38 +94,37 @@ class ChatRoomViewModel(
         // Check if messages exist in store - only load if they don't
         val storedMessages = MessageStore.messages.value[room.jid] ?: emptyList()
         if (storedMessages.isEmpty()) {
-            // Try loading from persistence first
             viewModelScope.launch {
+                // Show loader until we've checked persistence (avoids flash of "No messages yet")
+                RoomStore.setRoomLoading(room.jid, true)
                 val persistedMessages = MessageStore.loadMessagesFromPersistence(room.jid)
                 if (persistedMessages.isNotEmpty()) {
-                    // Load from persistence
                     MessageStore.setMessagesForRoom(room.jid, persistedMessages)
                     _messages.value = persistedMessages.sortedBy { it.timestamp ?: it.date.time }
-                    android.util.Log.d("ChatRoomViewModel", "Loaded ${persistedMessages.size} messages from persistence (sorted oldest-first)")
-                } else {
-                    // Avoid racing the global MessageLoader (which runs shortly after rooms load).
-                    // If global sync is in progress (or hasn't finished yet), wait briefly for it to populate the store,
-                    // then fall back to per-room load if still empty.
-                    val shouldWaitForGlobalLoader =
-                        xmppClient != null &&
-                        RoomStore.rooms.value.isNotEmpty() &&
-                        (MessageLoader.isSyncInProgress() || !MessageLoader.isSynced())
-
-                    if (shouldWaitForGlobalLoader) {
-                        android.util.Log.d("ChatRoomViewModel", "⏳ Waiting for global history sync before per-room load: ${room.jid}")
-                        kotlinx.coroutines.delay(1500)
-                        val afterWaitMessages = MessageStore.messages.value[room.jid] ?: emptyList()
-                        if (afterWaitMessages.isNotEmpty()) {
-                            _messages.value = afterWaitMessages.sortedBy { it.timestamp ?: it.date.time }
-                            android.util.Log.d("ChatRoomViewModel", "Global loader filled messages (${afterWaitMessages.size}), skipping per-room load (sorted oldest-first)")
-                            return@launch
-                        }
-                    }
-
-                    // No messages in store or persistence, load them
-                    RoomStore.setRoomLoading(room.jid, true)
-                    loadMessages()
+                    RoomStore.setRoomLoading(room.jid, false)
+                    android.util.Log.d("ChatRoomViewModel", "Loaded ${persistedMessages.size} messages from persistence")
+                    return@launch
                 }
+                // No persistence - wait for global loader or load from XMPP
+                val shouldWaitForGlobalLoader =
+                    xmppClient != null &&
+                    RoomStore.rooms.value.isNotEmpty() &&
+                    (MessageLoader.isSyncInProgress() || !MessageLoader.isSynced())
+
+                if (shouldWaitForGlobalLoader) {
+                    android.util.Log.d("ChatRoomViewModel", "⏳ Waiting for global history sync before per-room load: ${room.jid}")
+                    kotlinx.coroutines.delay(400)
+                    val afterWaitMessages = MessageStore.messages.value[room.jid] ?: emptyList()
+                    if (afterWaitMessages.isNotEmpty()) {
+                        _messages.value = afterWaitMessages.sortedBy { it.timestamp ?: it.date.time }
+                        android.util.Log.d("ChatRoomViewModel", "Global loader filled messages (${afterWaitMessages.size})")
+                        RoomStore.setRoomLoading(room.jid, false)
+                        return@launch
+                    }
+                }
+
+                // No messages in store or persistence, load from XMPP
+                loadMessages()
             }
         } else {
             // Messages already loaded globally, just use them (no loader)
@@ -272,49 +271,40 @@ class ChatRoomViewModel(
                         // Only send presence if fully connected
                         if (client.isFullyConnected()) {
                             client.sendPresenceInRoom(room.jid)
-                            kotlinx.coroutines.delay(200)
+                            kotlinx.coroutines.delay(80)
                         }
                     } catch (e: Exception) {
                         android.util.Log.w("ChatRoomViewModel", "Failed to send presence to ${room.jid}", e)
                     }
                     
                     val initialHistory = client.getHistory(room.jid, max = 30, beforeMessageId = null)
-                    
-                    val undefinedTextCount = initialHistory.count { 
+                    if (initialHistory.isNotEmpty()) {
+                        MessageStore.addMessages(room.jid, initialHistory)
+                    }
+
+                    val undefinedTextCount = initialHistory.count {
                         it.body == null || it.body.isEmpty() || it.body == "undefined"
                     }
-                    
+
                     if (undefinedTextCount > 0 && initialHistory.isNotEmpty()) {
-                        // Match web: use res[0].id as the anchor for the follow-up request
                         val anchorMessageId = initialHistory.firstOrNull()?.id
-                        
                         if (anchorMessageId != null) {
                             val additionalHistory = client.getHistory(
                                 room.jid,
                                 max = 20 + undefinedTextCount,
                                 beforeMessageId = anchorMessageId
                             )
-                        } else {
-                            val updatedRoom = RoomStore.getRoomByJid(room.jid)
-                            val historyComplete = updatedRoom?.historyComplete == true
-                            _hasMoreMessages.value = !historyComplete && initialHistory.size >= 30
-                            
-                            if (historyComplete) {
-                                _hasMoreMessages.value = false
+                            if (additionalHistory.isNotEmpty()) {
+                                MessageStore.addMessages(room.jid, additionalHistory)
                             }
                         }
-                    } else {
-                        if (initialHistory.isNotEmpty()) {
-                            val updatedRoom = RoomStore.getRoomByJid(room.jid)
-                            val historyComplete = updatedRoom?.historyComplete == true
-                            _hasMoreMessages.value = !historyComplete && initialHistory.size >= 30
-                            
-                            if (historyComplete) {
-                                _hasMoreMessages.value = false
-                            }
-                        } else {
-                            _hasMoreMessages.value = false
-                        }
+                    }
+
+                    val updatedRoom = RoomStore.getRoomByJid(room.jid)
+                    val historyComplete = updatedRoom?.historyComplete == true
+                    _hasMoreMessages.value = !historyComplete && initialHistory.size >= 30
+                    if (historyComplete) {
+                        _hasMoreMessages.value = false
                     }
                 }
             } catch (e: CancellationException) {

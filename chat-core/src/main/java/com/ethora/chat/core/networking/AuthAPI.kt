@@ -21,6 +21,7 @@ interface AuthAPI {
         @Body body: LoginRequest
     ): Response<LoginResponse>
 
+    /** POST users/client with x-custom-token (Preshent, Vitall, etc.) */
     @POST("users/client")
     suspend fun loginViaJWT(
         @Header("x-custom-token") token: String
@@ -217,7 +218,7 @@ object AuthAPIHelper {
         }
     }
 
-    /** Login with JWT token via users/client + x-custom-token header. */
+    /** Login with JWT via POST users/client + x-custom-token (preshent-mobile style) */
     suspend fun loginViaJWT(
         token: String,
         baseUrl: String = ChatStore.getEffectiveBaseUrl()

@@ -69,33 +69,40 @@ fun Chat(
     // Must run before any API call - config values replace defaults project-wide
     val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
     ApiClient.setBaseUrl(baseUrl, config.customAppToken)
-    
-    // Auto-login with stored JWT token on app start (if no user provided)
+
+    // Persistence first (preshent-mobile style): load persisted user, then JWT only if needed
     LaunchedEffect(Unit) {
         if (user == null && UserStore.currentUser.value == null) {
-            // Check for stored JWT token
+            // 1) Load persisted user – show cached messages immediately with correct ownership
+            val persistedUser = withContext(Dispatchers.IO) {
+                UserStore.loadUserFromPersistence()
+            }
+            persistedUser?.let { u ->
+                UserStore.setUser(u)
+                ApiClient.setUserToken(u.token ?: "")
+                android.util.Log.d("EthoraChat", "✅ Loaded persisted user (${u.xmppUsername ?: u.id})")
+                return@LaunchedEffect
+            }
+            // 2) No persisted user – try stored JWT token
             val storedJWTToken = localStorage.getJWTToken()
             if (storedJWTToken != null) {
-                android.util.Log.d("EthoraChat", "🔐 Found stored JWT token, attempting auto-login...")
+                android.util.Log.d("EthoraChat", "🔐 Attempting JWT login with stored token...")
                 try {
                     val loginResponse = withContext(Dispatchers.IO) {
                         AuthAPIHelper.loginViaJWT(storedJWTToken)
                     }
                     loginResponse?.let { response ->
                         UserStore.setUser(response)
-                        // Save JWT token (update if different)
+                        ApiClient.setUserToken(response.token)
                         localStorage.saveJWTToken(storedJWTToken)
-                        // Start automatic token refresh (uses config baseUrl)
                         TokenManager.startAutoRefresh()
-                        android.util.Log.d("EthoraChat", "✅ Auto-login successful with stored JWT token")
+                        android.util.Log.d("EthoraChat", "✅ JWT login successful")
                     } ?: run {
-                        // Token invalid, clear it
                         localStorage.clearJWTToken()
-                        android.util.Log.w("EthoraChat", "⚠️ Stored JWT token invalid, cleared")
+                        android.util.Log.w("EthoraChat", "⚠️ Stored JWT invalid, cleared")
                     }
                 } catch (e: Exception) {
-                    android.util.Log.e("EthoraChat", "❌ Auto-login failed", e)
-                    // Clear invalid token
+                    android.util.Log.e("EthoraChat", "❌ JWT login failed", e)
                     localStorage.clearJWTToken()
                 }
             }
@@ -128,11 +135,10 @@ fun Chat(
                     }
                     loginResponse?.let { response ->
                         UserStore.setUser(response)
-                        // Save JWT token for future auto-login
+                        ApiClient.setUserToken(response.token)
                         localStorage.saveJWTToken(token)
-                        // Start automatic token refresh (uses config baseUrl)
                         TokenManager.startAutoRefresh()
-                        android.util.Log.d("EthoraChat", "✅ JWT login successful, token saved")
+                        android.util.Log.d("EthoraChat", "✅ JWT login successful (config)")
                     }
                 }
             }
@@ -303,7 +309,7 @@ fun Chat(
                         android.util.Log.w("EthoraChat", "XMPP not fully connected after 30s, skipping message load")
                         return@LaunchedEffect
                     }
-                    delay(500) // brief pause after connect
+                    delay(150)
                     
                     val activeRoomJid = currentRoom?.jid
                     MessageLoader.loadInitialMessagesForAllRooms(

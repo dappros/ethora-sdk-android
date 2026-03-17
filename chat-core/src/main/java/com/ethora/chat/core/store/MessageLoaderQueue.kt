@@ -63,18 +63,17 @@ class MessageLoaderQueue(
                     scope.launch {
                         try {
                             if (index > 0) {
-                                delay(200)
+                                delay(80)
                             }
-                            
-                            if (roomHasMoreMessages(room) && 
-                                room.noMessages != true && 
+
+                            if (roomHasMoreMessages(room) &&
+                                room.noMessages != true &&
                                 room.historyComplete != true) {
-                                
+
                                 try {
-                                    // Only send presence if fully connected, but continue with message loading regardless
                                     if (xmppClient?.isFullyConnected() == true) {
                                         xmppClient.sendPresenceInRoom(room.jid)
-                                        delay(100)
+                                        delay(50)
                                     }
                                 } catch (e: Exception) {
                                     Log.w(TAG, "Failed to send presence to ${room.jid}", e)
@@ -101,7 +100,7 @@ class MessageLoaderQueue(
                     }
                 }
                 
-                delay(200)
+                delay(60)
             }
         } finally {
             isProcessing = false
