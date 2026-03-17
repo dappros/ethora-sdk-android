@@ -105,12 +105,8 @@ class MainActivity : ComponentActivity() {
                     ChatConfig(
                         appId = BuildConfig.APP_ID,
                         baseUrl = BuildConfig.API_BASE_URL,
-                        disableRooms = true,
-                        chatHeaderSettings = ChatHeaderSettingsConfig(
-                            roomTitleOverrides = mapOf(singleRoomJid to "Playground Room 1"),
-                            chatInfoButtonDisabled = true,
-                            backButtonDisabled = true
-                        ),
+                        disableRooms = fakse,
+                     
                         xmppSettings = XMPPSettings(
                             xmppServerUrl = BuildConfig.XMPP_DEV_SERVER,
                             host = BuildConfig.XMPP_HOST,

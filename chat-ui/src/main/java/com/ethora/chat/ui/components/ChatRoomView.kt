@@ -462,8 +462,9 @@ fun ChatRoomView(
                                             contextMenuBounds = Pair(left, top) to Pair(right, bottom)
                                         },
                                         onAvatarClick = { user ->
-                                            // Don't show profile for deleted users
-                                            if (user.name != "Deleted User") {
+                                            // Respect config: when disableProfilesInteractions==true, avatar is not clickable.
+                                            val disableProfiles = config?.disableProfilesInteractions == true
+                                            if (!disableProfiles && user.name != "Deleted User") {
                                                 UserStore.setSelectedUser(user)
                                             }
                                         }
