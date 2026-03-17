@@ -16,6 +16,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "ethora-chat-android"
 
-include(":chat-core")
-include(":chat-ui")
-include(":chat-app")
+include(":ethora-component")
+include(":ethora-test-app")

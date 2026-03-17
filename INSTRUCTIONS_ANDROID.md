@@ -1,73 +1,110 @@
-Here is an instruction on how to install Ethora Android Chat Component.
-I have attached the screenshot with steps to install.
+# Ethora Chat Android Integration Instructions
 
-1. Install the package from https://github.com/dappros/ethora-sdk-android
-1. Then follow steps from screenshot:
-Select your project (step 1 on screenshot)
-Open `settings.gradle.kts` and include the chat modules (step 2 on screenshot)
-On opened file add project path to `include` and `project(":chat-ui").projectDir` 
-After Android Studio will ask if you want to sync - click Sync Now
-Then you should see that package was successfully added (step 3 on screenshot)
-2. Now you can add the Chat Component to your files.
-This is code snippet that should work for you:
+This SDK is integrated as **one package**: `ethora-component`.
+
+## 1. Add dependency
+
+In your app module `build.gradle.kts`:
 
 ```kotlin
-import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.*
-import com.ethora.chat.Chat
-import com.ethora.chat.core.config.*
-import com.ethora.chat.core.service.LogoutService
-
-fun getChatConfig(
-    chatToken: String?
-): ChatConfig {
-    return ChatConfig(
-        disableHeader = true,
-        disableRooms = true,
-        jwtLogin = JWTLoginConfig(token = chatToken ?: "", enabled = true),
-        enableRoomsRetry = EnableRoomsRetryConfig(enabled = true, helperText = "Initializing room"),
-        newArch = true,
-        baseUrl = "https://api.ethoradev.com/v1",
-        xmppSettings = XMPPSettings(
-            devServer = "wss://xmpp.ethoradev.com:5443/ws",
-            host = "xmpp.ethoradev.com",
-            conference = "conference.xmpp.ethoradev.com"
-        ),
-        disableProfilesInteractions = true
-    )
+dependencies {
+    implementation("com.ethora:ethora-component:1.0.0")
 }
+```
 
-@Composable
-fun MainChatView(chatToken: String?, onLogout: () -> Unit) {
-    val config = remember(chatToken) { getChatConfig(chatToken) }
-    
-    Scaffold(
-        topBar = {
-            @OptIn(ExperimentalMaterial3Api::class)
-            TopAppBar(
-                title = { Text("Chat") },
-                actions = {
-                    Button(onClick = {
-                        LogoutService.performLogout()
-                        onLogout()
-                    }) {
-                        Text("Logout")
-                    }
-                }
-            )
-        }
-    ) { padding ->
-        Chat(
-            config = config,
-            modifier = Modifier.padding(padding)
-        )
+If your team uses a private Maven repo, add it to root `settings.gradle.kts`:
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = uri("YOUR_MAVEN_REPO_URL") }
     }
 }
 ```
 
-Also in the test file you can see how logoutService is used for switching users.
+## 2. Add manifest permissions
 
-Other config is as close as possible to the web version.
-Please note that this is beta. If you find any bugs - feel free to tell me. From our side we will provide updates as soon as possible and keep you informed about all updates.
+```xml
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+```
+
+## 3. Create chat config and render chat
+
+```kotlin
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.fillMaxSize
+import com.ethora.chat.Chat
+import com.ethora.chat.core.config.ChatConfig
+import com.ethora.chat.core.config.ChatHeaderSettingsConfig
+import com.ethora.chat.core.config.JWTLoginConfig
+import com.ethora.chat.core.config.XMPPSettings
+import com.ethora.chat.core.networking.ApiClient
+import com.ethora.chat.core.store.ChatStore
+
+@Composable
+fun ChatScreen(userToken: String) {
+    val roomJid = "699c6923429c2757ac8ab6a4_playground-room-1"
+
+    val config = ChatConfig(
+        appId = "YOUR_APP_ID",
+        baseUrl = "https://api.messenger-dev.vitall.com",
+        disableRooms = true,
+        chatHeaderSettings = ChatHeaderSettingsConfig(
+            roomTitleOverrides = mapOf(roomJid to "Playground Room 1"),
+            chatInfoButtonDisabled = true,
+            backButtonDisabled = true
+        ),
+        xmppSettings = XMPPSettings(
+            xmppServerUrl = "wss://xmpp.messenger-dev.vitall.com/ws",
+            host = "xmpp.messenger-dev.vitall.com",
+            conference = "conference.xmpp.messenger-dev.vitall.com"
+        ),
+        jwtLogin = JWTLoginConfig(
+            token = userToken,
+            enabled = true
+        ),
+        defaultLogin = false
+        // newArch is true by default
+    )
+
+    ChatStore.setConfig(config)
+    ApiClient.setBaseUrl(config.baseUrl ?: "https://api.messenger-dev.vitall.com", config.customAppToken)
+
+    Chat(
+        config = config,
+        roomJID = roomJid,
+        modifier = Modifier.fillMaxSize()
+    )
+}
+```
+
+## 4. Important config behavior
+
+- `newArch` is enabled by default.
+- Use `XMPPSettings.xmppServerUrl` as the main server URL field.
+- `jwtLogin.enabled = true` + non-empty token enables JWT login flow.
+- `disableRooms = true` + `roomJID` opens a specific room directly.
+- Header controls:
+  - `roomTitleOverrides` custom room title
+  - `chatInfoButtonDisabled` hides 3-dot menu
+  - `backButtonDisabled` hides back button
+
+## 5. If integrating from source (same repo checkout)
+
+In `settings.gradle.kts`:
+
+```kotlin
+include(":ethora-component")
+```
+
+In your app module:
+
+```kotlin
+dependencies {
+    implementation(project(":ethora-component"))
+}
+```

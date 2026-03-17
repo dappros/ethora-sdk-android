@@ -24,7 +24,7 @@ data class ChatConfig(
     val baseUrl: String? = null,
     val customAppToken: String? = null,
     val xmppSettings: XMPPSettings? = null,
-    /** Optional DNS fallback: hostname -> IP when system DNS fails (e.g. emulator). Example: "xmpp-dev.preshent.com" -> "1.2.3.4" */
+    /** Optional DNS fallback: hostname -> IP when system DNS fails (e.g. emulator). Example: "xmpp-dev.example.com" -> "1.2.3.4" */
     val dnsFallbackOverrides: Map<String, String>? = null,
 
     // Room Settings
@@ -63,7 +63,7 @@ data class ChatConfig(
     val clearStoreBeforeInit: Boolean? = null,
     val disableSentLogic: Boolean? = null,
     val initBeforeLoad: Boolean? = null,
-    val newArch: Boolean? = null,
+    val newArch: Boolean? = true,
     val qrUrl: String? = null,
 
     // Secondary Send Button
@@ -145,7 +145,7 @@ data class ChatConfig(
         private var clearStoreBeforeInit: Boolean? = null
         private var disableSentLogic: Boolean? = null
         private var initBeforeLoad: Boolean? = null
-        private var newArch: Boolean? = null
+        private var newArch: Boolean? = true
         private var qrUrl: String? = null
         private var secondarySendButton: SecondarySendButtonConfig? = null
         private var enableRoomsRetry: EnableRoomsRetryConfig? = null

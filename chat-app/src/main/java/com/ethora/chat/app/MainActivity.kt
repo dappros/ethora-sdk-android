@@ -181,7 +181,7 @@ class MainActivity : ComponentActivity() {
                     var email by remember { mutableStateOf(BuildConfig.DEFAULT_LOGIN_EMAIL) }
                     var password by remember { mutableStateOf(BuildConfig.DEFAULT_LOGIN_PASSWORD) }
 
-                    // Config: aligned with preshent-mobile/WorkspaceDetailsChatScreen.tsx (React IConfig)
+                    // Config aligned with React-style IConfig
                     val userToken = BuildConfig.USER_TOKEN.takeIf { it.isNotBlank() }
                     val enableLiveInit = userToken != null
                     val dnsOverrides = remember {
@@ -196,26 +196,23 @@ class MainActivity : ComponentActivity() {
                     val appConfig = remember(userToken, dnsOverrides) {
                         ChatConfig(
                             disableHeader = true,
-                            disableRooms = false, // true for single-room (preshent); false for test app room list
+                            disableRooms = false, // true for single-room; false for test app room list
                             disableMedia = false,
                             disableProfilesInteractions = true,
-                            newArch = true,
                             botMessageAutoScroll = true,
                             initBeforeLoad = enableLiveInit,
                             setRoomJidInPath = true,
                             baseUrl = BuildConfig.API_BASE_URL,
                             appId = BuildConfig.APP_ID,
-                            customAppToken = BuildConfig.API_TOKEN.takeIf { it.isNotBlank() },
                             xmppSettings = XMPPSettings(
-                                devServer = BuildConfig.XMPP_DEV_SERVER,
+                                xmppServerUrl = BuildConfig.XMPP_DEV_SERVER,
                                 host = BuildConfig.XMPP_HOST,
                                 conference = BuildConfig.XMPP_CONFERENCE
                             ),
                             dnsFallbackOverrides = dnsOverrides.ifEmpty { null },
                             jwtLogin = if (enableLiveInit) JWTLoginConfig(
                                 token = userToken!!,
-                                enabled = true,
-                                usePreshentStyle = BuildConfig.USE_PRESHENT_JWT_AUTH
+                                enabled = true
                             ) else null,
                             defaultLogin = enableLiveInit,
                             enableRoomsRetry = EnableRoomsRetryConfig(
@@ -223,11 +220,6 @@ class MainActivity : ComponentActivity() {
                                 helperText = "Initializing room"
                             ),
                             refreshTokens = RefreshTokensConfig(enabled = false),
-                            customTypingIndicator = com.ethora.chat.core.config.CustomTypingIndicatorConfig(enabled = true),
-                            blockMessageSendingWhenProcessing = com.ethora.chat.core.config.BlockMessageSendingConfig(
-                                enabled = true,
-                                timeout = 90_000L
-                            )
                         )
                     }
                     ChatStore.setConfig(appConfig)
@@ -459,4 +451,3 @@ fun ChatScreen(config: ChatConfig, onLogout: () -> Unit) {
         }
     }
 }
-

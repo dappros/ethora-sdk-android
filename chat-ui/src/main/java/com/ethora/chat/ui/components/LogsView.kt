@@ -9,10 +9,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -29,6 +33,7 @@ import com.ethora.chat.core.store.LogStore
 fun LogsView(modifier: Modifier = Modifier) {
     val logs by LogStore.logs.collectAsState()
     val clipboardManager = LocalClipboardManager.current
+    val expandedItems = remember { mutableStateMapOf<String, Boolean>() }
 
     Column(modifier = modifier.fillMaxSize()) {
         TopAppBar(
@@ -53,7 +58,13 @@ fun LogsView(modifier: Modifier = Modifier) {
             contentPadding = PaddingValues(8.dp)
         ) {
             items(logs) { entry ->
-                LogEntryItem(entry)
+                val itemKey = "${entry.timestamp}-${entry.tag}-${entry.type}-${entry.message.hashCode()}"
+                val isExpanded = expandedItems[itemKey] == true
+                LogEntryItem(
+                    entry = entry,
+                    expanded = isExpanded,
+                    onToggleExpanded = { expandedItems[itemKey] = !isExpanded }
+                )
                 Divider(color = Color.LightGray.copy(alpha = 0.2f))
             }
         }
@@ -61,7 +72,11 @@ fun LogsView(modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun LogEntryItem(entry: LogStore.LogEntry) {
+fun LogEntryItem(
+    entry: LogStore.LogEntry,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit
+) {
     val color = when (entry.type) {
         LogStore.LogType.ERROR -> Color(0xFFD32F2F)
         LogStore.LogType.WARNING -> Color(0xFFFFA000)
@@ -77,7 +92,7 @@ fun LogEntryItem(entry: LogStore.LogEntry) {
         modifier = Modifier
             .fillMaxWidth()
             .clickable {
-                clipboardManager.setText(AnnotatedString("[${entry.timestamp}] [${entry.tag}] ${entry.message}"))
+                onToggleExpanded()
             }
             .padding(vertical = 4.dp, horizontal = 8.dp)
     ) {
@@ -114,8 +129,14 @@ fun LogEntryItem(entry: LogStore.LogEntry) {
             }
         }
         
+        val displayText = if (expanded) {
+            entry.message
+        } else {
+            entry.message.replace("\n", " ").take(220) + if (entry.message.length > 220) "..." else ""
+        }
+
         Text(
-            text = entry.message,
+            text = displayText,
             style = MaterialTheme.typography.bodySmall.copy(
                 fontFamily = FontFamily.Monospace,
                 lineHeight = 16.sp
@@ -123,5 +144,28 @@ fun LogEntryItem(entry: LogStore.LogEntry) {
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.padding(top = 2.dp)
         )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            TextButton(onClick = onToggleExpanded) {
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = null
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(if (expanded) "Collapse" else "Expand")
+            }
+            TextButton(
+                onClick = {
+                    clipboardManager.setText(
+                        AnnotatedString("[${entry.timestamp}] [${entry.tag}] ${entry.message}")
+                    )
+                }
+            ) {
+                Text("Copy")
+            }
+        }
     }
 }

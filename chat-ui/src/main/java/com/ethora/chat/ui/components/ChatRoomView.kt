@@ -268,8 +268,15 @@ fun ChatRoomView(
         } else {
             // Header (only if not disabled)
             if (config?.disableHeader != true) {
+                val headerSettings = config?.chatHeaderSettings
+                val customTitle = headerSettings?.roomTitleOverrides?.let { overrides ->
+                    overrides[room.jid]
+                        ?: overrides[room.jid.substringBefore("@")]
+                }
+                val hideChatInfoButton = headerSettings?.chatInfoButtonDisabled == true
+                val hideBackButton = headerSettings?.backButtonDisabled == true
                 ChatRoomHeader(
-                    room = room,
+                    title = customTitle ?: room.title,
                     onBack = {
                         // Save scroll position before navigating back
                         val currentIndex = listState.firstVisibleItemIndex
@@ -277,7 +284,9 @@ fun ChatRoomView(
                         android.util.Log.d("ChatRoomView", "Saved scroll position on back: $currentIndex")
                         onBack()
                     },
-                    onInfoClick = { showChatInfo = true }
+                    onInfoClick = { showChatInfo = true },
+                    showInfoButton = !hideChatInfoButton,
+                    showBackButton = !hideBackButton
                 )
             }
         
@@ -732,33 +741,39 @@ fun ChatRoomView(
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun ChatRoomHeader(
-    room: Room,
+    title: String,
     onBack: () -> Unit,
-    onInfoClick: () -> Unit
+    onInfoClick: () -> Unit,
+    showInfoButton: Boolean,
+    showBackButton: Boolean
 ) {
     TopAppBar(
         title = { 
             Text(
-                room.title,
+                title,
                 style = MaterialTheme.typography.titleLarge.copy(
                     fontWeight = FontWeight.SemiBold
                 )
             ) 
         },
         navigationIcon = {
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = androidx.compose.material.icons.Icons.Default.ArrowBack,
-                    contentDescription = "Back"
-                )
+            if (showBackButton) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = androidx.compose.material.icons.Icons.Default.ArrowBack,
+                        contentDescription = "Back"
+                    )
+                }
             }
         },
         actions = {
-            IconButton(onClick = onInfoClick) {
-                Icon(
-                    imageVector = Icons.Default.MoreVert,
-                    contentDescription = "Chat info"
-                )
+            if (showInfoButton) {
+                IconButton(onClick = onInfoClick) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Chat info"
+                    )
+                }
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(

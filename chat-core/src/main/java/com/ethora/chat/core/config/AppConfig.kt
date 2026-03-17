@@ -29,7 +29,7 @@ object AppConfig {
      * Default XMPP settings
      */
     val defaultXMPPSettings: XMPPSettings = XMPPSettings(
-        devServer = "wss://xmpp.ethoradev.com:5443/ws",
+        xmppServerUrl = "wss://xmpp.ethoradev.com:5443/ws",
         host = "xmpp.ethoradev.com",
         conference = defaultConferenceDomain,
         xmppPingOnSendEnabled = true

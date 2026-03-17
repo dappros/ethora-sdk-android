@@ -3,10 +3,8 @@ plugins {
     alias(libs.plugins.kotlin.android)
     kotlin("kapt")
     alias(libs.plugins.hilt)
-    id("com.google.gms.google-services")
 }
 
-// Load .env file (like React's env) - values are injected into BuildConfig at build time
 fun loadEnv(): Map<String, String> {
     val envFile = file("${projectDir}/.env")
     if (!envFile.exists()) return emptyMap()
@@ -21,34 +19,28 @@ fun loadEnv(): Map<String, String> {
 }
 
 val env = loadEnv()
-
 fun env(key: String, default: String) = env[key]?.takeIf { it.isNotBlank() } ?: default
 
 android {
-    namespace = "com.ethora.chat.app"
-    compileSdk = libs.versions.compileSdk.get().toInt()
+    namespace = "com.ethora.test.app"
+    compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.ethora.chat.app"
+        applicationId = "com.ethora.test.app"
         minSdk = libs.versions.minSdk.get().toInt()
-        targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = libs.versions.versionCode.get().toInt()
-        versionName = libs.versions.versionName.get()
+        targetSdk = 36
+        versionCode = 1
+        versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Injected from .env (aligned with React-style VITE_ETHORA_*)
-        buildConfigField("String", "API_BASE_URL", "\"${env("API_BASE_URL", env("CHAT_BASE_URL", "https://api.ethoradev.com/v1"))}\"")
+        buildConfigField("String", "API_BASE_URL", "\"${env("API_BASE_URL", "https://api.messenger-dev.vitall.com")}\"")
         buildConfigField("String", "APP_ID", "\"${env("APP_ID", "646cc8dc96d4a4dc8f7b2f2d")}\"")
         buildConfigField("String", "API_TOKEN", "\"${env("API_TOKEN", "")}\"")
-        buildConfigField("String", "XMPP_DEV_SERVER", "\"${env("APP_XMPP_SERVICE", env("XMPP_DEV_SERVER", "wss://xmpp.ethoradev.com:5443/ws"))}\"")
-        buildConfigField("String", "XMPP_HOST", "\"${env("XMPP_HOST", "xmpp.ethoradev.com")}\"")
-        buildConfigField("String", "XMPP_CONFERENCE", "\"${env("XMPP_SERVICE", env("XMPP_CONFERENCE", "conference.xmpp.ethoradev.com"))}\"")
-        buildConfigField("String", "DEFAULT_LOGIN_EMAIL", "\"${env("DEFAULT_LOGIN_EMAIL", "yukiraze9@gmail.com")}\"")
-        buildConfigField("String", "DEFAULT_LOGIN_PASSWORD", "\"${env("DEFAULT_LOGIN_PASSWORD", "Qwerty123")}\"")
-        buildConfigField("String", "USER_TOKEN", "\"${env("USER_TOKEN", env("CHAT_TOKEN", ""))}\"")
-        // Optional: DNS fallback for any project. Format: host1=ip1,host2=ip2 (get IP: nslookup hostname)
-        buildConfigField("String", "DNS_FALLBACK_OVERRIDES", "\"${env("DNS_FALLBACK_OVERRIDES", "")}\"")
+        buildConfigField("String", "XMPP_DEV_SERVER", "\"${env("XMPP_DEV_SERVER", "wss://xmpp.messenger-dev.vitall.com/ws")}\"")
+        buildConfigField("String", "XMPP_HOST", "\"${env("XMPP_HOST", "xmpp.messenger-dev.vitall.com")}\"")
+        buildConfigField("String", "XMPP_CONFERENCE", "\"${env("XMPP_CONFERENCE", "conference.xmpp.messenger-dev.vitall.com")}\"")
+        buildConfigField("String", "USER_TOKEN", "\"${env("USER_TOKEN", "")}\"")
     }
 
     buildTypes {
@@ -64,6 +56,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -81,39 +74,30 @@ android {
 }
 
 dependencies {
-    // Chat modules
-    implementation(project(":chat-core"))
-    implementation(project(":chat-ui"))
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    implementation(project(":ethora-component"))
     
-    // AppCompat for Material theme
     implementation("androidx.appcompat:appcompat:1.6.1")
-
-    // Core Android
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
 
-    // Compose BOM
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.extended)
+    implementation(libs.compose.navigation)
 
-    // Dependency Injection
     implementation(libs.hilt.android)
     kapt(libs.hilt.compiler)
+    implementation(libs.hilt.navigation.compose)
 
-    // Firebase
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-messaging-ktx")
     implementation("com.google.firebase:firebase-installations-ktx")
 
-    // Testing
     debugImplementation(libs.compose.ui.tooling)
-    testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.espresso.core)
 }

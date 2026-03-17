@@ -8,9 +8,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import com.ethora.chat.core.config.ChatConfig
+import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.networking.ApiClient
 import com.ethora.chat.core.networking.AuthAPIHelper
@@ -267,12 +272,14 @@ fun Chat(
         val messageLoaderQueue = remember(xmppClient) {
             xmppClient?.let { MessageLoaderQueue(it) }
         }
+
+        val currentRoom by RoomStore.currentRoom.collectAsState()
         
         // Message priority queue (for prioritized loading)
         // Matches web: useMessageQueue hook
-        val messagePriorityQueue = remember(xmppClient, RoomStore.currentRoom.value?.jid) {
+        val messagePriorityQueue = remember(xmppClient, currentRoom?.jid) {
             xmppClient?.let { 
-                MessagePriorityQueue(it, RoomStore.currentRoom.value?.jid)
+                MessagePriorityQueue(it, currentRoom?.jid)
             }
         }
         
@@ -298,7 +305,7 @@ fun Chat(
                     }
                     delay(500) // brief pause after connect
                     
-                    val activeRoomJid = RoomStore.currentRoom.value?.jid
+                    val activeRoomJid = currentRoom?.jid
                     MessageLoader.loadInitialMessagesForAllRooms(
                         xmppClient = client,
                         activeRoomJid = activeRoomJid,
@@ -403,17 +410,50 @@ fun Chat(
 
         // Show room list or single room based on config
         if (config.disableRooms == true) {
-            val targetRoom = roomJID?.let { jid ->
-                com.ethora.chat.core.store.RoomStore.getRoomByJid(jid)
-            } ?: config.defaultRooms?.firstOrNull()
-            
-            targetRoom?.let { room ->
+            val requestedSingleRoomJid = roomJID ?: config.defaultRooms?.firstOrNull()?.jid
+            val normalizedSingleRoomJid = remember(requestedSingleRoomJid, config.xmppSettings?.conference) {
+                requestedSingleRoomJid?.let { normalizeRoomJid(it, config.xmppSettings?.conference) }
+            }
+
+            val targetRoom = remember(rooms, normalizedSingleRoomJid) {
+                normalizedSingleRoomJid?.let { jid ->
+                    findRoomByJid(RoomStore.rooms.value, jid)
+                }
+            }
+
+            val fallbackRoom = remember(normalizedSingleRoomJid, requestedSingleRoomJid, config.chatHeaderSettings) {
+                normalizedSingleRoomJid?.let { jid ->
+                    Room(
+                        id = jid.substringBefore("@"),
+                        jid = jid,
+                        name = resolveRoomTitle(jid, requestedSingleRoomJid, config),
+                        title = resolveRoomTitle(jid, requestedSingleRoomJid, config)
+                    )
+                }
+            }
+
+            val roomToRender = targetRoom ?: fallbackRoom
+
+            LaunchedEffect(roomToRender?.jid) {
+                roomToRender?.let { room ->
+                    if (RoomStore.getRoomByJid(room.jid) == null) {
+                        RoomStore.addRoom(room)
+                    }
+                    RoomStore.setCurrentRoom(room)
+                }
+            }
+
+            if (roomToRender != null) {
                 ChatRoomView(
-                    room = room,
+                    room = roomToRender,
                     xmppClient = xmppClient,
-                    onBack = { /* Handle back */ },
+                    onBack = { /* Single-room mode: back is controlled by host app */ },
                     modifier = modifier
                 )
+            } else {
+                Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No room configured")
+                }
             }
         } else {
             if (selectedRoom != null) {
@@ -437,4 +477,31 @@ fun Chat(
             }
         }
     }
+}
+
+private fun normalizeRoomJid(inputJid: String, conferenceDomain: String?): String {
+    if (inputJid.contains("@")) return inputJid
+    if (conferenceDomain.isNullOrBlank()) return inputJid
+    return "$inputJid@$conferenceDomain"
+}
+
+private fun toBareRoomName(jid: String): String = jid.substringBefore("@")
+
+private fun findRoomByJid(rooms: List<Room>, targetJid: String): Room? {
+    return rooms.firstOrNull { room ->
+        room.jid == targetJid || toBareRoomName(room.jid) == toBareRoomName(targetJid)
+    }
+}
+
+private fun resolveRoomTitle(
+    normalizedRoomJid: String,
+    originalRoomJid: String?,
+    config: ChatConfig
+): String {
+    val bare = toBareRoomName(normalizedRoomJid)
+    val overrides = config.chatHeaderSettings?.roomTitleOverrides ?: emptyMap()
+    return overrides[normalizedRoomJid]
+        ?: overrides[bare]
+        ?: originalRoomJid?.let { overrides[it] }
+        ?: bare
 }

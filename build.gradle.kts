@@ -22,3 +22,7 @@ plugins {
 tasks.register("clean", Delete::class) {
     delete(rootProject.layout.buildDirectory)
 }
+
+allprojects {
+    layout.buildDirectory.set(file("/tmp/android_build/${rootProject.name}/${project.name}"))
+}

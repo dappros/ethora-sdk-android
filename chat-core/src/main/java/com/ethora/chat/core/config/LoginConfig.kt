@@ -12,13 +12,10 @@ data class GoogleLoginConfig(
 
 /**
  * JWT login configuration
- * @param usePreshentStyle when true, uses /users/client + x-custom-token (preshent API).
- *   When false, uses users/login-with-jwt + Authorization (ethora API). Default: false.
  */
 data class JWTLoginConfig(
     val token: String,
-    val enabled: Boolean,
-    val usePreshentStyle: Boolean = false
+    val enabled: Boolean
 )
 
 /**

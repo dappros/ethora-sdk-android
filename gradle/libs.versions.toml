@@ -49,7 +49,8 @@ coroutines = "1.7.3"
 junit = "4.13.2"
 androidxJunit = "1.1.5"
 espresso = "3.5.1"
-mockito = "5.5.0"
+mockitoCore = "5.5.0"
+mockitoKotlin = "5.2.1"
 
 [libraries]
 # Core Android
@@ -112,8 +113,8 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxJunit" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
-mockito-core = { group = "org.mockito", name = "mockito-core", version.ref = "mockito" }
-mockito-kotlin = { group = "org.mockito.kotlin", name = "mockito-kotlin", version.ref = "mockito" }
+mockito-core = { group = "org.mockito", name = "mockito-core", version.ref = "mockitoCore" }
+mockito-kotlin = { group = "org.mockito.kotlin", name = "mockito-kotlin", version.ref = "mockitoKotlin" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "androidGradlePlugin" }

@@ -21,16 +21,10 @@ interface AuthAPI {
         @Body body: LoginRequest
     ): Response<LoginResponse>
 
-    @POST("users/login-with-jwt")
+    @POST("users/client")
     suspend fun loginViaJWT(
         @Header("Authorization") token: String
     ): Response<LoginResponse>
-
-    /** Preshent-style: /users/client with x-custom-token header */
-    @POST("users/client")
-    suspend fun loginViaJwtPreshentStyle(
-        @Header("x-custom-token") token: String
-    ): Response<PreshentLoginResponse>
 
     @POST("users/refresh-token")
     suspend fun refreshToken(
@@ -132,15 +126,6 @@ data class AppResponse(
 )
 
 /**
- * Preshent API: /users/client response (user, token, refreshToken only)
- */
-data class PreshentLoginResponse(
-    val user: UserResponse,
-    val token: String,
-    val refreshToken: String
-)
-
-/**
  * Refresh token request
  */
 data class RefreshTokenRequest(
@@ -196,7 +181,7 @@ object AuthAPIHelper {
         password: String,
         baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): LoginResponse {
-        android.util.Log.d("AuthAPIHelper", "🌐 loginWithEmail: $baseUrl/users/login-with-email")
+        android.util.Log.d("AuthAPIHelper", "🌐 loginWithEmail: $baseUrl/users/client")
         val api = ApiClient.createService<AuthAPI>(baseUrl)
         try {
             val response = api.loginWithEmail(LoginRequest(email, password))
@@ -232,35 +217,15 @@ object AuthAPIHelper {
         }
     }
 
-    /**
-     * Login with JWT token.
-     * Supports two API styles:
-     * - Ethora: users/login-with-jwt + Authorization header
-     * - Preshent: users/client + x-custom-token header (use usePreshentStyle=true or baseUrl contains preshent.com)
-     */
+    /** Login with JWT token via users/client + Authorization header. */
     suspend fun loginViaJWT(
         token: String,
-        baseUrl: String = ChatStore.getEffectiveBaseUrl(),
-        usePreshentStyle: Boolean = ChatStore.getConfig()?.jwtLogin?.usePreshentStyle == true
-            || baseUrl.contains("preshent.com", ignoreCase = true)
+        baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): LoginResponse? {
         return try {
             val api = ApiClient.createService<AuthAPI>(baseUrl)
-            if (usePreshentStyle) {
-                val response = api.loginViaJwtPreshentStyle(token)
-                if (response.isSuccessful && response.body() != null) {
-                    val body = response.body()!!
-                    LoginResponse(
-                        success = true,
-                        token = body.token,
-                        refreshToken = body.refreshToken,
-                        user = body.user
-                    )
-                } else null
-            } else {
-                val response = api.loginViaJWT(token)
-                if (response.isSuccessful && response.body() != null) response.body() else null
-            }
+            val response = api.loginViaJWT(token)
+            if (response.isSuccessful && response.body() != null) response.body() else null
         } catch (e: Exception) {
             android.util.Log.e("AuthAPIHelper", "JWT login failed", e)
             null
