@@ -70,7 +70,6 @@ fun Chat(
     val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
     ApiClient.setBaseUrl(baseUrl, config.customAppToken)
 
-    // Persistence first (preshent-mobile style): load persisted user, then JWT only if needed
     LaunchedEffect(Unit) {
         if (user == null && UserStore.currentUser.value == null) {
             // 1) Load persisted user – show cached messages immediately with correct ownership

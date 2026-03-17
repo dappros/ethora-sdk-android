@@ -456,7 +456,6 @@ class XMPPWebSocketConnection(
             }
             
             // Handle normal stanzas - parse real-time messages
-            // Preshent-mobile: не проверяет type, обрабатывает любое message без result/composing/paused
             // Принимаем type=groupchat ИЛИ отсутствующий type (MUC default), from в формате room/user
             val fromAttr = extractAttribute(xml, "from") ?: ""
             val isMucMessage = fromAttr.contains("/")
@@ -467,7 +466,6 @@ class XMPPWebSocketConnection(
                 isMucMessage
             if (isRealtimeEligible) {
                 Log.d(TAG, "📥 Incoming real-time message candidate: from=$fromAttr, type=$stanzaType")
-                // Не требуем строго <body> — preshent принимает сообщения с <data>
                 parseAndHandleRealtimeMessage(xml)
             }
             
@@ -568,12 +566,10 @@ class XMPPWebSocketConnection(
             val isMediafile = extractAttribute(dataXml, "isMediafile")
             val location = extractAttribute(dataXml, "location")
             
-            // Preshent-mobile: принимаем сообщения с body, media, или <data> (даже пустой)
             val hasBody = body.isNotBlank()
             val hasMedia = isMediafile == "true" || location != null
             val hasData = dataXml.isNotBlank()
             
-            // Preshent: id = xmppId || Date.now() — используем сгенерированный если нет
             val effectiveMessageId = if (messageId.isNotBlank()) messageId else "msg-${System.currentTimeMillis()}"
 
             if (!hasBody && !hasMedia && !hasData) {
@@ -598,7 +594,6 @@ class XMPPWebSocketConnection(
             // Extract user info from <data> element if present (already extracted above)
             val senderFirstName = extractAttribute(dataXml, "senderFirstName")
             val senderLastName = extractAttribute(dataXml, "senderLastName")
-            // Preshent использует "photo", Vitall — "photoURL"
             val photoURL = extractAttribute(dataXml, "photoURL") ?: extractAttribute(dataXml, "photo")
             val fullName = extractAttribute(dataXml, "fullName")
             val senderJID = extractAttribute(dataXml, "senderJID")
