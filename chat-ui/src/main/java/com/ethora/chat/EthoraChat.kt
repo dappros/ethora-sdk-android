@@ -419,19 +419,34 @@ fun Chat(
 
         // Show room list or single room based on config
         if (config.disableRooms == true) {
-            val targetRoom = remember(rooms, normalizedSingleRoomJid) {
-                normalizedSingleRoomJid?.let { jid ->
-                    findRoomByJid(RoomStore.rooms.value, jid)
+            val requestedSingleRoomJid = roomJID ?: config.defaultRooms?.firstOrNull()?.jid
+            val normalizedSingleRoomJid = remember(requestedSingleRoomJid, config.xmppSettings?.conference) {
+                requestedSingleRoomJid?.let { normalizeRoomJid(it, config.xmppSettings?.conference) }
+            }
+
+            // If roomJID/defaultRooms not provided, pick the first room returned by /chats/my.
+            // Also re-select if current selection disappears after a refresh.
+            LaunchedEffect(rooms.size, requestedSingleRoomJid) {
+                if (requestedSingleRoomJid == null && rooms.isNotEmpty()) {
+                    val current = RoomStore.currentRoom.value
+                    val currentExists = current != null && rooms.any { it.jid == current.jid }
+                    if (!currentExists) {
+                        RoomStore.setCurrentRoom(rooms.first())
+                    }
                 }
             }
 
-            LaunchedEffect(targetRoom?.jid) {
-                RoomStore.setCurrentRoom(targetRoom)
+            val targetRoom = remember(rooms, normalizedSingleRoomJid) {
+                normalizedSingleRoomJid?.let { jid -> findRoomByJid(rooms, jid) }
             }
 
-            if (targetRoom != null) {
+            val roomToRender = targetRoom ?: run {
+                if (requestedSingleRoomJid == null) RoomStore.currentRoom.value else null
+            }
+
+            if (roomToRender != null) {
                 ChatRoomView(
-                    room = targetRoom,
+                    room = roomToRender,
                     xmppClient = xmppClient,
                     onBack = { /* Single-room mode: back is controlled by host app */ },
                     modifier = modifier

@@ -153,8 +153,15 @@ object UserStore {
     fun updateTokens(token: String, refreshToken: String?) {
         _token.value = token
         refreshToken?.let { _refreshToken.value = it }
+        // Keep current user in sync so persisted user object remains valid across restarts.
+        _currentUser.value = _currentUser.value?.copy(
+            token = token,
+            refreshToken = refreshToken ?: _currentUser.value?.refreshToken
+        )
         // Persist tokens (background)
         persistTokens()
+        // Persist user (background) so token fields stay consistent on restore.
+        persistUser()
     }
 
     /**

@@ -1,9 +1,16 @@
 package com.ethora.chat.core.networking
 
 import com.ethora.chat.core.config.AppConfig
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.LogStore
+import com.ethora.chat.core.store.UserStore
+import kotlinx.coroutines.runBlocking
+import okhttp3.Authenticator
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.Route
 import okhttp3.logging.HttpLoggingInterceptor
 import okio.Buffer
 import retrofit2.Retrofit
@@ -18,6 +25,9 @@ object ApiClient {
     private var appToken: String = AppConfig.defaultAppToken
     private var userToken: String? = null
     internal var storedBaseUrl: String = AppConfig.defaultBaseURL
+
+    // Single-flight refresh guard (OkHttp Authenticator can be called concurrently).
+    private val refreshLock = Any()
 
     /** Public getter for use in inline function defaults (avoids internal visibility in inline) */
     fun getStoredBaseUrl(): String = storedBaseUrl
@@ -60,6 +70,14 @@ object ApiClient {
                 level = HttpLoggingInterceptor.Level.BODY
             }
 
+            fun isAuthEndpoint(url: String): Boolean {
+                // Auth/bootstrap endpoints must not trigger refresh loops.
+                return url.contains("users/login-with-email") ||
+                    url.contains("users/sign-up-with-email") ||
+                    url.contains("users/client") ||
+                    url.contains("users/refresh-token")
+            }
+
             val authInterceptor = Interceptor { chain ->
                 val originalRequest = chain.request()
                 val requestUrl = originalRequest.url.toString()
@@ -74,21 +92,64 @@ object ApiClient {
                     builder.header("Accept", "application/json")
                 }
                 
-                // Don't add user token for login or sign-up endpoints
-                val isAuthEndpoint = requestUrl.contains("users/login-with-email") || 
-                                   requestUrl.contains("users/sign-up-with-email")
-
                 // Respect per-request Authorization (needed for upload and other custom headers).
                 if (explicitAuthHeader.isNullOrBlank()) {
-                    builder.header("Authorization", appToken)
-                    if (!isAuthEndpoint) {
-                        userToken?.let {
-                            builder.header("Authorization", it)
-                        }
+                    // Prefer the latest token from UserStore if available.
+                    val latestUserToken = UserStore.token.value ?: userToken
+                    if (!isAuthEndpoint(requestUrl) && !latestUserToken.isNullOrBlank()) {
+                        builder.header("Authorization", latestUserToken)
+                    } else {
+                        builder.header("Authorization", appToken)
                     }
                 }
                 
                 chain.proceed(builder.build())
+            }
+
+            val tokenRefreshAuthenticator = Authenticator { _: Route?, response: Response ->
+                // Only react to 401 for non-auth endpoints.
+                val url = response.request.url.toString()
+                if (response.code != 401 || isAuthEndpoint(url)) return@Authenticator null
+
+                // Prevent infinite loops: if we've already attempted with a new token and still got 401.
+                if (responseCount(response) >= 2) return@Authenticator null
+
+                val currentAccessToken = UserStore.token.value ?: userToken
+                val currentRefreshToken = UserStore.refreshToken.value
+                if (currentAccessToken.isNullOrBlank() || currentRefreshToken.isNullOrBlank()) return@Authenticator null
+
+                synchronized(refreshLock) {
+                    LogStore.error("API", "🔄 401 received, attempting refresh for $url")
+                    // If another thread already refreshed and UserStore.token changed, just retry with it.
+                    val latestAfterLock = UserStore.token.value ?: userToken
+                    val reqAuth = response.request.header("Authorization")
+                    if (!latestAfterLock.isNullOrBlank() && !reqAuth.isNullOrBlank() && reqAuth != latestAfterLock) {
+                        LogStore.error("API", "🔁 Using already-refreshed token, retrying $url")
+                        return@synchronized response.request.newBuilder()
+                            .header("Authorization", latestAfterLock)
+                            .build()
+                    }
+
+                    val refreshed = runBlocking {
+                        try {
+                            AuthAPIHelper.refreshToken(
+                                refreshToken = currentRefreshToken,
+                                baseUrl = ChatStore.getEffectiveBaseUrl()
+                            )
+                        } catch (_: Exception) {
+                            null
+                        }
+                    } ?: return@synchronized null
+
+                    // Persist in UserStore + update ApiClient cache.
+                    UserStore.updateTokens(refreshed.token, refreshed.refreshToken)
+                    setUserToken(refreshed.token)
+
+                    LogStore.error("API", "✅ Refreshed token, retrying $url")
+                    response.request.newBuilder()
+                        .header("Authorization", refreshed.token)
+                        .build()
+                }
             }
 
             val apiDebugInterceptor = Interceptor { chain ->
@@ -152,12 +213,14 @@ object ApiClient {
 
             val client = OkHttpClient.Builder()
                 .addInterceptor(authInterceptor)
+                .authenticator(tokenRefreshAuthenticator)
                 .addInterceptor(apiDebugInterceptor)
                 .addInterceptor(loggingInterceptor)
                 .dns(DnsFallback.createDnsFromConfig())
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
+                .connectTimeout(45, TimeUnit.SECONDS)
+                .readTimeout(90, TimeUnit.SECONDS)
                 .writeTimeout(120, TimeUnit.SECONDS)
+                .callTimeout(120, TimeUnit.SECONDS)
                 .build()
 
             retrofit = Retrofit.Builder()
@@ -181,5 +244,15 @@ object ApiClient {
      */
     inline fun <reified T> createService(baseUrl: String = getStoredBaseUrl()): T {
         return getRetrofit(baseUrl).create(T::class.java)
+    }
+
+    private fun responseCount(response: Response): Int {
+        var res: Response? = response
+        var count = 1
+        while (res?.priorResponse != null) {
+            count++
+            res = res.priorResponse
+        }
+        return count
     }
 }
