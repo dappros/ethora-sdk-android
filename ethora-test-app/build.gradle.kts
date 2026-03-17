@@ -35,12 +35,14 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "API_BASE_URL", "\"${env("API_BASE_URL", "https://api.messenger-dev.vitall.com")}\"")
-        buildConfigField("String", "APP_ID", "\"${env("APP_ID", "646cc8dc96d4a4dc8f7b2f2d")}\"")
-        buildConfigField("String", "API_TOKEN", "\"${env("API_TOKEN", "")}\"")
+        buildConfigField("String", "APP_ID", "\"${env("APP_ID", "699c6923429c2757ac8ab6a4")}\"")
+        buildConfigField("String", "API_TOKEN", "\"${env("API_TOKEN", "JWT eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7InBhcmVudEFwcElkIjpudWxsLCJpc0FsbG93ZWROZXdBcHBDcmVhdGUiOnRydWUsImlzQmFzZUFwcCI6dHJ1ZSwiZ29vZ2xlU2VydmljZXNKc29uIjoiIiwiZ29vZ2xlU2VydmljZUluZm9QbGlzdCI6IiIsIlJFQUNUX0FQUF9TVFJJUEVfUFVCTElTSEFCTEVfS0VZIjoiIiwiUkVBQ1RfQVBQX1NUUklQRV9TRUNSRVRfS0VZIjoiIiwic2lnbm9uT3B0aW9ucyI6W10sImFmdGVyTG9naW5QYWdlIjoiY2hhdHMiLCJhdmFpbGFibGVNZW51SXRlbXMiOnsiY2hhdHMiOnRydWUsInByb2ZpbGUiOnRydWUsInNldHRpbmdzIjp0cnVlfSwiYWxsb3dVc2Vyc1RvQ3JlYXRlUm9vbXMiOnRydWUsImFpQm90Ijp7InRyaWdnZXIiOiJhbnlfbWVzc2FnZSIsInByb21wdCI6IllvdSBhcmUgYSBoZWxwZnVsIGFzc2lzdGFudC4iLCJpc1JBRyI6dHJ1ZSwidG90YWxTaXRlU291cmNlU2l6ZSI6MH0sIl9pZCI6IjY5OWM2OTIzNDI5YzI3NTdhYzhhYjZhNCIsImFwcFRva2VucyI6W10sImRlZmF1bHRSb29tcyI6W10sImRpc3BsYXlOYW1lIjoiVml0YWxsIERldiIsImRvbWFpbk5hbWUiOiJhcHAiLCJjcmVhdG9ySWQiOiI2OTljNjkyMzQyOWMyNzU3YWM4YWI2YTUiLCJ1c2Vyc0NhbkZyZWUiOnRydWUsImRlZmF1bHRBY2Nlc3NBc3NldHNPcGVuIjp0cnVlLCJkZWZhdWx0QWNjZXNzUHJvZmlsZU9wZW4iOnRydWUsImJ1bmRsZUlkIjoiY29tLmV0aG9yYSIsInByaW1hcnlDb2xvciI6IiMwMDNFOUMiLCJjb2luU3ltYm9sIjoiRVRPIiwiY29pbk5hbWUiOiJFdGhvcmEgQ29pbiJ9LCJpYXQiOjE3NzE4NTgyMTF9.WGeM2-YpryLsBvNuNJekrfqUf2f6b8lryWZj2ZuEN1w")}\"")
         buildConfigField("String", "XMPP_DEV_SERVER", "\"${env("XMPP_DEV_SERVER", "wss://xmpp.messenger-dev.vitall.com/ws")}\"")
         buildConfigField("String", "XMPP_HOST", "\"${env("XMPP_HOST", "xmpp.messenger-dev.vitall.com")}\"")
         buildConfigField("String", "XMPP_CONFERENCE", "\"${env("XMPP_CONFERENCE", "conference.xmpp.messenger-dev.vitall.com")}\"")
         buildConfigField("String", "USER_TOKEN", "\"${env("USER_TOKEN", "")}\"")
+        buildConfigField("String", "DEFAULT_LOGIN_EMAIL", "\"${env("DEFAULT_LOGIN_EMAIL", "admin@example.com")}\"")
+        buildConfigField("String", "DEFAULT_LOGIN_PASSWORD", "\"${env("DEFAULT_LOGIN_PASSWORD", "admin123")}\"")
     }
 
     buildTypes {

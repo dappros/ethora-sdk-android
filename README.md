@@ -9,8 +9,6 @@ Yes, for any **Android Kotlin app** (Jetpack Compose UI) you can integrate it as
 - Maven artifact: `com.ethora:ethora-component:<version>`
 - Or local module: `:ethora-component`
 
-You no longer need to include `chat-core`, `chat-ui`, or `chat-app` in a client app.
-
 ## Current project modules
 
 This repository currently includes:
