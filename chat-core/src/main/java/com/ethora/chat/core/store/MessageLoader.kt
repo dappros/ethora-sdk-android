@@ -69,7 +69,7 @@ object MessageLoader {
         
         try {
             RoomsPresenceInitializer.initRoomsPresence(xmppClient, rooms)
-            delay(100)
+            // Avoid artificial startup delays. Presence init is async; history can proceed immediately.
             
             val roomsToLoad = rooms.filter { room ->
                 val existingMessages = MessageStore.messages.value[room.jid] ?: emptyList()
@@ -112,7 +112,6 @@ object MessageLoader {
                                 if (xmppClient.isFullyConnected()) {
                                     Log.d(TAG, "  📍 Sending presence to ${room.jid}")
                                     xmppClient.sendPresenceInRoom(room.jid)
-                                    delay(50)
                                 }
                                 
                                 // 3. Request History

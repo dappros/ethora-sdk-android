@@ -49,6 +49,9 @@ class XMPPWebSocketConnection(
     private var disconnectRequested: Boolean = false
     
     private var authState: AuthState = AuthState.NOT_STARTED
+    // Some servers are picky about the initial WebSocket framing. We try RFC7395 <open/> first,
+    // and fall back to legacy <stream:stream> if the server immediately responds with <invalid-xml/>.
+    private var useLegacyStreamOpen: Boolean = false
     
     enum class AuthState {
         NOT_STARTED,
@@ -187,11 +190,17 @@ class XMPPWebSocketConnection(
      * Send stream open (RFC 7395 format: <open> element for WebSocket)
      */
     private suspend fun sendStreamOpen() {
-        // RFC 7395: Use <open> element for WebSocket, not <stream:stream>
-        val streamOpen = """<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' to='$host' version='1.0'/>"""
+        val streamOpen = if (!useLegacyStreamOpen) {
+            // RFC 7395: Use <open> element for WebSocket, not <stream:stream>.
+            // Use double quotes only: some servers reject single-quoted attrs (seen as invalid-xml).
+            """<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" to="$host" version="1.0"/>"""
+        } else {
+            // Legacy XMPP stream open (some deployments behind WS gateways still expect this).
+            """<stream:stream xmlns="jabber:client" xmlns:stream="http://etherx.jabber.org/streams" to="$host" version="1.0">"""
+        }
         sendRaw(streamOpen)
         authState = AuthState.STREAM_OPENED
-        Log.d(TAG, "📤 Sent stream open (RFC 7395): $streamOpen")
+        Log.d(TAG, "📤 Sent stream open (${if (useLegacyStreamOpen) "legacy" else "RFC7395"}): ${streamOpen.take(200)}")
     }
     
     /**
@@ -205,6 +214,17 @@ class XMPPWebSocketConnection(
             
             when (authState) {
                 AuthState.STREAM_OPENED -> {
+                    // If server immediately rejects our framing as invalid XML, retry once with legacy open.
+                    if (!useLegacyStreamOpen &&
+                        xml.contains("<stream:error") &&
+                        (xml.contains("invalid-xml") || xml.contains("invalid_xml"))
+                    ) {
+                        Log.w(TAG, "⚠️ Server returned <invalid-xml/> after <open/>. Retrying with legacy <stream:stream>.")
+                        useLegacyStreamOpen = true
+                        // Restart stream on the same socket.
+                        sendStreamOpen()
+                        return
+                    }
                     // Check for server <open> response or stream features
                     if (xml.contains("<open") && xml.contains("urn:ietf:params:xml:ns:xmpp-framing")) {
                         Log.d(TAG, "📥 Received server <open> response")

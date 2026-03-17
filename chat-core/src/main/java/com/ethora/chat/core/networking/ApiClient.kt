@@ -67,7 +67,9 @@ object ApiClient {
         if (retrofit == null || currentBaseUrl != normalizedBaseUrl) {
             android.util.Log.d("ApiClient", "🚀 Initializing Retrofit for $normalizedBaseUrl (old: $currentBaseUrl)")
             val loggingInterceptor = HttpLoggingInterceptor().apply {
-                level = HttpLoggingInterceptor.Level.BODY
+                // BODY logging is very expensive on startup (large JSON + string copies).
+                // We already have lightweight request/response logging via apiDebugInterceptor.
+                level = HttpLoggingInterceptor.Level.NONE
             }
 
             fun isAuthEndpoint(url: String): Boolean {
