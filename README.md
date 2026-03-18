@@ -2,6 +2,8 @@
 
 This SDK gives you a ready-to-use chat UI + chat core for Android (Jetpack Compose).
 
+**Part of the [Ethora SDK ecosystem](https://github.com/dappros/ethora#ecosystem)** — see all SDKs, tools, and sample apps. Follow cross-SDK updates in the [Release Notes](https://github.com/dappros/ethora/blob/main/RELEASE-NOTES.md).
+
 ## Install Option 1: JitPack
 
 JitPack build page (already available): `https://jitpack.io/#dappros/ethora-sdk-android/v1.0.0`
