@@ -76,7 +76,7 @@ dependencies {
     if (useLocalEthora) {
         implementation(project(":ethora-component"))
     } else {
-        implementation("com.github.dappros.ethora-sdk-android:ethora-component:v1.0.0")
+        implementation("com.github.dappros.ethora-sdk-android:ethora-component:v1.0.1")
     }
 
     implementation(libs.androidx.core.ktx)
