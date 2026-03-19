@@ -20,13 +20,23 @@ plugins {
     `maven-publish`
 }
 
+// Ensure root project coordinates are set before any publishing configuration runs.
+group =
+    (findProperty("group") as String?)
+        ?: System.getenv("GROUP")
+        ?: "com.github.dappros"
+version =
+    (findProperty("version") as String?)
+        ?: System.getenv("VERSION")
+        ?: "local-SNAPSHOT"
+
 tasks.register("clean", Delete::class) {
     delete(rootProject.layout.buildDirectory)
 }
 
-allprojects {
-    group = (findProperty("group") as String?) ?: "com.github.dappros"
-    version = (findProperty("version") as String?) ?: "local-SNAPSHOT"
+subprojects {
+    group = rootProject.group
+    version = rootProject.version
     layout.buildDirectory.set(file("/tmp/android_build/${rootProject.name}/${project.name}"))
 }
 
