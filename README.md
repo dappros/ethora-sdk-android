@@ -29,11 +29,34 @@ App module `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.dappros:ethora-component:1.0.0")
+    implementation("com.github.dappros:ethora-sdk-android:1.0.19")
 }
 ```
 
-If you need to pin to a specific commit instead of a tag, replace `1.0.0` with a commit hash.
+Replace `1.0.19` with the latest tag. You can also pin to a specific commit hash instead of a tag.
+
+### 3. Enable Java 8+ desugaring (required)
+
+The SDK uses Java 8+ date/time APIs (`java.time.*`). Android SDK < 26 requires desugaring — **skip this and you'll get a runtime crash on older devices**.
+
+In your app module `build.gradle.kts`:
+
+```kotlin
+android {
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true  // ← add this
+    }
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")  // ← add this
+    implementation("com.github.dappros:ethora-sdk-android:1.0.19")
+}
+```
+
+> **Note:** `desugar_jdk_libs` version `2.1.4` is the minimum required. Always check [the releases page](https://github.com/google/desugar_jdk_libs/releases) for the latest.
 
 ## Install Option 2: Manual Source Copy
 
@@ -71,7 +94,26 @@ dependencies {
 }
 ```
 
-### 4. Ensure permissions
+### 4. Enable Java 8+ desugaring (required)
+
+Same as the JitPack install path — the SDK uses `java.time.*` APIs and requires desugaring on API < 26:
+
+```kotlin
+android {
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true  // ← add this
+    }
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")  // ← add this
+    implementation(project(":ethora-component"))
+}
+```
+
+### 5. Ensure permissions
 
 In `AndroidManifest.xml`:
 
@@ -209,10 +251,10 @@ fun ChatTabBadge() {
 This repo includes `jitpack.yml` and is configured for:
 
 - `groupId`: `com.github.dappros`
-- `artifactId`: `ethora-component`
+- `artifactId`: `ethora-sdk-android`
 
 Client dependency format:
 
 ```kotlin
-implementation("com.github.dappros:ethora-component:1.0.0")
+implementation("com.github.dappros:ethora-sdk-android:1.0.19")
 ```
