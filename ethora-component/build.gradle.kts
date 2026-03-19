@@ -137,12 +137,10 @@ dependencies {
 }
 
 afterEvaluate {
-    // gradle.startParameter.projectProperties reads -P flags directly from the
-    // command line, bypassing Gradle's project-scoping which fails in submodules.
     val cmdProps = gradle.startParameter.projectProperties
     val resolvedGroup = cmdProps["group"] ?: "com.github.dappros"
     val resolvedVersion = cmdProps["version"] ?: libs.versions.versionName.get()
-    println("[JitPack] Publishing ethora-component → $resolvedGroup:ethora-sdk-android:$resolvedVersion")
+    println("[JitPack] Publishing ethora-sdk-android → $resolvedGroup:ethora-sdk-android:$resolvedVersion")
     publishing {
         publications {
             create<MavenPublication>("release") {
