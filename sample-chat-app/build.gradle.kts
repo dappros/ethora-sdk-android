@@ -64,18 +64,9 @@ android {
     }
 }
 
-configurations.all {
-    resolutionStrategy {
-        dependencySubstitution {
-            substitute(module("com.github.dappros:ethora-sdk-android")).using(project(":ethora-component"))
-            substitute(module("com.github.dappros.ethora-sdk-android:ethora-component")).using(project(":ethora-component"))
-        }
-    }
-}
-
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
-    implementation("com.github.dappros:ethora-sdk-android:1.0.9")
+    implementation("com.github.dappros:ethora-sdk-android:v1.0.19")
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)

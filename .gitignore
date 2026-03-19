@@ -1,11 +1,6 @@
 /web
 /swift
 
-.gradle/
-build/
-local.properties
-.gradle_home/
-
 # Built application files
 *.apk
 *.aar
@@ -102,3 +97,4 @@ lint-results*.xml
 # /ethora-test-app
 
 .idea/
+.gradle-home/
