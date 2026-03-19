@@ -1,4 +1,2 @@
 jdk:
   - openjdk17
-install:
-  - ./gradlew clean -xtest -xlint assemble :publishRootPublicationToMavenLocal :ethora-component:publishReleasePublicationToMavenLocal
