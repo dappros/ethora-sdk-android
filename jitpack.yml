@@ -1,2 +1,6 @@
 jdk:
   - openjdk17
+
+install:
+  - VERSION=$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)
+  - ./gradlew clean :ethora-component:publishReleasePublicationToMavenLocal -Pgroup=com.github.dappros -Pversion=$VERSION -xtest -xlint
