@@ -97,3 +97,4 @@ lint-results*.xml
 # /ethora-test-app
 
 .idea/
+.gradle-home/

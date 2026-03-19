@@ -94,7 +94,13 @@ afterEvaluate {
                 from(components["release"])
                 groupId = "com.ethora"
                 artifactId = "chat-ui"
-                version = libs.versions.versionName.get()
+                
+                val providedVersion = project.findProperty("version")?.toString()
+                version = if (!providedVersion.isNullOrBlank() && providedVersion != "unspecified") {
+                    providedVersion
+                } else {
+                    System.getenv("VERSION") ?: libs.versions.versionName.get()
+                }
             }
         }
     }

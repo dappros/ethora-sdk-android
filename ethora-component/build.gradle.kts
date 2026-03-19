@@ -44,6 +44,12 @@ android {
         kotlinCompilerExtensionVersion = libs.versions.composeCompiler.get()
     }
 
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
+
     sourceSets {
         getByName("main") {
             java.srcDirs(
@@ -135,11 +141,15 @@ afterEvaluate {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
-                groupId = rootProject.findProperty("group")?.toString()
-                    ?: rootProject.group.toString()
+                groupId = "com.github.dappros.ethora-sdk-android"
                 artifactId = "ethora-component"
-                version = rootProject.findProperty("version")?.toString()
-                    ?: rootProject.version.toString()
+                
+                val providedVersion = project.findProperty("version")?.toString()
+                version = if (!providedVersion.isNullOrBlank() && providedVersion != "unspecified") {
+                    providedVersion
+                } else {
+                    System.getenv("VERSION") ?: libs.versions.versionName.get()
+                }
             }
         }
     }
