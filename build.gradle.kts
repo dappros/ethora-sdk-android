@@ -55,7 +55,7 @@ publishing {
                 val dependenciesNode = asNode().appendNode("dependencies")
                 val dependencyNode = dependenciesNode.appendNode("dependency")
                 dependencyNode.appendNode("groupId", resolvedGroupId)
-                dependencyNode.appendNode("artifactId", "ethora-component")
+                dependencyNode.appendNode("artifactId", artifactId)
                 dependencyNode.appendNode("version", resolvedVersion)
             }
         }
