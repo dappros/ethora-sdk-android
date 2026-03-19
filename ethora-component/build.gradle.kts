@@ -135,9 +135,12 @@ afterEvaluate {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
-                groupId = "com.github.dappros.ethora-sdk-android"
+                groupId = (findProperty("group") as String?) ?: "com.github.dappros.ethora-sdk-android"
                 artifactId = "ethora-component"
-                version = System.getenv("VERSION") ?: libs.versions.versionName.get()
+                version =
+                    (findProperty("version") as String?)
+                        ?: System.getenv("VERSION")
+                        ?: libs.versions.versionName.get()
             }
         }
     }

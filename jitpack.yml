@@ -2,4 +2,4 @@ jdk:
   - openjdk17
 
 install:
-  - ./gradlew :ethora-component:publishToMavenLocal
+  - ./gradlew clean :ethora-component:publishReleasePublicationToMavenLocal -Pgroup=com.github.dappros.ethora-sdk-android -Pversion=$VERSION -xtest -xlint
