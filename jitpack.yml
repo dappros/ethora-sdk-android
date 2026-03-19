@@ -3,3 +3,5 @@ jdk:
 
 install:
   - ./gradlew clean -xtest -xlint assemble :ethora-component:publishReleasePublicationToMavenLocal -Pversion=$VERSION -Pgroup=com.github.dappros
+  - echo "=== Maven Local contents ===" && find ~/.m2/repository/com -name "*.pom" -o -name "*.aar" 2>/dev/null | head -20 || echo "Nothing in ~/.m2"
+  - echo "=== Build dir contents ===" && find /tmp/android_build -name "*.pom" -o -name "*.aar" 2>/dev/null | head -20 || echo "Nothing in /tmp"
