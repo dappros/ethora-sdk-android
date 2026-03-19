@@ -2,4 +2,4 @@ jdk:
   - openjdk17
 
 install:
-  - ./gradlew clean -xtest -xlint assemble :publishRootPublicationToMavenLocal :ethora-component:publishReleasePublicationToMavenLocal -Pversion=$VERSION -Pgroup=com.github.dappros
+  - ./gradlew clean -xtest -xlint assemble :ethora-component:publishReleasePublicationToMavenLocal -Pversion=$VERSION -Pgroup=com.github.dappros
