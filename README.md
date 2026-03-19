@@ -29,7 +29,7 @@ App module `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.dappros.ethora-sdk-android:ethora-component:1.0.0")
+    implementation("com.github.dappros:ethora-component:1.0.0")
 }
 ```
 
@@ -208,11 +208,11 @@ fun ChatTabBadge() {
 
 This repo includes `jitpack.yml` and is configured for:
 
-- `groupId`: `com.github.dappros.ethora-sdk-android`
+- `groupId`: `com.github.dappros`
 - `artifactId`: `ethora-component`
 
 Client dependency format:
 
 ```kotlin
-implementation("com.github.dappros.ethora-sdk-android:ethora-component:1.0.0")
+implementation("com.github.dappros:ethora-component:1.0.0")
 ```
