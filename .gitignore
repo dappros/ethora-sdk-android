@@ -1,6 +1,11 @@
 /web
 /swift
 
+.gradle/
+build/
+local.properties
+.gradle_home/
+
 # Built application files
 *.apk
 *.aar

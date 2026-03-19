@@ -25,7 +25,24 @@ import com.ethora.chat.core.config.JWTLoginConfig
 import com.ethora.chat.core.config.XMPPSettings
 import com.ethora.chat.core.networking.ApiClient
 import com.ethora.chat.core.store.ChatStore
-
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.core.models.Room
+import androidx.compose.material3.ExperimentalMaterial3Api
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -37,11 +54,16 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SampleChatApp() {
     val missingConfigFields = remember {
         collectMissingConfigFields()
     }
+
+    var selectedTab by remember { mutableStateOf(0) }
+    val rooms by RoomStore.rooms.collectAsState()
+    val totalUnread = remember(rooms) { rooms.sumOf { it.unreadMessages } }
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
@@ -56,7 +78,7 @@ private fun SampleChatApp() {
                     baseUrl = BuildConfig.ETHORA_API_BASE_URL,
                     disableRooms = true,
                     defaultLogin = false,
-                    customAppToken = BuildConfig.ETHORA_APP_TOKEN,
+                    customAppToken = null,
                     chatHeaderSettings = ChatHeaderSettingsConfig(
                         roomTitleOverrides = mapOf(
                             BuildConfig.ETHORA_ROOM_JID to "Ethora Test Room"
@@ -86,11 +108,53 @@ private fun SampleChatApp() {
                 )
             }
 
-            Chat(
-                config = chatConfig,
-                roomJID = BuildConfig.ETHORA_ROOM_JID,
-                modifier = Modifier.fillMaxSize()
-            )
+            Scaffold(
+                bottomBar = {
+                    NavigationBar {
+                        NavigationBarItem(
+                            selected = selectedTab == 0,
+                            onClick = { selectedTab = 0 },
+                            icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
+                            label = { Text("Home") }
+                        )
+                        NavigationBarItem(
+                            selected = selectedTab == 1,
+                            onClick = { selectedTab = 1 },
+                            icon = {
+                                if (totalUnread > 0) {
+                                    BadgedBox(badge = { Badge { Text(totalUnread.toString()) } }) {
+                                        Icon(Icons.Default.Email, contentDescription = "Chat")
+                                    }
+                                } else {
+                                    Icon(Icons.Default.Email, contentDescription = "Chat")
+                                }
+                            },
+                            label = { Text("Chat") }
+                        )
+                    }
+                }
+            ) { paddingValues ->
+                Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
+                    if (selectedTab == 0) {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "Welcome to Home Tab!",
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                        }
+                    } else {
+                        Chat(
+                            config = chatConfig,
+                            roomJID = BuildConfig.ETHORA_ROOM_JID,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -104,9 +168,7 @@ private fun collectMissingConfigFields(): List<String> {
     if (BuildConfig.ETHORA_API_BASE_URL.startsWith("CHANGE_ME")) {
         fields += "ETHORA_API_BASE_URL"
     }
-    if (BuildConfig.ETHORA_APP_TOKEN.startsWith("CHANGE_ME")) {
-        fields += "ETHORA_APP_TOKEN"
-    }
+
     if (BuildConfig.ETHORA_ROOM_JID.startsWith("CHANGE_ME")) {
         fields += "ETHORA_ROOM_JID"
     }

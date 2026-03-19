@@ -44,6 +44,12 @@ android {
         kotlinCompilerExtensionVersion = libs.versions.composeCompiler.get()
     }
 
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
+
     sourceSets {
         getByName("main") {
             java.srcDirs(
