@@ -1,7 +1,2 @@
 jdk:
   - openjdk17
-
-install:
-  - VERSION=$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)
-  - ./gradlew clean :ethora-component:publishReleasePublicationToMavenLocal -Pgroup=com.github.dappros.ethora-sdk-android -Pversion=$VERSION -Dmaven.repo.local=$HOME/.m2/repository -xtest -xlint
-  - ls -la $HOME/.m2/repository/com/github/dappros/ethora-sdk-android/ethora-component/$VERSION

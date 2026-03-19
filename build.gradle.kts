@@ -29,7 +29,7 @@ tasks.register("publishToMavenLocal") {
 }
 
 allprojects {
-    group = (findProperty("group") as String?) ?: "com.github.dappros.ethora-sdk-android"
+    group = (findProperty("group") as String?) ?: "com.github.dappros"
     version = (findProperty("version") as String?) ?: "local-SNAPSHOT"
     layout.buildDirectory.set(file("/tmp/android_build/${rootProject.name}/${project.name}"))
 }
