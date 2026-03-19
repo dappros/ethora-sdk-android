@@ -135,8 +135,11 @@ afterEvaluate {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
-                // Let Gradle inherit group/version from subprojects block in root.
-                // JitPack rewrites group to com.github.{user}.{repo} automatically.
+                groupId = rootProject.findProperty("group")?.toString()
+                    ?: rootProject.group.toString()
+                artifactId = "ethora-component"
+                version = rootProject.findProperty("version")?.toString()
+                    ?: rootProject.version.toString()
             }
         }
     }
