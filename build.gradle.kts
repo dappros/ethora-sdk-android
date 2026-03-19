@@ -23,6 +23,11 @@ tasks.register("clean", Delete::class) {
     delete(rootProject.layout.buildDirectory)
 }
 
+// JitPack expects a root-level publishToMavenLocal task.
+tasks.register("publishToMavenLocal") {
+    dependsOn(":ethora-component:publishReleasePublicationToMavenLocal")
+}
+
 allprojects {
     layout.buildDirectory.set(file("/tmp/android_build/${rootProject.name}/${project.name}"))
 }
