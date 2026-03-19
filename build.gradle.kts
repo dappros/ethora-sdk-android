@@ -45,7 +45,6 @@ publishing {
         create<MavenPublication>("root") {
             val resolvedGroupId = project.group.toString()
             val resolvedVersion = project.version.toString()
-            val moduleGroupId = "$resolvedGroupId.ethora-sdk-android"
 
             groupId = resolvedGroupId
             artifactId = "ethora-sdk-android"
@@ -54,7 +53,7 @@ publishing {
             pom.withXml {
                 val dependenciesNode = asNode().appendNode("dependencies")
                 val dependencyNode = dependenciesNode.appendNode("dependency")
-                dependencyNode.appendNode("groupId", moduleGroupId)
+                dependencyNode.appendNode("groupId", resolvedGroupId)
                 dependencyNode.appendNode("artifactId", "ethora-component")
                 dependencyNode.appendNode("version", resolvedVersion)
             }

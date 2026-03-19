@@ -135,10 +135,8 @@ afterEvaluate {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
-                val baseGroup = rootProject.group.toString()
-                groupId = "$baseGroup.ethora-sdk-android"
-                artifactId = "ethora-component"
-                version = rootProject.version.toString()
+                // Let Gradle inherit group/version from subprojects block in root.
+                // JitPack rewrites group to com.github.{user}.{repo} automatically.
             }
         }
     }
