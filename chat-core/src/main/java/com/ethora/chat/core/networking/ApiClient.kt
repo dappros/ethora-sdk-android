@@ -157,17 +157,24 @@ object ApiClient {
                 val method = request.method
                 val url = request.url.toString()
                 val requestBody = request.body
-                val requestBodyPreview = if (requestBody != null && requestBody.contentType()?.type != "multipart") {
-                    try {
-                        val buffer = Buffer()
-                        requestBody.writeTo(buffer)
-                        buffer.readUtf8().take(1500)
-                    } catch (_: Exception) {
-                        "<unavailable>"
-                    }
-                } else {
-                    ""
-                }
+                var requestToSend = request
+                val requestBodyPreview =
+                    if (requestBody != null && requestBody.contentType()?.type != "multipart") {
+                        try {
+                            // Logging must not consume a one-shot request body.
+                            // We read it into bytes, recreate the RequestBody, and only then proceed.
+                            val buffer = Buffer()
+                            requestBody.writeTo(buffer)
+                            val bytes = buffer.readByteArray()
+                            val mediaType = requestBody.contentType()
+                            requestToSend = request.newBuilder()
+                                .method(method, okhttp3.RequestBody.create(mediaType, bytes))
+                                .build()
+                            bytes.toString(Charsets.UTF_8).take(1500)
+                        } catch (_: Exception) {
+                            "<unavailable>"
+                        }
+                    } else ""
 
                 val requestLog = buildString {
                     append("➡️ $method $url")
@@ -179,7 +186,7 @@ object ApiClient {
 
                 val startedAt = System.nanoTime()
                 try {
-                    val response = chain.proceed(request)
+                    val response = chain.proceed(requestToSend)
                     val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
                     val responseBodyPreview = try {
                         response.peekBody(1024 * 1024).string().take(4000)

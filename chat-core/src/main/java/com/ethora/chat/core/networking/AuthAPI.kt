@@ -18,13 +18,16 @@ import retrofit2.http.*
 interface AuthAPI {
     @POST("users/login-with-email")
     suspend fun loginWithEmail(
+        @Header("x-app-id") appId: String,
         @Body body: LoginRequest
     ): Response<LoginResponse>
 
     /** POST users/client with x-custom-token */
     @POST("users/client")
     suspend fun loginViaJWT(
-        @Header("x-custom-token") token: String
+        @Header("x-app-id") appId: String,
+        @Header("x-custom-token") token: String,
+        @Body body: ClientTypeRequest
     ): Response<LoginResponse>
 
     @POST("users/refresh-token")
@@ -40,6 +43,14 @@ interface AuthAPI {
         @Part file: MultipartBody.Part
     ): Response<JsonObject>
 }
+
+/**
+ * Some backend deployments expect a `type` field (e.g. "client") in the
+ * login request to distinguish the caller.
+ */
+data class ClientTypeRequest(
+    val type: String = "client"
+)
 
 /**
  * Login request
@@ -182,10 +193,11 @@ object AuthAPIHelper {
         password: String,
         baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): LoginResponse {
-        android.util.Log.d("AuthAPIHelper", "🌐 loginWithEmail: $baseUrl/users/client")
+        val appId = ChatStore.getEffectiveAppId()
+        android.util.Log.d("AuthAPIHelper", "🌐 loginWithEmail: baseUrl=$baseUrl appId=$appId")
         val api = ApiClient.createService<AuthAPI>(baseUrl)
         try {
-            val response = api.loginWithEmail(LoginRequest(email, password))
+            val response = api.loginWithEmail(appId, LoginRequest(email, password))
             if (response.isSuccessful) {
                 val body = response.body()!!
                 android.util.Log.d("AuthAPIHelper", "✅ loginWithEmail success: token=${body.token.take(10)}...")
@@ -224,8 +236,9 @@ object AuthAPIHelper {
         baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): LoginResponse? {
         return try {
+            val appId = ChatStore.getEffectiveAppId()
             val api = ApiClient.createService<AuthAPI>(baseUrl)
-            val response = api.loginViaJWT(token)
+            val response = api.loginViaJWT(appId, token, ClientTypeRequest())
             if (response.isSuccessful && response.body() != null) response.body() else null
         } catch (e: Exception) {
             android.util.Log.e("AuthAPIHelper", "JWT login failed", e)
