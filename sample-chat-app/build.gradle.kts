@@ -4,6 +4,36 @@ plugins {
     id("com.google.gms.google-services")
 }
 
+fun loadEnvFile(): Map<String, String> {
+    val candidates = listOf(
+        rootProject.file(".env"),
+        project.file(".env"),
+        file("${rootDir}/sample-chat-app/.env")
+    )
+    val envFile = candidates.firstOrNull { it.exists() && it.isFile } ?: return emptyMap()
+    return envFile.readLines()
+        .map { it.trim() }
+        .filter { it.isNotBlank() && !it.startsWith("#") && it.contains("=") }
+        .associate { line ->
+            val idx = line.indexOf("=")
+            val key = line.substring(0, idx).trim()
+            val value = line.substring(idx + 1).trim().removeSurrounding("\"")
+            key to value
+        }
+}
+
+val fileEnv = loadEnvFile()
+
+fun envOrDefault(vararg keys: String, default: String = ""): String {
+    for (key in keys) {
+        val fromSystem = System.getenv(key)?.takeIf { it.isNotBlank() }
+        if (fromSystem != null) return fromSystem
+        val fromFile = fileEnv[key]?.takeIf { it.isNotBlank() }
+        if (fromFile != null) return fromFile
+    }
+    return default
+}
+
 android {
     namespace = "com.ethora.samplechatapp"
     compileSdk = libs.versions.compileSdk.get().toInt()
@@ -20,17 +50,17 @@ android {
             useSupportLibrary = true
         }
 
-        buildConfigField("String", "ETHORA_APP_ID", "\"6998429ba125477a74a7dcef\"")
-        buildConfigField("String", "ETHORA_API_BASE_URL", "\"https://api-dev.preshent.com/v1/\"")
-        buildConfigField("String", "ETHORA_USER_JWT", "\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7InR5cGUiOiJjbGllbnQiLCJ1c2VySWQiOiIwMTk5ZGRiNS1iZGE5LTc1NWEtYmRmMS0xYTdkMWNmYjdiZGEiLCJhcHBJZCI6IjY5YTgzYjczOTRjNzhiYzFlZDMyYWM3NSJ9fQ.TAFxbKnRrdq-CGnaxwDvh081XWCftJlOOs54W8w_i-o\"")
-        buildConfigField("String", "ETHORA_ROOM_JID", "\"6998429ba125477a74a7dcef_test-room-v\"")
-        buildConfigField("String", "ETHORA_XMPP_SERVER_URL", "\"wss://xmpp-dev.preshent.com/ws\"")
-        buildConfigField("String", "ETHORA_XMPP_HOST", "\"xmpp-dev.preshent.com\"")
-        buildConfigField("String", "ETHORA_XMPP_CONFERENCE", "\"conference.xmpp-dev.preshent.com\"")
+        buildConfigField("String", "ETHORA_APP_ID", "\"${envOrDefault("ETHORA_APP_ID", "APP_ID", default = "CHANGE_ME_APP_ID")}\"")
+        buildConfigField("String", "ETHORA_API_BASE_URL", "\"${envOrDefault("ETHORA_API_BASE_URL", "API_BASE_URL", default = "CHANGE_ME_API_BASE_URL")}\"")
+        buildConfigField("String", "ETHORA_USER_JWT", "\"${envOrDefault("ETHORA_USER_JWT", "USER_TOKEN", default = "")}\"")
+        buildConfigField("String", "ETHORA_ROOM_JID", "\"${envOrDefault("ETHORA_ROOM_JID", "ROOM_JID", default = "")}\"")
+        buildConfigField("String", "ETHORA_XMPP_SERVER_URL", "\"${envOrDefault("ETHORA_XMPP_SERVER_URL", "XMPP_SERVER_URL", default = "CHANGE_ME_XMPP_SERVER_URL")}\"")
+        buildConfigField("String", "ETHORA_XMPP_HOST", "\"${envOrDefault("ETHORA_XMPP_HOST", "XMPP_HOST", default = "CHANGE_ME_XMPP_HOST")}\"")
+        buildConfigField("String", "ETHORA_XMPP_CONFERENCE", "\"${envOrDefault("ETHORA_XMPP_CONFERENCE", "XMPP_CONFERENCE", default = "CHANGE_ME_XMPP_CONFERENCE")}\"")
         buildConfigField(
             "String",
             "ETHORA_DNS_FALLBACK_OVERRIDES",
-            "\"api-dev.preshent.com=34.174.203.35,xmpp-dev.preshent.com=34.174.203.35,conference.xmpp-dev.preshent.com=34.174.203.35\""
+            "\"${envOrDefault("ETHORA_DNS_FALLBACK_OVERRIDES", "DNS_FALLBACK_OVERRIDES", default = "")}\""
         )
     }
 
