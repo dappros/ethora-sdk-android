@@ -21,11 +21,16 @@ android {
 
         buildConfigField("String", "ETHORA_APP_ID", "\"6998429ba125477a74a7dcef\"")
         buildConfigField("String", "ETHORA_API_BASE_URL", "\"https://api-dev.preshent.com/v1/\"")
-        buildConfigField("String", "ETHORA_USER_JWT", "\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7InR5cGUiOiJjbGllbnQiLCJ1c2VySWQiOiJ1c2VyLXRlc3QtdiIsImFwcElkIjoiNjk5ODQyOWJhMTI1NDc3YTc0YTdkY2VmIn0sImlhdCI6MTc3MzkzNjQ5MywiZXhwIjoxNzczOTQwMDkzfQ.2pJkKcfm5iKUaKEjvIPBtskaVTx6SArWFxDlSsG9tgU\"")
+        buildConfigField("String", "ETHORA_USER_JWT", "\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7InR5cGUiOiJjbGllbnQiLCJ1c2VySWQiOiIwMTk5ZGRiNS1iZGE5LTc1NWEtYmRmMS0xYTdkMWNmYjdiZGEiLCJhcHBJZCI6IjY5YTgzYjczOTRjNzhiYzFlZDMyYWM3NSJ9fQ.TAFxbKnRrdq-CGnaxwDvh081XWCftJlOOs54W8w_i-o\"")
         buildConfigField("String", "ETHORA_ROOM_JID", "\"6998429ba125477a74a7dcef_test-room-v\"")
         buildConfigField("String", "ETHORA_XMPP_SERVER_URL", "\"wss://xmpp-dev.preshent.com/ws\"")
         buildConfigField("String", "ETHORA_XMPP_HOST", "\"xmpp-dev.preshent.com\"")
         buildConfigField("String", "ETHORA_XMPP_CONFERENCE", "\"conference.xmpp-dev.preshent.com\"")
+        buildConfigField(
+            "String",
+            "ETHORA_DNS_FALLBACK_OVERRIDES",
+            "\"api-dev.preshent.com=34.174.203.35,xmpp-dev.preshent.com=34.174.203.35,conference.xmpp-dev.preshent.com=34.174.203.35\""
+        )
     }
 
     buildTypes {

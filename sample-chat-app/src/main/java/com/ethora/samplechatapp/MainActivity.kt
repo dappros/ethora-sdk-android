@@ -41,16 +41,38 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import com.ethora.chat.core.store.RoomStore
-import com.ethora.chat.core.models.Room
 import androidx.compose.material3.ExperimentalMaterial3Api
+import com.ethora.chat.core.persistence.ChatDatabase
+import com.ethora.chat.core.persistence.ChatPersistenceManager
+import com.ethora.chat.core.persistence.LocalStorage
+import com.ethora.chat.core.persistence.MessageCache
+import com.ethora.chat.core.push.PushNotificationManager
+import com.ethora.chat.core.store.MessageLoader
+import com.ethora.chat.core.store.MessageStore
+import com.ethora.chat.core.store.ScrollPositionStore
+import com.ethora.chat.core.store.UserStore
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        initChatStores()
+        PushNotificationManager.initialize(this)
 
         setContent {
             SampleChatApp()
         }
+    }
+
+    private fun initChatStores() {
+        val context = applicationContext
+        val persistenceManager = ChatPersistenceManager(context)
+        val chatDatabase = ChatDatabase.getDatabase(context)
+        val messageCache = MessageCache(chatDatabase)
+        RoomStore.initialize(persistenceManager)
+        UserStore.initialize(persistenceManager)
+        MessageStore.initialize(messageCache)
+        ScrollPositionStore.initialize(context)
+        MessageLoader.initialize(LocalStorage(context))
     }
 }
 
@@ -73,22 +95,27 @@ private fun SampleChatApp() {
             }
 
             val chatConfig = remember {
+                val dnsOverrides = BuildConfig.ETHORA_DNS_FALLBACK_OVERRIDES
+                    .split(",")
+                    .mapNotNull { part ->
+                        val kv = part.split("=", limit = 2).map { it.trim() }
+                        if (kv.size == 2 && kv[0].isNotBlank() && kv[1].isNotBlank()) kv[0] to kv[1] else null
+                    }
+                    .toMap()
+                    .takeIf { it.isNotEmpty() }
                 ChatConfig(
                     appId = BuildConfig.ETHORA_APP_ID,
                     baseUrl = BuildConfig.ETHORA_API_BASE_URL,
-                    disableRooms = true,
+                    disableRooms = false,
                     defaultLogin = false,
                     customAppToken = null,
-                    chatHeaderSettings = ChatHeaderSettingsConfig(
-                        roomTitleOverrides = mapOf(
-                            BuildConfig.ETHORA_ROOM_JID to "Ethora Test Room"
-                        )
-                    ),
+                    chatHeaderSettings = ChatHeaderSettingsConfig(),
                     xmppSettings = XMPPSettings(
                         xmppServerUrl = BuildConfig.ETHORA_XMPP_SERVER_URL,
                         host = BuildConfig.ETHORA_XMPP_HOST,
                         conference = BuildConfig.ETHORA_XMPP_CONFERENCE
                     ),
+                    dnsFallbackOverrides = dnsOverrides,
                     jwtLogin = BuildConfig.ETHORA_USER_JWT
                         .takeIf { it.isNotBlank() }
                         ?.let { token ->
@@ -149,7 +176,7 @@ private fun SampleChatApp() {
                     } else {
                         Chat(
                             config = chatConfig,
-                            roomJID = BuildConfig.ETHORA_ROOM_JID,
+                            roomJID = null,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -169,9 +196,6 @@ private fun collectMissingConfigFields(): List<String> {
         fields += "ETHORA_API_BASE_URL"
     }
 
-    if (BuildConfig.ETHORA_ROOM_JID.startsWith("CHANGE_ME")) {
-        fields += "ETHORA_ROOM_JID"
-    }
     if (BuildConfig.ETHORA_XMPP_SERVER_URL.contains("CHANGE_ME")) {
         fields += "ETHORA_XMPP_SERVER_URL"
     }

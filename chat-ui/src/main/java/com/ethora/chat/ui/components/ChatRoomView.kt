@@ -146,15 +146,18 @@ fun ChatRoomView(
         showScrollToBottom = shouldShow
     }
     
-    // Track new messages when scrolled up
+    // Track new messages that arrive while user is NOT at the bottom.
+    // (Older messages loaded at the top must not increase unread counter.)
     LaunchedEffect(messages.size) {
-        if (messages.size > lastMessageCount && !showScrollToBottom) {
-            // New messages arrived but we're scrolled up
-            // Don't increment if we're already at bottom (will be handled by scroll effect)
-            val isAtBottom = listState.firstVisibleItemIndex == 0 && 
-                             listState.firstVisibleItemScrollOffset < 100
-            if (!isAtBottom) {
-                unreadCount += (messages.size - lastMessageCount)
+        if (messages.size > lastMessageCount) {
+            val delta = messages.size - lastMessageCount
+
+            // If we are loading older messages (pagination) - ignore for unread counter.
+            if (!isLoadingMore) {
+                val isAtBottomNow = !listState.canScrollForward
+                if (!isAtBottomNow) {
+                    unreadCount += delta
+                }
             }
         }
         lastMessageCount = messages.size
