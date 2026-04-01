@@ -82,7 +82,7 @@ In `AndroidManifest.xml`:
 
 Push settings must come from config/env, not hardcoded values.
 
-For `sample-chat-app`, create local file `sample-chat-app/.env` (do not commit it) and provide:
+For the main host app (`chat-app`), create local file `chat-app/.env` (do not commit it) and provide:
 
 ```env
 ETHORA_APPLICATION_ID=com.yourcompany.yourapp
@@ -104,7 +104,9 @@ ETHORA_DNS_FALLBACK_OVERRIDES=
 
 Add it manually to:
 
-- `sample-chat-app/google-services.json`
+- `chat-app/google-services.json`
+
+If you use another host module in your project, place `google-services.json` in that module root.
 
 Important:
 
