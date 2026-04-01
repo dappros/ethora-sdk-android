@@ -70,7 +70,6 @@ captures/
 
 # Google Services (e.g. APIs or Firebase)
 google-services.json
-!sample-chat-app/google-services.json
 
 # Freeline
 freeline.py

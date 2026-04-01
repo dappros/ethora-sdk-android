@@ -39,7 +39,7 @@ android {
     compileSdk = libs.versions.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "com.ethora"
+        applicationId = envOrDefault("ETHORA_APPLICATION_ID", "APPLICATION_ID", default = "com.ethora.samplechatapp")
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 1

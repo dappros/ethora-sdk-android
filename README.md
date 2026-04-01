@@ -78,6 +78,39 @@ In `AndroidManifest.xml`:
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 ```
 
+## Push Setup (Universal Config)
+
+Push settings must come from config/env, not hardcoded values.
+
+For `sample-chat-app`, create local file `sample-chat-app/.env` (do not commit it) and provide:
+
+```env
+ETHORA_APPLICATION_ID=com.yourcompany.yourapp
+ETHORA_APP_ID=YOUR_ETHORA_APP_ID
+ETHORA_API_BASE_URL=https://api.example.com/v1/
+ETHORA_USER_JWT=YOUR_JWT_OR_EMPTY
+ETHORA_ROOM_JID=OPTIONAL_ROOM_JID
+ETHORA_XMPP_SERVER_URL=wss://xmpp.example.com/ws
+ETHORA_XMPP_HOST=xmpp.example.com
+ETHORA_XMPP_CONFERENCE=conference.xmpp.example.com
+ETHORA_DNS_FALLBACK_OVERRIDES=
+```
+
+`applicationId` is now resolved from `ETHORA_APPLICATION_ID` / `APPLICATION_ID`.
+
+### google-services.json (manual)
+
+`google-services.json` is intentionally not stored in this repository.
+
+Add it manually to:
+
+- `sample-chat-app/google-services.json`
+
+Important:
+
+- In Firebase, Android app package name must match `ETHORA_APPLICATION_ID`.
+- If package names differ, FCM token and push delivery will fail.
+
 ## Chat Configuration
 
 The most reliable integration flow is:
