@@ -1,16 +1,32 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
-    id("com.google.gms.google-services")
+    id("com.google.gms.google-services") apply false
+}
+
+val hasGoogleServicesJson = listOf(
+    file("google-services.json"),
+    file("src/google-services.json"),
+    file("src/debug/google-services.json"),
+    file("src/release/google-services.json")
+).any { it.exists() }
+
+if (hasGoogleServicesJson) {
+    apply(plugin = "com.google.gms.google-services")
+    println("sample-chat-app: google-services.json found, enabling Firebase Google Services plugin")
+} else {
+    println("sample-chat-app: google-services.json not found, building without Google Services plugin")
 }
 
 fun loadEnvFile(): Map<String, String> {
     val candidates = listOf(
+        rootProject.file("chat-app/.env"),
         rootProject.file(".env"),
         project.file(".env"),
         file("${rootDir}/sample-chat-app/.env")
     )
     val envFile = candidates.firstOrNull { it.exists() && it.isFile } ?: return emptyMap()
+    println("sample-chat-app: using env file ${envFile.absolutePath}")
     return envFile.readLines()
         .map { it.trim() }
         .filter { it.isNotBlank() && !it.startsWith("#") && it.contains("=") }
@@ -39,7 +55,8 @@ android {
     compileSdk = libs.versions.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = envOrDefault("ETHORA_APPLICATION_ID", "APPLICATION_ID", default = "com.ethora.samplechatapp")
+        // Keep package aligned with IDE run target to avoid "Activity class does not exist" mismatch.
+        applicationId = "com.ethora"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 1
@@ -61,6 +78,11 @@ android {
             "String",
             "ETHORA_DNS_FALLBACK_OVERRIDES",
             "\"${envOrDefault("ETHORA_DNS_FALLBACK_OVERRIDES", "DNS_FALLBACK_OVERRIDES", default = "")}\""
+        )
+        println(
+            "sample-chat-app BuildConfig: applicationId=com.ethora, " +
+                "appId=${envOrDefault("ETHORA_APP_ID", "APP_ID", default = "CHANGE_ME_APP_ID")}, " +
+                "apiBase=${envOrDefault("ETHORA_API_BASE_URL", "API_BASE_URL", default = "CHANGE_ME_API_BASE_URL")}"
         )
     }
 
@@ -121,7 +143,7 @@ android {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
-    implementation("com.github.dappros:ethora-sdk-android:v1.0.19")
+    implementation(project(":ethora-component"))
     implementation(platform("com.google.firebase:firebase-bom:33.5.1"))
     implementation("com.google.firebase:firebase-common")
     implementation("com.google.firebase:firebase-messaging")

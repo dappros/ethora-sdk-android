@@ -6,13 +6,13 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
-        android:name=".EthoraApplication"
+        android:name="com.ethora.samplechatapp.EthoraApplication"
         android:allowBackup="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.SampleChatApp">
         <activity
-            android:name=".MainActivity"
+            android:name="com.ethora.samplechatapp.MainActivity"
             android:exported="true"
             android:launchMode="singleTop">
             <intent-filter>
@@ -22,7 +22,7 @@
             </intent-filter>
         </activity>
         <service
-            android:name=".EthoraFirebaseMessagingService"
+            android:name="com.ethora.samplechatapp.EthoraFirebaseMessagingService"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
