@@ -27,6 +27,9 @@ import org.jxmpp.jid.impl.JidCreate
 import org.jxmpp.jid.parts.Resourcepart
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.PriorityQueue
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * XMPP Client implementation using Smack library
@@ -38,6 +41,21 @@ class XMPPClient(
     /** DNS fallback overrides (host -> IP). Pass from ChatConfig so XMPP uses same overrides without relying on ChatStore at build time. */
     private val dnsFallbackOverrides: Map<String, String>? = null
 ) {
+    private enum class HistoryPriority(val weight: Int) {
+        ACTIVE(3),
+        SEND_ACK(2),
+        BACKGROUND(1)
+    }
+
+    private data class HistoryRequest(
+        val roomJid: String,
+        val max: Int,
+        val beforeMessageId: String?,
+        val priority: HistoryPriority,
+        val createdAt: Long,
+        val deferred: CompletableDeferred<List<Message>>
+    )
+
     private val TAG = "XMPPClient"
 
     private var delegate: XMPPClientDelegate? = null
@@ -81,6 +99,22 @@ class XMPPClient(
     private val activeMUCs = ConcurrentHashMap<String, MultiUserChat>()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val historyQoS = settings?.historyQoS
+        ?: com.ethora.chat.core.config.HistoryQoSSettings()
+    private val historyQueueMutex = Mutex()
+    private val historyQueue = PriorityQueue<HistoryRequest> { a, b ->
+        if (a.priority.weight != b.priority.weight) {
+            b.priority.weight - a.priority.weight
+        } else {
+            a.createdAt.compareTo(b.createdAt)
+        }
+    }
+    private var historyProcessorJob: Job? = null
+    private var historyInFlightCount: Int = 0
+    private val historyRequestInFlight = ConcurrentHashMap<String, Deferred<List<Message>>>()
+    private val activeRoomBoostUntil = ConcurrentHashMap<String, Long>()
+    @Volatile
+    private var lastCriticalSendAtMs: Long = 0L
 
     /**
      * Set delegate
@@ -364,6 +398,14 @@ class XMPPClient(
                 presencesReady = false
                 clearPresenceResponseTracking()
                 activeMUCs.clear()
+                historyQueueMutex.withLock {
+                    historyQueue.clear()
+                    historyInFlightCount = 0
+                }
+                historyRequestInFlight.clear()
+                activeRoomBoostUntil.clear()
+                historyProcessorJob?.cancel()
+                historyProcessorJob = null
                 delegate?.onXMPPClientDisconnected(this@XMPPClient)
             } catch (e: Exception) {
                 Log.e(TAG, "Error disconnecting", e)
@@ -390,6 +432,7 @@ class XMPPClient(
         customId: String? = null
     ): String? {
         return try {
+            onCriticalSend()
             if (!isFullyConnected()) {
                 Log.e(TAG, "Cannot send message: not fully connected")
                 return null
@@ -436,6 +479,7 @@ class XMPPClient(
      */
     suspend fun sendMediaMessage(roomJID: String, mediaData: Map<String, Any>, messageId: String): Boolean {
         return try {
+            onCriticalSend()
             if (!isFullyConnected()) {
                 Log.w(TAG, "Send media: not fully connected yet, waiting for connection (ensureConnected)...")
                 if (!ensureConnected(15000)) {
@@ -491,96 +535,187 @@ class XMPPClient(
      * Note: Swift uses message ID (Int64) converted from message.id string using Number()
      */
     suspend fun getHistory(roomJID: String, max: Int = 30, beforeMessageId: String? = null): List<Message> {
-        return try {
-            if (!isFullyConnected()) {
-                Log.e(TAG, "Cannot get history: not fully connected")
-                return emptyList()
-            }
-            
-            val isInitialLoad = beforeMessageId == null
-            
-            if (useWebSocket && webSocketConnection != null) {
-                val queryId = "get-history:${System.currentTimeMillis()}"
-                val messages = mutableListOf<Message>()
-                val latch = kotlinx.coroutines.sync.Mutex()
-                var queryComplete = false
-                
-                val collector: (XMPPStanza) -> Unit = { stanza ->
-                    scope.launch {
-                        latch.lock()
-                        try {
-                            if (!queryComplete) {
-                                val parsedMessages = parseMAMResult(stanza, roomJID)
-                                val filteredMessages = parsedMessages.filter { message ->
-                                    message.roomJid == roomJID
-                                }
-                                if (filteredMessages.isNotEmpty()) {
-                                    com.ethora.chat.core.store.MessageStore.addMessages(roomJID, filteredMessages)
-                                    messages.addAll(filteredMessages)
-                                }
-                            }
-                        } finally {
-                            latch.unlock()
-                        }
-                    }
-                }
-                
-                webSocketConnection?.registerMAMCollector(queryId, collector)
-                
-                val sent = webSocketConnection?.sendMAMQuery(roomJID, max, beforeMessageId, queryId) ?: false
-                if (!sent) {
-                    Log.e(TAG, "Failed to send MAM query")
-                    webSocketConnection?.unregisterMAMCollector(queryId)
-                    return emptyList()
-                }
-                
-                val timeout = 15000L
-                val startTime = System.currentTimeMillis()
-                
-                while (!queryComplete && (System.currentTimeMillis() - startTime) < timeout) {
-                    kotlinx.coroutines.delay(100)
-                    if (webSocketConnection?.isMAMQueryComplete(queryId) == true) {
-                        queryComplete = true
-                    }
-                    latch.lock()
-                    try {
-                        if (messages.size >= max && (System.currentTimeMillis() - startTime) > 1000) {
-                            // Give it at least 1s even if we have max messages, to ensure <fin> is processed
-                            queryComplete = true
-                        }
-                    } finally {
-                        latch.unlock()
-                    }
-                }
-                
-                if (!queryComplete) {
-                    Log.w(TAG, "MAM query $queryId reached timeout. Collected ${messages.size}/$max messages")
-                }
-                
-                // Unregister collector and clear status
-                webSocketConnection?.unregisterMAMCollector(queryId)
-                webSocketConnection?.clearMAMQueryStatus(queryId)
-                
-                latch.lock()
-                try {
-                    val sortedMessages = if (isInitialLoad) {
-                        messages.sortedByDescending { it.timestamp ?: it.date.time }
-                    } else {
-                        messages.sortedBy { it.timestamp ?: it.date.time }
-                    }
-                    return sortedMessages
-                } finally {
-                    latch.unlock()
-                }
-            } else {
-                Log.e(TAG, "WebSocket connection not available for MAM query")
+        if (!isFullyConnected()) {
+            Log.e(TAG, "Cannot get history: not fully connected")
+            return emptyList()
+        }
+        if (!useWebSocket || webSocketConnection == null) {
+            Log.e(TAG, "WebSocket connection not available for MAM query")
+            return emptyList()
+        }
+
+        val requestKey = historyRequestKey(roomJID, max, beforeMessageId)
+        historyRequestInFlight[requestKey]?.let { existing ->
+            return try {
+                existing.await()
+            } catch (_: Exception) {
                 emptyList()
             }
+        }
+
+        val deferred = CompletableDeferred<List<Message>>()
+        historyRequestInFlight[requestKey] = deferred
+        val request = HistoryRequest(
+            roomJid = roomJID,
+            max = max,
+            beforeMessageId = beforeMessageId,
+            priority = resolveHistoryPriority(roomJID, beforeMessageId),
+            createdAt = System.currentTimeMillis(),
+            deferred = deferred
+        )
+
+        historyQueueMutex.withLock {
+            historyQueue.offer(request)
+            ensureHistoryProcessorLocked()
+        }
+
+        return try {
+            deferred.await()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get history", e)
             emptyList()
+        } finally {
+            historyRequestInFlight.remove(requestKey)
+        }
+    }
+
+    fun promoteRoomHistory(roomJID: String, ttlMs: Long = historyQoS.activeRoomBoostTtlMs) {
+        activeRoomBoostUntil[roomJID] = System.currentTimeMillis() + ttlMs
+    }
+
+    fun onCriticalSend() {
+        lastCriticalSendAtMs = System.currentTimeMillis()
+    }
+
+    private fun historyRequestKey(roomJID: String, max: Int, beforeMessageId: String?): String {
+        return "$roomJID|$max|${beforeMessageId ?: "__latest__"}"
+    }
+
+    private fun resolveHistoryPriority(roomJID: String, beforeMessageId: String?): HistoryPriority {
+        val now = System.currentTimeMillis()
+        val boostUntil = activeRoomBoostUntil[roomJID] ?: 0L
+        val isCurrentRoom = RoomStore.currentRoom.value?.jid == roomJID
+        if (beforeMessageId == null && (boostUntil > now || isCurrentRoom)) return HistoryPriority.ACTIVE
+        if ((now - lastCriticalSendAtMs) <= historyQoS.softPauseAfterSendMs) return HistoryPriority.SEND_ACK
+        return HistoryPriority.BACKGROUND
+    }
+
+    private fun ensureHistoryProcessorLocked() {
+        if (historyProcessorJob?.isActive == true) return
+        historyProcessorJob = scope.launch {
+            while (isActive) {
+                val request = historyQueueMutex.withLock {
+                    if (historyInFlightCount >= historyQoS.maxInFlightHistory || historyQueue.isEmpty()) {
+                        null
+                    } else {
+                        historyInFlightCount += 1
+                        historyQueue.poll()
+                    }
+                }
+
+                if (request == null) {
+                    val shouldStop = historyQueueMutex.withLock {
+                        historyQueue.isEmpty() && historyInFlightCount == 0
+                    }
+                    if (shouldStop) break
+                    delay(20)
+                    continue
+                }
+
+                scope.launch {
+                    try {
+                        val result = performHistoryRequest(
+                            roomJID = request.roomJid,
+                            max = request.max,
+                            beforeMessageId = request.beforeMessageId
+                        )
+                        request.deferred.complete(result)
+                    } catch (e: Exception) {
+                        request.deferred.complete(emptyList())
+                        Log.e(TAG, "History request failed for ${request.roomJid}", e)
+                    } finally {
+                        historyQueueMutex.withLock {
+                            historyInFlightCount = (historyInFlightCount - 1).coerceAtLeast(0)
+                        }
+                    }
+                }
+
+                val now = System.currentTimeMillis()
+                if (request.priority == HistoryPriority.BACKGROUND &&
+                    (now - lastCriticalSendAtMs) <= historyQoS.softPauseAfterSendMs
+                ) {
+                    delay(80)
+                }
+            }
+        }
+    }
+
+    private suspend fun performHistoryRequest(
+        roomJID: String,
+        max: Int,
+        beforeMessageId: String?
+    ): List<Message> {
+        val ws = webSocketConnection ?: return emptyList()
+        val isInitialLoad = beforeMessageId == null
+        val queryId = "get-history:${System.currentTimeMillis()}:${roomJID.hashCode()}"
+        val messages = mutableListOf<Message>()
+        val latch = Mutex()
+        var queryComplete = false
+
+        val collector: (XMPPStanza) -> Unit = { stanza ->
+            scope.launch {
+                latch.withLock {
+                    if (queryComplete) return@withLock
+                    val parsedMessages = parseMAMResult(stanza, roomJID)
+                    val filteredMessages = parsedMessages.filter { message ->
+                        message.roomJid == roomJID
+                    }
+                    if (filteredMessages.isNotEmpty()) {
+                        com.ethora.chat.core.store.MessageStore.addMessages(roomJID, filteredMessages)
+                        messages.addAll(filteredMessages)
+                    }
+                }
+            }
+        }
+
+        ws.registerMAMCollector(queryId, collector)
+        try {
+            val sent = ws.sendMAMQuery(roomJID, max, beforeMessageId, queryId)
+            if (!sent) {
+                Log.e(TAG, "Failed to send MAM query")
+                return emptyList()
+            }
+
+            val timeout = 15000L
+            val startTime = System.currentTimeMillis()
+            while (!queryComplete && (System.currentTimeMillis() - startTime) < timeout) {
+                delay(100)
+                if (ws.isMAMQueryComplete(queryId)) {
+                    queryComplete = true
+                }
+                latch.withLock {
+                    if (messages.size >= max && (System.currentTimeMillis() - startTime) > 1000) {
+                        queryComplete = true
+                    }
+                }
+            }
+
+            if (!queryComplete) {
+                Log.w(TAG, "MAM query $queryId reached timeout. Collected ${messages.size}/$max messages")
+            }
+
+            return latch.withLock {
+                if (isInitialLoad) {
+                    messages.sortedByDescending { it.timestamp ?: it.date.time }
+                } else {
+                    messages.sortedBy { it.timestamp ?: it.date.time }
+                }
+            }
+        } finally {
+            ws.unregisterMAMCollector(queryId)
+            ws.clearMAMQueryStatus(queryId)
         }
     }
     

@@ -83,6 +83,7 @@ object MessageLoader {
             val prioritizedRooms = if (activeRoomJid != null) {
                 val activeRoom = roomsToLoad.find { it.jid == activeRoomJid }
                 if (activeRoom != null) {
+                    xmppClient.promoteRoomHistory(activeRoom.jid)
                     listOf(activeRoom) + roomsToLoad.filter { it.jid != activeRoomJid }
                 } else {
                     roomsToLoad
@@ -114,6 +115,9 @@ object MessageLoader {
                                 }
                                 
                                 // 3. Request History
+                                if (room.jid == activeRoomJid) {
+                                    xmppClient.promoteRoomHistory(room.jid)
+                                }
                                 Log.d(TAG, "  📜 Requesting history for ${room.jid}")
                                 val history = xmppClient.getHistory(room.jid, max = messagesPerRoom, beforeMessageId = null)
                                 if (history.isNotEmpty()) {
