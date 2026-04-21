@@ -20,10 +20,46 @@ plugins {
     id("com.google.gms.google-services") version "4.4.4" apply false
 }
 
+group =
+    (findProperty("group") as String?)
+        ?: System.getenv("GROUP")
+        ?: "com.github.dappros"
+version =
+    (findProperty("version") as String?)
+        ?: System.getenv("VERSION")
+        ?: "local-SNAPSHOT"
+
 tasks.register("clean", Delete::class) {
     delete(rootProject.layout.buildDirectory)
 }
 
-allprojects {
+subprojects {
+    group = rootProject.group
+    version = rootProject.version
     layout.buildDirectory.set(file("/tmp/android_build/${rootProject.name}/${project.name}"))
+}
+
+publishing {
+    publications {
+        create<MavenPublication>("root") {
+            val resolvedGroupId = project.group.toString()
+            val resolvedVersion = project.version.toString()
+
+            groupId = resolvedGroupId
+            artifactId = "ethora-sdk-android"
+            version = resolvedVersion
+            pom.packaging = "pom"
+            pom.withXml {
+                val dependenciesNode = asNode().appendNode("dependencies")
+                val dependencyNode = dependenciesNode.appendNode("dependency")
+                dependencyNode.appendNode("groupId", resolvedGroupId)
+                dependencyNode.appendNode("artifactId", "ethora-component")
+                dependencyNode.appendNode("version", resolvedVersion)
+            }
+        }
+    }
+}
+
+tasks.named("publishToMavenLocal") {
+    dependsOn(":ethora-component:publishReleasePublicationToMavenLocal")
 }

@@ -137,13 +137,17 @@ dependencies {
 }
 
 afterEvaluate {
+    val cmdProps = gradle.startParameter.projectProperties
+    val resolvedGroup = cmdProps["group"] ?: "com.github.dappros"
+    val resolvedVersion = cmdProps["version"] ?: libs.versions.versionName.get()
+    println("[JitPack] Publishing ethora-sdk-android → $resolvedGroup:ethora-sdk-android:$resolvedVersion")
     publishing {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
-                groupId = "com.github.dappros.ethora-sdk-android"
-                artifactId = "ethora-component"
-                version = System.getenv("VERSION") ?: libs.versions.versionName.get()
+                groupId = resolvedGroup
+                artifactId = "ethora-sdk-android"
+                version = resolvedVersion
             }
         }
     }
