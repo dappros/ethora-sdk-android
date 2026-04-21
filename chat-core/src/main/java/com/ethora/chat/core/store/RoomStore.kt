@@ -1,6 +1,7 @@
 package com.ethora.chat.core.store
 
 import com.ethora.chat.core.models.Room
+import com.ethora.chat.core.models.HistoryPreloadState
 import com.ethora.chat.core.persistence.ChatPersistenceManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +19,7 @@ import kotlinx.coroutines.Job
  * Persists rooms to DataStore (matches web: redux-persist with localStorage)
  */
 object RoomStore {
+    private const val MAX_UNREAD_COUNT = 99
     private val _rooms = MutableStateFlow<List<Room>>(emptyList())
     val rooms: StateFlow<List<Room>> = _rooms.asStateFlow()
 
@@ -200,6 +202,10 @@ object RoomStore {
         val currentStates = _roomLoadingStates.value.toMutableMap()
         currentStates[roomJid] = loading
         _roomLoadingStates.value = currentStates
+        setHistoryPreloadState(
+            roomJid,
+            if (loading) HistoryPreloadState.LOADING else HistoryPreloadState.IDLE
+        )
     }
     
     /**
@@ -313,25 +319,36 @@ object RoomStore {
         
         // Don't count unread for the currently active room
         if (room != null && roomJid != currentRoom?.jid && room.lastViewedTimestamp != null && room.lastViewedTimestamp != 0L) {
-            val unreadCount = messages.count { message ->
+            val unreadCountRaw = messages.count { message ->
                 // Exclude delimiter messages
                 message.id != "delimiter-new" &&
                 // Count messages newer than lastViewedTimestamp
                 (message.timestamp ?: message.date.time) > room.lastViewedTimestamp!!
             }
+            val unreadCount = unreadCountRaw.coerceAtMost(MAX_UNREAD_COUNT)
+            val isUnreadCapped = unreadCountRaw > MAX_UNREAD_COUNT
             
-            if (room.unreadMessages != unreadCount) {
-                val updatedRoom = room.copy(unreadMessages = unreadCount)
+            if (room.unreadMessages != unreadCount || room.unreadCapped != isUnreadCapped) {
+                val updatedRoom = room.copy(
+                    unreadMessages = unreadCount,
+                    unreadCapped = isUnreadCapped
+                )
                 updateRoom(updatedRoom)
                 android.util.Log.d("RoomStore", "📊 Updated unread count for $roomJid: $unreadCount")
             }
         } else if (room != null && (room.lastViewedTimestamp == null || room.lastViewedTimestamp == 0L)) {
             // If lastViewedTimestamp is 0 or null, all messages are read
-            if (room.unreadMessages != 0) {
-                val updatedRoom = room.copy(unreadMessages = 0)
+            if (room.unreadMessages != 0 || room.unreadCapped) {
+                val updatedRoom = room.copy(unreadMessages = 0, unreadCapped = false)
                 updateRoom(updatedRoom)
             }
         }
+    }
+
+    fun setHistoryPreloadState(roomJid: String, state: HistoryPreloadState) {
+        val room = getRoomByJid(roomJid) ?: return
+        if (room.historyPreloadState == state) return
+        updateRoom(room.copy(historyPreloadState = state))
     }
     
     /**

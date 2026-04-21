@@ -25,6 +25,13 @@ enum class RoomType {
     PRIVATE
 }
 
+enum class HistoryPreloadState {
+    IDLE,
+    LOADING,
+    DONE,
+    ERROR
+}
+
 /**
  * Message statistics
  */
@@ -62,10 +69,12 @@ data class Room(
     val lastViewedTimestamp: Long? = null,
     val unreadMessages: Int = 0,
     val pendingMessages: Int = 0,
+    val unreadCapped: Boolean = false,
     val noMessages: Boolean? = null,
     val role: String? = null,
     val messageStats: MessageStats? = null,
-    val historyComplete: Boolean? = null
+    val historyComplete: Boolean? = null,
+    val historyPreloadState: HistoryPreloadState = HistoryPreloadState.IDLE
 )
 
 /**
@@ -119,9 +128,11 @@ fun createRoomFromApi(apiRoom: ApiRoom, conferenceDomain: String, usersArrayLeng
         lastViewedTimestamp = 0,
         unreadMessages = 0,
         pendingMessages = 0,
+        unreadCapped = false,
         noMessages = null,
         role = null,
         messageStats = null,
-        historyComplete = null
+        historyComplete = null,
+        historyPreloadState = HistoryPreloadState.IDLE
     )
 }

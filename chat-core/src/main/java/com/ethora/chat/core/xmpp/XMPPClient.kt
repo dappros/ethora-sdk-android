@@ -6,6 +6,7 @@ import com.ethora.chat.core.config.XMPPSettings
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.core.store.LogStore
 import kotlinx.coroutines.*
 import org.jivesoftware.smack.*
 import org.jivesoftware.smack.chat2.Chat
@@ -113,6 +114,7 @@ class XMPPClient(
     private var historyInFlightCount: Int = 0
     private val historyRequestInFlight = ConcurrentHashMap<String, Deferred<List<Message>>>()
     private val activeRoomBoostUntil = ConcurrentHashMap<String, Long>()
+    private val sentMessageAtMs = ConcurrentHashMap<String, Long>()
     @Volatile
     private var lastCriticalSendAtMs: Long = 0L
 
@@ -259,6 +261,7 @@ class XMPPClient(
                     }
                     
                     override fun onMessageReceived(client: XMPPClient, message: Message) {
+                        maybeLogSendEchoLatency(message)
                         delegate?.onMessageReceived(this@XMPPClient, message)
                     }
                     
@@ -404,6 +407,7 @@ class XMPPClient(
                 }
                 historyRequestInFlight.clear()
                 activeRoomBoostUntil.clear()
+                sentMessageAtMs.clear()
                 historyProcessorJob?.cancel()
                 historyProcessorJob = null
                 delegate?.onXMPPClientDisconnected(this@XMPPClient)
@@ -433,6 +437,7 @@ class XMPPClient(
     ): String? {
         return try {
             onCriticalSend()
+            val sendStartedAt = System.currentTimeMillis()
             if (!isFullyConnected()) {
                 Log.e(TAG, "Cannot send message: not fully connected")
                 return null
@@ -446,7 +451,7 @@ class XMPPClient(
             if (useWebSocket && webSocketConnection != null) {
                 val wsConnection = webSocketConnection
                 if (wsConnection != null) {
-                    return wsConnection.sendMessage(
+                    val sentId = wsConnection.sendMessage(
                         roomJID, 
                         messageBody,
                         firstName,
@@ -458,11 +463,19 @@ class XMPPClient(
                         mainMessage,
                         customId
                     )
+                    if (!sentId.isNullOrBlank()) {
+                        sentMessageAtMs[sentId] = sendStartedAt
+                    }
+                    if (!customId.isNullOrBlank()) {
+                        sentMessageAtMs[customId] = sendStartedAt
+                    }
+                    return sentId
                 }
             } else if (connection != null) {
                 val muc = getOrCreateMUC(roomJID)
                 val messageId = customId ?: "msg_${System.currentTimeMillis()}"
                 muc.sendMessage(messageBody)
+                sentMessageAtMs[messageId] = sendStartedAt
                 return messageId
             }
             null
@@ -623,22 +636,35 @@ class XMPPClient(
                     delay(20)
                     continue
                 }
+                val queueWaitMs = (System.currentTimeMillis() - request.createdAt).coerceAtLeast(0L)
+                LogStore.info(
+                    "Perf",
+                    "history_queue_wait_ms=$queueWaitMs priority=${request.priority} room=${request.roomJid} in_flight=$historyInFlightCount"
+                )
 
                 scope.launch {
                     try {
+                        val startedAt = System.currentTimeMillis()
                         val result = performHistoryRequest(
                             roomJID = request.roomJid,
                             max = request.max,
                             beforeMessageId = request.beforeMessageId
                         )
+                        val duration = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                        LogStore.success(
+                            "Perf",
+                            "history_request_ms=$duration room=${request.roomJid} result_count=${result.size}"
+                        )
                         request.deferred.complete(result)
                     } catch (e: Exception) {
                         request.deferred.complete(emptyList())
                         Log.e(TAG, "History request failed for ${request.roomJid}", e)
+                        LogStore.error("Perf", "history_request_failed room=${request.roomJid} error=${e.message}")
                     } finally {
                         historyQueueMutex.withLock {
                             historyInFlightCount = (historyInFlightCount - 1).coerceAtLeast(0)
                         }
+                        LogStore.info("Perf", "history_inflight_count=$historyInFlightCount")
                     }
                 }
 
@@ -649,6 +675,21 @@ class XMPPClient(
                     delay(80)
                 }
             }
+        }
+    }
+
+    private fun maybeLogSendEchoLatency(message: Message) {
+        val candidateIds = listOfNotNull(
+            message.id.takeIf { it.isNotBlank() },
+            message.xmppId?.takeIf { it.isNotBlank() }
+        )
+        if (candidateIds.isEmpty()) return
+        val now = System.currentTimeMillis()
+        for (id in candidateIds) {
+            val startedAt = sentMessageAtMs.remove(id) ?: continue
+            val latency = (now - startedAt).coerceAtLeast(0L)
+            LogStore.success("Perf", "send_click_to_echo_ms=$latency id=$id room=${message.roomJid}")
+            break
         }
     }
 

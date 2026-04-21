@@ -2,6 +2,7 @@ package com.ethora.chat.core.store
 
 import android.util.Log
 import com.ethora.chat.core.models.Room
+import com.ethora.chat.core.models.HistoryPreloadState
 import com.ethora.chat.core.persistence.LocalStorage
 import com.ethora.chat.core.store.RoomsPresenceInitializer
 import com.ethora.chat.core.xmpp.XMPPClient
@@ -118,16 +119,20 @@ object MessageLoader {
                                 if (room.jid == activeRoomJid) {
                                     xmppClient.promoteRoomHistory(room.jid)
                                 }
+                                RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.LOADING)
                                 Log.d(TAG, "  📜 Requesting history for ${room.jid}")
                                 val history = xmppClient.getHistory(room.jid, max = messagesPerRoom, beforeMessageId = null)
                                 if (history.isNotEmpty()) {
                                     Log.d(TAG, "  ✅ Received ${history.size} messages for ${room.jid}")
                                     MessageStore.addMessages(room.jid, history)
+                                    RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.DONE)
                                 } else {
                                     Log.d(TAG, "  ℹ️ No history found for ${room.jid}")
+                                    RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.DONE)
                                 }
                             } catch (e: Exception) {
                                 Log.e(TAG, "Error loading messages for room ${room.jid}", e)
+                                RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.ERROR)
                             }
                             Unit
                         }
