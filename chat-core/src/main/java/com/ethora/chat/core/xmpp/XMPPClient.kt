@@ -66,9 +66,9 @@ class XMPPClient(
     private var chatManager: ChatManager? = null
     private var mucManager: MultiUserChatManager? = null
 
-    private val devServer: String = settings?.devServer ?: "wss://xmpp.ethoradev.com:5443/ws"
-    private val host: String = settings?.host ?: "xmpp.ethoradev.com"
-    private val conference: String = settings?.conference ?: "conference.xmpp.ethoradev.com"
+    private val devServer: String = settings?.devServer ?: "wss://xmpp.chat.ethora.com/ws"
+    private val host: String = settings?.host ?: "xmpp.chat.ethora.com"
+    private val conference: String = settings?.conference ?: "conference.xmpp.chat.ethora.com"
     // Use per-client resource so same account can stay online across multiple sessions/devices.
     private val resource: String = "android-${UUID.randomUUID().toString().take(8)}"
     

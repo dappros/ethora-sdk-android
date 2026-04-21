@@ -383,7 +383,8 @@ fun ChatRoomView(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 0.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        // Keep messages anchored to the bottom when there are few items.
+                        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.Bottom),
                         reverseLayout = false
                     ) {
                         items(
