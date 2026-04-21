@@ -18,19 +18,19 @@ object AppConfig {
     /**
      * Default base URL for API calls
      */
-    const val defaultBaseURL: String = "https://api.ethoradev.com/v1"
+    const val defaultBaseURL: String = "https://api.chat.ethora.com/v1"
 
     /**
      * Default conference domain for MUC (Multi-User Chat)
      */
-    const val defaultConferenceDomain: String = "conference.xmpp.ethoradev.com"
+    const val defaultConferenceDomain: String = "conference.xmpp.chat.ethora.com"
 
     /**
      * Default XMPP settings
      */
     val defaultXMPPSettings: XMPPSettings = XMPPSettings(
-        xmppServerUrl = "wss://xmpp.ethoradev.com:5443/ws",
-        host = "xmpp.ethoradev.com",
+        xmppServerUrl = "wss://xmpp.chat.ethora.com/ws",
+        host = "xmpp.chat.ethora.com",
         conference = defaultConferenceDomain,
         xmppPingOnSendEnabled = true
     )

@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -16,10 +17,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -41,6 +44,7 @@ fun ChatInput(
     onEditCancel: (() -> Unit)? = null,
     replyingToMessage: com.ethora.chat.core.models.Message? = null,
     onReplyCancel: (() -> Unit)? = null,
+    canSendMessage: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -341,6 +345,7 @@ fun ChatInput(
                 if (text.isNotBlank() || selectedFile != null || editText != null) {
                     FloatingActionButton(
                         onClick = {
+                            if (!canSendMessage) return@FloatingActionButton
                             if (selectedFile != null && onSendMedia != null && editText == null) {
                                 val (file, mimeType) = selectedFile!!
                                 onSendMedia(file, mimeType)
@@ -353,7 +358,11 @@ fun ChatInput(
                         modifier = Modifier
                             .size(44.dp)
                             .offset(y = (-3).dp),
-                        containerColor = MaterialTheme.colorScheme.primary,
+                        containerColor = if (canSendMessage) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        },
                         elevation = FloatingActionButtonDefaults.elevation(
                             defaultElevation = 4.dp,
                             pressedElevation = 6.dp
@@ -362,7 +371,11 @@ fun ChatInput(
                         Icon(
                             imageVector = Icons.Default.Send,
                             contentDescription = "Send",
-                            tint = MaterialTheme.colorScheme.onPrimary,
+                            tint = if (canSendMessage) {
+                                MaterialTheme.colorScheme.onPrimary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            },
                             modifier = Modifier.size(20.dp)
                         )
                     }
@@ -399,52 +412,71 @@ fun ChatInput(
     }
 
     if (showAttachSheet && onSendMedia != null && editText == null) {
-        ModalBottomSheet(
-            onDismissRequest = { showAttachSheet = false }
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+        Dialog(onDismissRequest = { showAttachSheet = false }) {
+            Box(
+                modifier = Modifier.fillMaxSize()
             ) {
-                Text(
-                    text = "Attach media",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(bottom = 8.dp)
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.35f))
+                        .clickable { showAttachSheet = false }
                 )
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .clickable(enabled = false) {},
+                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 2.dp,
+                    shadowElevation = 8.dp
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Attach media",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
 
-                ListItem(
-                    headlineContent = { Text("Media") },
-                    supportingContent = { Text("Photo or video from gallery") },
-                    leadingContent = { Icon(Icons.Default.Image, contentDescription = null) },
-                    modifier = Modifier.clickable {
-                        showAttachSheet = false
-                        mediaPickerLauncher.launch(arrayOf("image/*", "video/*"))
+                        ListItem(
+                            headlineContent = { Text("Media") },
+                            supportingContent = { Text("Photo or video from gallery") },
+                            leadingContent = { Icon(Icons.Default.Image, contentDescription = null) },
+                            modifier = Modifier.clickable {
+                                showAttachSheet = false
+                                mediaPickerLauncher.launch(arrayOf("image/*", "video/*"))
+                            }
+                        )
+
+                        ListItem(
+                            headlineContent = { Text("Camera") },
+                            supportingContent = { Text("Take a photo") },
+                            leadingContent = { Icon(Icons.Default.PhotoCamera, contentDescription = null) },
+                            modifier = Modifier.clickable {
+                                showAttachSheet = false
+                                cameraLauncher.launch(null)
+                            }
+                        )
+
+                        ListItem(
+                            headlineContent = { Text("File") },
+                            supportingContent = { Text("PDF, docs and other files") },
+                            leadingContent = { Icon(Icons.Default.InsertDriveFile, contentDescription = null) },
+                            modifier = Modifier.clickable {
+                                showAttachSheet = false
+                                filePickerLauncher.launch(arrayOf("*/*"))
+                            }
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
                     }
-                )
-
-                ListItem(
-                    headlineContent = { Text("Camera") },
-                    supportingContent = { Text("Take a photo") },
-                    leadingContent = { Icon(Icons.Default.PhotoCamera, contentDescription = null) },
-                    modifier = Modifier.clickable {
-                        showAttachSheet = false
-                        cameraLauncher.launch(null)
-                    }
-                )
-
-                ListItem(
-                    headlineContent = { Text("File") },
-                    supportingContent = { Text("PDF, docs and other files") },
-                    leadingContent = { Icon(Icons.Default.InsertDriveFile, contentDescription = null) },
-                    modifier = Modifier.clickable {
-                        showAttachSheet = false
-                        filePickerLauncher.launch(arrayOf("*/*"))
-                    }
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
+                }
             }
         }
     }

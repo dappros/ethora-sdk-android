@@ -3,9 +3,14 @@ package com.ethora.chat.ui.components
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ethora.chat.core.config.AppConfig
+import com.ethora.chat.core.config.ChatEvent
+import com.ethora.chat.core.config.MessageType
+import com.ethora.chat.core.config.OutgoingSendInput
+import com.ethora.chat.core.config.SendDecision
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.networking.AuthAPIHelper
+import com.ethora.chat.core.store.ChatEventDispatcher
 import com.ethora.chat.core.store.MessageStore
 import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.store.ChatStore
@@ -168,6 +173,14 @@ class ChatRoomViewModel(
             val currentUser = UserStore.currentUser.value
             if (currentUser == null) {
                 android.util.Log.e("ChatRoomViewModel", "Cannot send message: user is null")
+                ChatEventDispatcher.emit(
+                    ChatEvent.MessageFailed(
+                        roomJid = room.jid,
+                        messageType = MessageType.TEXT,
+                        text = text,
+                        error = IllegalStateException("User is null")
+                    )
+                )
                 return@launch
             }
             
@@ -175,6 +188,24 @@ class ChatRoomViewModel(
                 android.util.Log.w("ChatRoomViewModel", "Cannot send empty message")
                 return@launch
             }
+
+            val config = ChatStore.getConfig()
+            val interceptionInput = OutgoingSendInput(
+                roomJid = room.jid,
+                messageType = MessageType.TEXT,
+                text = text,
+                parentMessageId = parentMessageId
+            )
+            val sendDecision = config?.onBeforeSend?.invoke(interceptionInput)
+            if (sendDecision is SendDecision.Cancel) return@launch
+
+            val effectiveInput = when (sendDecision) {
+                is SendDecision.Proceed -> sendDecision.input
+                else -> interceptionInput
+            }
+            val finalText = effectiveInput.text ?: text
+            val finalParentMessageId = effectiveInput.parentMessageId ?: parentMessageId
+            if (finalText.isBlank()) return@launch
             
             android.util.Log.d("ChatRoomViewModel", "Attempting to send message: '$text' to room: ${room.jid}")
             android.util.Log.d("ChatRoomViewModel", "  User: ${currentUser.firstName} ${currentUser.lastName}, xmppUsername: ${currentUser.xmppUsername}")
@@ -185,6 +216,14 @@ class ChatRoomViewModel(
                     android.util.Log.d("ChatRoomViewModel", "  XMPP not ready yet, waiting up to 15s for connection...")
                     if (!client.ensureConnected(15_000)) {
                         android.util.Log.e("ChatRoomViewModel", "Cannot send message: XMPP not connected after 15s")
+                        ChatEventDispatcher.emit(
+                            ChatEvent.MessageFailed(
+                                roomJid = room.jid,
+                                messageType = MessageType.TEXT,
+                                text = finalText,
+                                error = IllegalStateException("XMPP not connected")
+                            )
+                        )
                         return@launch
                     }
                 }
@@ -192,13 +231,13 @@ class ChatRoomViewModel(
             
             val messageId = xmppClient?.sendMessage(
                 roomJID = room.jid,
-                messageBody = text,
+                messageBody = finalText,
                 firstName = currentUser.firstName,
                 lastName = currentUser.lastName,
                 photo = currentUser.profileImage,
                 walletAddress = currentUser.walletAddress,
-                isReply = parentMessageId != null,
-                mainMessage = parentMessageId
+                isReply = finalParentMessageId != null,
+                mainMessage = finalParentMessageId
             )
             
             if (messageId != null) {
@@ -206,21 +245,38 @@ class ChatRoomViewModel(
                 // Set both id and xmppId to messageId for proper matching when server echo arrives
                 val optimisticMessage = Message(
                     id = messageId,
-                    body = text,
+                    body = finalText,
                     user = currentUser,
                     date = java.util.Date(),
                     roomJid = room.jid,
                     pending = true,
                     xmppId = messageId, // Set xmppId for bidirectional matching
                     xmppFrom = "${room.jid}/${currentUser.id}",
-                    isReply = parentMessageId != null,
-                    mainMessage = parentMessageId
+                    isReply = finalParentMessageId != null,
+                    mainMessage = finalParentMessageId
                 )
                 MessageStore.addMessage(room.jid, optimisticMessage)
                 android.util.Log.d("ChatRoomViewModel", "Created optimistic message with pending=true, ID: $messageId, xmppId: $messageId")
                 schedulePendingFallback(messageId)
+                ChatEventDispatcher.emit(
+                    ChatEvent.MessageSent(
+                        roomJid = room.jid,
+                        messageId = messageId,
+                        messageType = MessageType.TEXT,
+                        user = currentUser,
+                        text = finalText
+                    )
+                )
             } else {
                 android.util.Log.e("ChatRoomViewModel", "Failed to send message - sendMessage returned null")
+                ChatEventDispatcher.emit(
+                    ChatEvent.MessageFailed(
+                        roomJid = room.jid,
+                        messageType = MessageType.TEXT,
+                        text = finalText,
+                        error = IllegalStateException("sendMessage returned null")
+                    )
+                )
             }
         }
     }
@@ -443,22 +499,54 @@ class ChatRoomViewModel(
     fun sendMedia(file: File, mimeType: String, retryCount: Int = 0) {
         viewModelScope.launch {
             try {
+                val config = ChatStore.getConfig()
+                val interceptionInput = OutgoingSendInput(
+                    roomJid = room.jid,
+                    messageType = MessageType.MEDIA,
+                    fileName = file.name,
+                    mimeType = mimeType
+                )
+                val sendDecision = config?.onBeforeSend?.invoke(interceptionInput)
+                if (sendDecision is SendDecision.Cancel) return@launch
+                val effectiveInput = when (sendDecision) {
+                    is SendDecision.Proceed -> sendDecision.input
+                    else -> interceptionInput
+                }
+                val effectiveMimeType = effectiveInput.mimeType ?: mimeType
+
                 val currentUser = UserStore.currentUser.value
                 // Fix token check: check both store token and user token
                 val token = UserStore.token.value ?: currentUser?.token
                 
                 if (currentUser == null || token == null) {
                     android.util.Log.e("ChatRoomViewModel", "Cannot send media: user or token is null")
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MessageFailed(
+                            roomJid = room.jid,
+                            messageType = MessageType.MEDIA,
+                            error = IllegalStateException("User or token is null"),
+                            metadata = mapOf("fileName" to file.name, "mimeType" to effectiveMimeType)
+                        )
+                    )
                     return@launch
                 }
                 
                 // Validate file exists and is readable
                 if (!file.exists() || !file.canRead()) {
                     android.util.Log.e("ChatRoomViewModel", "File does not exist or cannot be read: ${file.absolutePath}")
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MediaUploadResult(
+                            roomJid = room.jid,
+                            fileName = file.name,
+                            mimeType = effectiveMimeType,
+                            success = false,
+                            error = IllegalStateException("File does not exist or cannot be read")
+                        )
+                    )
                     return@launch
                 }
 
-                val preparedMedia = prepareMediaForUpload(file, mimeType)
+                val preparedMedia = prepareMediaForUpload(file, effectiveMimeType)
                 val uploadFile = preparedMedia.first
                 val uploadMimeType = preparedMedia.second
                 
@@ -467,6 +555,15 @@ class ChatRoomViewModel(
                 val fileSize = uploadFile.length()
                 if (fileSize > maxSizeBytes) {
                     android.util.Log.e("ChatRoomViewModel", "File too large: ${fileSize} bytes (max: $maxSizeBytes)")
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MediaUploadResult(
+                            roomJid = room.jid,
+                            fileName = uploadFile.name,
+                            mimeType = uploadMimeType,
+                            success = false,
+                            error = IllegalStateException("File too large")
+                        )
+                    )
                     return@launch
                 }
                 
@@ -511,14 +608,32 @@ class ChatRoomViewModel(
                     if (retryCount < 2) {
                         android.util.Log.w("ChatRoomViewModel", "File upload failed, retrying... attempt ${retryCount + 2}")
                         kotlinx.coroutines.delay(1200)
-                        sendMedia(file, mimeType, retryCount + 1)
+                        sendMedia(file, effectiveMimeType, retryCount + 1)
                         MessageStore.removeMessage(room.jid, messageId)
                         return@launch
                     }
                     android.util.Log.e("ChatRoomViewModel", "File upload failed after retries")
                     MessageStore.removeMessage(room.jid, messageId)
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MediaUploadResult(
+                            roomJid = room.jid,
+                            fileName = uploadFile.name,
+                            mimeType = uploadMimeType,
+                            success = false,
+                            error = IllegalStateException("Upload failed after retries")
+                        )
+                    )
                     return@launch
                 }
+
+                ChatEventDispatcher.emit(
+                    ChatEvent.MediaUploadResult(
+                        roomJid = room.jid,
+                        fileName = uploadResult.filename,
+                        mimeType = uploadResult.mimetype,
+                        success = true
+                    )
+                )
                 
                 android.util.Log.d("ChatRoomViewModel", "File uploaded: ${uploadResult.location}")
                 
@@ -582,14 +697,42 @@ class ChatRoomViewModel(
                     )
                     MessageStore.updateMessage(room.jid, updatedMessage)
                     android.util.Log.d("ChatRoomViewModel", "Updated optimistic message with upload data (pending=true, waiting for server echo to match by location: ${uploadResult.location})")
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MessageSent(
+                            roomJid = room.jid,
+                            messageId = messageId,
+                            messageType = MessageType.MEDIA,
+                            user = currentUser,
+                            metadata = mapOf(
+                                "location" to uploadResult.location,
+                                "mimetype" to uploadResult.mimetype
+                            )
+                        )
+                    )
                 } else {
                     android.util.Log.e("ChatRoomViewModel", "Failed to send media message via XMPP. xmppClient=${xmppClient != null}, isFullyConnected=${xmppClient?.isFullyConnected()} (check XMPPClient/XMPPWebSocket logs for cause)")
                     // Remove failed message
                     MessageStore.removeMessage(room.jid, messageId)
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MessageFailed(
+                            roomJid = room.jid,
+                            messageType = MessageType.MEDIA,
+                            error = IllegalStateException("Failed to send media message via XMPP"),
+                            metadata = mapOf("fileName" to uploadFile.name, "mimeType" to uploadMimeType)
+                        )
+                    )
                 }
             } catch (e: Exception) {
                 android.util.Log.e("ChatRoomViewModel", "Error sending media", e)
                 // Message will remain in pending state, will be cleaned up later
+                ChatEventDispatcher.emit(
+                    ChatEvent.MessageFailed(
+                        roomJid = room.jid,
+                        messageType = MessageType.MEDIA,
+                        error = e,
+                        metadata = mapOf("fileName" to file.name, "mimeType" to mimeType)
+                    )
+                )
             }
         }
     }
@@ -642,6 +785,13 @@ class ChatRoomViewModel(
      */
     fun editMessage(messageId: String, newText: String) {
         MessageStore.editMessage(room.jid, messageId, newText)
+        ChatEventDispatcher.emit(
+            ChatEvent.MessageEdited(
+                roomJid = room.jid,
+                messageId = messageId,
+                newText = newText
+            )
+        )
         viewModelScope.launch {
             try {
                 xmppClient?.editMessage(room.jid, messageId, newText)
@@ -657,6 +807,12 @@ class ChatRoomViewModel(
      */
     fun deleteMessage(messageId: String) {
         MessageStore.markMessageAsDeleted(room.jid, messageId)
+        ChatEventDispatcher.emit(
+            ChatEvent.MessageDeleted(
+                roomJid = room.jid,
+                messageId = messageId
+            )
+        )
         viewModelScope.launch {
             try {
                 xmppClient?.deleteMessage(room.jid, messageId)
@@ -691,6 +847,13 @@ class ChatRoomViewModel(
                 }
                 
                 xmppClient?.sendMessageReaction(room.jid, messageId, newReactions)
+                ChatEventDispatcher.emit(
+                    ChatEvent.ReactionSent(
+                        roomJid = room.jid,
+                        messageId = messageId,
+                        emoji = emoji
+                    )
+                )
                 // MessageStore will be updated via delegate callback
             } catch (e: Exception) {
                 android.util.Log.e("ChatRoomViewModel", "Error sending reaction", e)

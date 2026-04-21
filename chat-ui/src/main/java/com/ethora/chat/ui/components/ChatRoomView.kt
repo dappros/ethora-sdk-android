@@ -29,6 +29,11 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.activity.compose.BackHandler
 import kotlinx.coroutines.launch
 import com.ethora.chat.core.models.Room
+import com.ethora.chat.core.models.MessageActionsProps
+import com.ethora.chat.core.models.MessageProps
+import com.ethora.chat.core.models.SendInputProps
+import com.ethora.chat.core.store.ChatConnectionStatus
+import com.ethora.chat.core.store.ConnectionStore
 import com.ethora.chat.core.store.ScrollPositionStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.xmpp.XMPPClient
@@ -50,6 +55,7 @@ fun ChatRoomView(
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
     val composingUsers by viewModel.composingUsers.collectAsState()
     val scrollRestoreAnchor by viewModel.scrollRestoreAnchor.collectAsState()
+    val connectionState by ConnectionStore.state.collectAsState()
     
     // Update lastViewedTimestamp when room is opened; send presence to receive real-time messages
     LaunchedEffect(room.jid, xmppClient) {
@@ -130,6 +136,7 @@ fun ChatRoomView(
     // Track unread count (messages that arrived while scrolled up)
     var unreadCount by remember { mutableStateOf(0) }
     var lastMessageCount by remember { mutableStateOf(messages.size) }
+    var pendingOwnMessageAutoScroll by remember { mutableStateOf(false) }
     
     // Check scroll position to show/hide scroll to bottom button
     LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, messages.size) {
@@ -146,15 +153,18 @@ fun ChatRoomView(
         showScrollToBottom = shouldShow
     }
     
-    // Track new messages when scrolled up
+    // Track new messages that arrive while user is NOT at the bottom.
+    // (Older messages loaded at the top must not increase unread counter.)
     LaunchedEffect(messages.size) {
-        if (messages.size > lastMessageCount && !showScrollToBottom) {
-            // New messages arrived but we're scrolled up
-            // Don't increment if we're already at bottom (will be handled by scroll effect)
-            val isAtBottom = listState.firstVisibleItemIndex == 0 && 
-                             listState.firstVisibleItemScrollOffset < 100
-            if (!isAtBottom) {
-                unreadCount += (messages.size - lastMessageCount)
+        if (messages.size > lastMessageCount) {
+            val delta = messages.size - lastMessageCount
+
+            // If we are loading older messages (pagination) - ignore for unread counter.
+            if (!isLoadingMore) {
+                val isAtBottomNow = !listState.canScrollForward
+                if (!isAtBottomNow) {
+                    unreadCount += delta
+                }
             }
         }
         lastMessageCount = messages.size
@@ -164,6 +174,41 @@ fun ChatRoomView(
     LaunchedEffect(messages.size, isLoading) {
         if (messages.isEmpty() && !isLoading) {
             android.util.Log.w("ChatRoomView", "No messages displayed but not loading!")
+        }
+    }
+
+    // Scroll only after the sent message is actually present in the list.
+    LaunchedEffect(messages.size, pendingOwnMessageAutoScroll) {
+        if (!pendingOwnMessageAutoScroll || messages.isEmpty()) return@LaunchedEffect
+
+        val latestMessage = messages.lastOrNull()
+        val currentUserXmppUsername = viewModel.currentUserXmppUsername
+        val currentUserId = viewModel.currentUserId
+
+        val isLatestFromCurrentUser = latestMessage?.let { message ->
+            when {
+                !currentUserXmppUsername.isNullOrBlank() -> {
+                    val messageXmppUsername = message.user.xmppUsername ?: ""
+                    val messageUserJID = message.user.userJID ?: ""
+                    val containsXmppUsername = messageXmppUsername.isNotBlank() &&
+                        messageXmppUsername.contains(currentUserXmppUsername, ignoreCase = false)
+                    val containsUserJID = messageUserJID.isNotBlank() &&
+                        messageUserJID.contains(currentUserXmppUsername, ignoreCase = false)
+                    containsXmppUsername || containsUserJID
+                }
+                else -> {
+                    val messageUserId = message.user.id
+                    !currentUserId.isNullOrBlank() && !messageUserId.isNullOrBlank() &&
+                        currentUserId == messageUserId
+                }
+            }
+        } ?: false
+
+        if (isLatestFromCurrentUser) {
+            kotlinx.coroutines.delay(50)
+            listState.animateScrollToItem((messages.size - 1).coerceAtLeast(0))
+            unreadCount = 0
+            pendingOwnMessageAutoScroll = false
         }
     }
     
@@ -284,7 +329,11 @@ fun ChatRoomView(
                         ?: overrides[room.jid.substringBefore("@")]
                 }
                 val hideChatInfoButton = headerSettings?.chatInfoButtonDisabled == true
-                val hideBackButton = headerSettings?.backButtonDisabled == true
+                val showBackButton = if (config?.disableRooms == true) {
+                    false
+                } else {
+                    headerSettings?.backButtonDisabled != true
+                }
                 ChatRoomHeader(
                     title = customTitle ?: room.title,
                     onBack = {
@@ -296,7 +345,7 @@ fun ChatRoomView(
                     },
                     onInfoClick = { showChatInfo = true },
                     showInfoButton = !hideChatInfoButton,
-                    showBackButton = !hideBackButton
+                    showBackButton = showBackButton
                 )
             }
         
@@ -334,7 +383,8 @@ fun ChatRoomView(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 0.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        // Keep messages anchored to the bottom when there are few items.
+                        verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.Bottom),
                         reverseLayout = false
                     ) {
                         items(
@@ -448,26 +498,37 @@ fun ChatRoomView(
                                 }
                                 
                                 Box(modifier = Modifier.padding(top = topPadding)) {
-                                    MessageBubble(
-                                        message = message,
-                                        isUser = isUser,
-                                        parentMessage = parentMessage,
-                                        showAvatar = isFirstInGroup, // Show avatar on first message in group
-                                        showUsername = isFirstInGroup, // Only show username on first message
-                                        showTimestamp = true,
-                                        onMediaClick = { msg -> previewMessage = msg },
-                                        onLongPress = { tapX, tapY, left, top, right, bottom ->
-                                            contextMenuMessage = message
-                                            contextMenuTap = Pair(tapX, tapY)
-                                            contextMenuBounds = Pair(left, top) to Pair(right, bottom)
-                                        },
-                                        onAvatarClick = { user ->
-                                            val disableProfiles = config?.disableProfilesInteractions == true
-                                            if (!disableProfiles && user.name != "Deleted User") {
-                                                UserStore.setSelectedUser(user)
+                                    val customMessageComponent = config?.customComponents?.customMessageComponent
+                                    if (customMessageComponent != null) {
+                                        customMessageComponent(
+                                            MessageProps(
+                                                message = message,
+                                                isUser = isUser,
+                                                isReply = message.isReply == true
+                                            )
+                                        )
+                                    } else {
+                                        MessageBubble(
+                                            message = message,
+                                            isUser = isUser,
+                                            parentMessage = parentMessage,
+                                            showAvatar = isFirstInGroup, // Show avatar on first message in group
+                                            showUsername = isFirstInGroup, // Only show username on first message
+                                            showTimestamp = true,
+                                            onMediaClick = { msg -> previewMessage = msg },
+                                            onLongPress = { tapX, tapY, left, top, right, bottom ->
+                                                contextMenuMessage = message
+                                                contextMenuTap = Pair(tapX, tapY)
+                                                contextMenuBounds = Pair(left, top) to Pair(right, bottom)
+                                            },
+                                            onAvatarClick = { user ->
+                                                val disableProfiles = config?.disableProfilesInteractions == true
+                                                if (!disableProfiles && user.name != "Deleted User") {
+                                                    UserStore.setSelectedUser(user)
+                                                }
                                             }
-                                        }
-                                    )
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -631,40 +692,58 @@ fun ChatRoomView(
                             currentUserId == messageUserId
                     }
                 }
-                MessageContextMenu(
-                    message = msg,
-                    isUser = isUserMessage,
-                    visible = true,
-                    tapX = contextMenuTap.first,
-                    tapY = contextMenuTap.second,
-                    boundsLeft = relLeft,
-                    boundsTop = relTop,
-                    boundsRight = relRight,
-                    boundsBottom = relBottom,
-                    containerWidthPx = boxW,
-                    containerHeightPx = boxH,
-                    onDismiss = {
-                        contextMenuMessage = null
-                        contextMenuTap = Pair(0f, 0f)
-                        contextMenuBounds = Pair(0f, 0f) to Pair(0f, 0f)
-                    },
-                    onCopy = {
-                        clipboardManager.setText(AnnotatedString(msg.body))
-                    },
-                    onEdit = {
-                        editMessageId = msg.id
-                        editMessageText = msg.body
-                        contextMenuMessage = null
-                        contextMenuTap = Pair(0f, 0f)
-                        contextMenuBounds = Pair(0f, 0f) to Pair(0f, 0f)
-                    },
-                    onDelete = {
-                        deleteConfirmMessageId = msg.id
-                        contextMenuMessage = null
-                        contextMenuTap = Pair(0f, 0f)
-                        contextMenuBounds = Pair(0f, 0f) to Pair(0f, 0f)
-                    }
-                )
+                val dismissMenu = {
+                    contextMenuMessage = null
+                    contextMenuTap = Pair(0f, 0f)
+                    contextMenuBounds = Pair(0f, 0f) to Pair(0f, 0f)
+                }
+                val customMessageActions = config?.customComponents?.customMessageActionsComponent
+                if (customMessageActions != null) {
+                    customMessageActions(
+                        MessageActionsProps(
+                            message = msg,
+                            isUser = isUserMessage,
+                            onCopy = { clipboardManager.setText(AnnotatedString(msg.body)) },
+                            onEdit = {
+                                editMessageId = msg.id
+                                editMessageText = msg.body
+                                dismissMenu()
+                            },
+                            onDelete = {
+                                deleteConfirmMessageId = msg.id
+                                dismissMenu()
+                            },
+                            onDismiss = dismissMenu
+                        )
+                    )
+                } else {
+                    MessageContextMenu(
+                        message = msg,
+                        isUser = isUserMessage,
+                        visible = true,
+                        tapX = contextMenuTap.first,
+                        tapY = contextMenuTap.second,
+                        boundsLeft = relLeft,
+                        boundsTop = relTop,
+                        boundsRight = relRight,
+                        boundsBottom = relBottom,
+                        containerWidthPx = boxW,
+                        containerHeightPx = boxH,
+                        onDismiss = dismissMenu,
+                        onCopy = {
+                            clipboardManager.setText(AnnotatedString(msg.body))
+                        },
+                        onEdit = {
+                            editMessageId = msg.id
+                            editMessageText = msg.body
+                            dismissMenu()
+                        },
+                        onDelete = {
+                            deleteConfirmMessageId = msg.id
+                            dismissMenu()
+                        }
+                    )
+                }
             }
         }
         
@@ -675,54 +754,85 @@ fun ChatRoomView(
         
         // Input (disable media if config says so)
         val disableMedia = config?.disableMedia == true
-        
-        ChatInput(
-            onSendMessage = { text, parentId ->
-                if (editMessageId != null) {
-                    // Edit mode: edit existing message
-                    viewModel.editMessage(editMessageId!!, text)
-                    editMessageId = null
-                    editMessageText = ""
-                } else {
-                    // Normal mode: send new message (could be a reply)
-                    viewModel.sendMessage(text, parentId)
-                    if (replyingToMessage != null) {
-                        replyingToMessage = null
-                    }
-                    
-                    // Auto-scroll to bottom on user's own message
-                    coroutineScope.launch {
-                        listState.animateScrollToItem((messages.size - 1).coerceAtLeast(0))
-                    }
-                }
-                // Stop typing when message is sent
-                viewModel.sendStopTyping()
-            },
-            onSendMedia = if (disableMedia) null else { file, mimeType ->
-                viewModel.sendMedia(file, mimeType)
-                // Stop typing when media is sent
-                viewModel.sendStopTyping()
-            },
-            onStartTyping = {
-                viewModel.sendStartTyping()
-            },
-            onStopTyping = {
-                viewModel.sendStopTyping()
-            },
-            editText = if (editMessageId != null) editMessageText else null,
-            onEditCancel = {
+        val canSendMessage = connectionState.status == ChatConnectionStatus.ONLINE
+        val handleSendMessage: (String, String?) -> Unit = sendHandler@{ text, parentId ->
+            if (!canSendMessage && editMessageId == null) return@sendHandler
+            if (editMessageId != null) {
+                // Edit mode: edit existing message
+                viewModel.editMessage(editMessageId!!, text)
                 editMessageId = null
                 editMessageText = ""
-            },
-            replyingToMessage = replyingToMessage,
-            onReplyCancel = {
-                replyingToMessage = null
+            } else {
+                // Normal mode: send new message (could be a reply)
+                viewModel.sendMessage(text, parentId)
+                pendingOwnMessageAutoScroll = true
+                if (replyingToMessage != null) {
+                    replyingToMessage = null
+                }
             }
-        )
+            // Stop typing when message is sent
+            viewModel.sendStopTyping()
+        }
+        val handleSendMedia: ((java.io.File, String) -> Unit)? = if (disableMedia) null else mediaHandler@{ file, mimeType ->
+            if (!canSendMessage) return@mediaHandler
+            viewModel.sendMedia(file, mimeType)
+            // Stop typing when media is sent
+            viewModel.sendStopTyping()
+        }
+
+        val customInputComponent = config?.customComponents?.customInputComponent
+        if (customInputComponent != null) {
+            customInputComponent(
+                SendInputProps(
+                    onSendMessage = { text -> handleSendMessage(text, replyingToMessage?.id) },
+                    onSendMedia = if (handleSendMedia == null) null else mediaBytes@{ bytes, mime ->
+                        if (!canSendMessage) return@mediaBytes
+                        viewModel.sendMedia(bytes, mime)
+                    },
+                    placeholderText = "Type a message...",
+                    messageText = if (editMessageId != null) editMessageText else "",
+                    isEditing = editMessageId != null,
+                    editMessageId = editMessageId,
+                    canSend = canSendMessage
+                )
+            )
+        } else {
+            ChatInput(
+                onSendMessage = handleSendMessage,
+                onSendMedia = handleSendMedia,
+                onStartTyping = {
+                    viewModel.sendStartTyping()
+                },
+                onStopTyping = {
+                    viewModel.sendStopTyping()
+                },
+                editText = if (editMessageId != null) editMessageText else null,
+                onEditCancel = {
+                    editMessageId = null
+                    editMessageText = ""
+                },
+                replyingToMessage = replyingToMessage,
+                onReplyCancel = {
+                    replyingToMessage = null
+                },
+                canSendMessage = canSendMessage
+            )
+        }
         
         // File preview dialog
+        val roomImageUrls = remember(messages) {
+            messages
+                .filter { it.mimetype?.startsWith("image/") == true }
+                .mapNotNull { msg -> msg.location?.takeIf { it.isNotBlank() } ?: msg.locationPreview?.takeIf { it.isNotBlank() } }
+        }
+        val initialImageIndex = remember(previewMessage, roomImageUrls) {
+            val previewUrl = previewMessage?.let { it.location?.takeIf { u -> u.isNotBlank() } ?: it.locationPreview?.takeIf { u -> u.isNotBlank() } }
+            if (previewUrl == null) 0 else roomImageUrls.indexOf(previewUrl).takeIf { it >= 0 } ?: 0
+        }
         FilePreviewDialog(
             message = previewMessage,
+            galleryImageUrls = roomImageUrls,
+            galleryInitialIndex = initialImageIndex,
             onDismiss = { previewMessage = null }
         )
         

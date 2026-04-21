@@ -1,14 +1,18 @@
 package com.ethora.chat.core.store
 
 import android.util.Log
+import com.ethora.chat.core.models.HistoryPreloadState
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.xmpp.XMPPClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.PriorityQueue
+import kotlin.random.Random
 
 private data class QueuedRoom(
     val jid: String,
@@ -32,21 +36,21 @@ class MessagePriorityQueue(
 ) {
     private val TAG = "MessagePriorityQueue"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val maxRetries = 3
     
     private val messageQueue = PriorityQueue<QueuedRoom> { a, b -> b.priority - a.priority }
     private val processedRooms = mutableSetOf<String>()
     private var job: kotlinx.coroutines.Job? = null
     
-    private fun addRoomToProcessed(queueRoom: QueuedRoom, rooms: Map<String, Room>) {
+    private fun addRoomToProcessed(queueRoom: QueuedRoom) {
         if (queueRoom.messageCount >= 20 && !processedRooms.contains(queueRoom.jid)) {
             processedRooms.add(queueRoom.jid)
-            
-            val room = rooms[queueRoom.jid]
             val messages = MessageStore.getMessagesForRoom(queueRoom.jid)
             if (messages.size >= 30) {
                 val trimmed = messages.takeLast(30)
                 MessageStore.setMessagesForRoom(queueRoom.jid, trimmed)
             }
+            RoomStore.setHistoryPreloadState(queueRoom.jid, HistoryPreloadState.DONE)
         }
     }
     
@@ -70,20 +74,24 @@ class MessagePriorityQueue(
         }
         
         roomsToProcess.map { room ->
-            scope.launch {
+            scope.async {
                 try {
                     val currentRoom = rooms[room.jid]
                     if (room.messageCount < 30 && currentRoom?.historyComplete != true) {
+                        if (room.jid == activeRoomJid) {
+                            xmppClient?.promoteRoomHistory(room.jid)
+                        }
                         try {
                             // Only send presence if fully connected, but continue with message loading regardless
                             if (xmppClient?.isFullyConnected() == true) {
                                 xmppClient.sendPresenceInRoom(room.jid)
-                                kotlinx.coroutines.delay(100)
+                                delay(75 + Random.nextLong(75))
                             }
                         } catch (e: Exception) {
                             Log.w(TAG, "Failed to send presence to ${room.jid}", e)
                         }
                         
+                        RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.LOADING)
                         RoomStore.setRoomLoading(room.jid, true)
                         
                         // CRITICAL: For initial load (messageCount == 0), use beforeMessageId = null 
@@ -105,6 +113,7 @@ class MessagePriorityQueue(
                         
                         if (newMessages.isNotEmpty()) {
                             MessageStore.addMessages(room.jid, newMessages)
+                            RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.DONE)
                         }
                         
                         if (room.messageCount + newMessages.size < 30 && 
@@ -120,12 +129,13 @@ class MessagePriorityQueue(
                         }
                     }
                     
-                    addRoomToProcessed(room, rooms)
+                    addRoomToProcessed(room)
                 } catch (error: Exception) {
                     Log.e(TAG, "Error processing room: ${room.jid} (retry ${room.retryCount + 1}/3)", error)
-                    
-                    // Only retry up to 3 times to prevent infinite loops
-                    if (room.retryCount < 3) {
+                    RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.ERROR)
+
+                    // Only retry up to maxRetries to prevent infinite loops
+                    if (room.retryCount < maxRetries) {
                         val retryRoom = QueuedRoom(
                             jid = room.jid,
                             priority = (room.priority - 1).coerceAtLeast(1),
@@ -134,17 +144,18 @@ class MessagePriorityQueue(
                             messages = room.messages,
                             retryCount = room.retryCount + 1
                         )
+                        delay((120L * (room.retryCount + 1)) + Random.nextLong(160))
                         messageQueue.offer(retryRoom)
                     } else {
                         Log.e(TAG, "❌ Max retries reached for room ${room.jid}, giving up")
                         // Mark as processed to prevent further attempts
-                        addRoomToProcessed(room, rooms)
+                        addRoomToProcessed(room)
                     }
                 } finally {
                     RoomStore.setRoomLoading(room.jid, false)
                 }
             }
-        }.forEach { it.join() }
+        }.awaitAll()
     }
     
     fun initialize(rooms: List<Room>) {

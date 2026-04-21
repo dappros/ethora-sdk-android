@@ -19,8 +19,30 @@ object IncrementalHistoryLoader {
     private const val TAG = "IncrementalHistoryLoader"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
-    private fun getLastMessageTimestamp(room: Room): Long? {
-        return room.lastMessageTimestamp
+    private data class RoomAnchor(
+        val id: String?,
+        val xmppId: String?,
+        val timestamp: Long?
+    )
+
+    private fun getRoomAnchor(room: Room): RoomAnchor? {
+        val cachedLast = MessageStore.getMessagesForRoom(room.jid).maxByOrNull { it.timestamp ?: it.date.time }
+        val timestamp = cachedLast?.timestamp ?: room.lastMessageTimestamp
+        if (cachedLast == null && timestamp == null) return null
+        return RoomAnchor(
+            id = cachedLast?.id,
+            xmppId = cachedLast?.xmppId,
+            timestamp = timestamp
+        )
+    }
+
+    private fun hasAnchor(messages: List<com.ethora.chat.core.models.Message>, anchor: RoomAnchor): Boolean {
+        return messages.any { message ->
+            val messageTs = message.timestamp ?: message.date.time
+            (anchor.id != null && message.id == anchor.id) ||
+                (anchor.xmppId != null && message.xmppId == anchor.xmppId) ||
+                (anchor.timestamp != null && messageTs == anchor.timestamp)
+        }
     }
     
     suspend fun updateMessagesTillLast(
@@ -44,8 +66,8 @@ object IncrementalHistoryLoader {
         while (processedIndex < rooms.size) {
             val currentBatch = rooms.slice(processedIndex until minOf(processedIndex + batchSize, rooms.size))
             
-            val lastTimestampsByJid = currentBatch.associate { room ->
-                room.jid to getLastMessageTimestamp(room)
+            val anchorsByJid = currentBatch.associate { room ->
+                room.jid to getRoomAnchor(room)
             }
             
             currentBatch.mapIndexed { index, room ->
@@ -65,16 +87,16 @@ object IncrementalHistoryLoader {
                             Log.w(TAG, "Failed to send presence to ${room.jid}", e)
                         }
                         
-                        val lastCachedTimestamp = lastTimestampsByJid[room.jid]
-                        if (lastCachedTimestamp == null) {
+                        val anchor = anchorsByJid[room.jid]
+                        if (anchor == null) {
                             return@launch
                         }
                         
                         var counter = 0
-                        var isMessageFound = false
+                        var isAnchorFound = false
                         var currentJidNewMessages = mutableListOf<com.ethora.chat.core.models.Message>()
                         
-                        while (!isMessageFound && counter < maxFetchAttempts) {
+                        while (!isAnchorFound && counter < maxFetchAttempts) {
                             val lastMessageId = if (counter > 0) {
                                 currentJidNewMessages.firstOrNull()?.id
                             } else {
@@ -93,14 +115,17 @@ object IncrementalHistoryLoader {
                             
                             counter++
                             currentJidNewMessages = (fetchedMessages + currentJidNewMessages).toMutableList()
-                            
-                            isMessageFound = currentJidNewMessages.any { message ->
-                                val messageTimestamp = message.timestamp ?: message.date.time
-                                messageTimestamp == lastCachedTimestamp
-                            }
-                            
-                            if (!isMessageFound && counter >= maxFetchAttempts) {
+
+                            isAnchorFound = hasAnchor(currentJidNewMessages, anchor)
+                        }
+
+                        if (currentJidNewMessages.isNotEmpty()) {
+                            if (isAnchorFound) {
                                 MessageStore.addMessages(room.jid, currentJidNewMessages)
+                            } else {
+                                // Anchor miss fallback: prefer latest server state to avoid stale local cache.
+                                Log.w(TAG, "Anchor miss for ${room.jid}. Replacing room cache with fetched history.")
+                                MessageStore.setMessagesForRoom(room.jid, currentJidNewMessages)
                             }
                         }
                     } catch (error: Exception) {

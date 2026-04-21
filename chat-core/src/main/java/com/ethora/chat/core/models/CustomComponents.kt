@@ -71,7 +71,23 @@ data class SendInputProps(
     val placeholderText: String? = null,
     val messageText: String,
     val isEditing: Boolean = false,
-    val editMessageId: String? = null
+    val editMessageId: String? = null,
+    val canSend: Boolean = true
+)
+
+data class MessageActionsProps(
+    val message: Message,
+    val isUser: Boolean,
+    val onCopy: () -> Unit,
+    val onEdit: () -> Unit,
+    val onDelete: () -> Unit,
+    val onDismiss: () -> Unit
+)
+
+data class RoomListItemProps(
+    val room: Room,
+    val isActive: Boolean,
+    val onClick: () -> Unit
 )
 
 /**
@@ -80,6 +96,10 @@ data class SendInputProps(
 interface CustomComponents {
     val customMessageComponent: (@Composable (MessageProps) -> Unit)?
     val customInputComponent: (@Composable (SendInputProps) -> Unit)?
+    val customMessageActionsComponent: (@Composable (MessageActionsProps) -> Unit)?
+        get() = null
+    val customRoomListItemComponent: (@Composable (RoomListItemProps) -> Unit)?
+        get() = null
     val customScrollableArea: (@Composable (CustomScrollableAreaProps) -> Unit)?
     val customDaySeparator: (@Composable (DaySeparatorProps) -> Unit)?
     val customNewMessageLabel: (@Composable (NewMessageLabelProps) -> Unit)?
@@ -91,6 +111,8 @@ interface CustomComponents {
 data class DefaultCustomComponents(
     override val customMessageComponent: (@Composable (MessageProps) -> Unit)? = null,
     override val customInputComponent: (@Composable (SendInputProps) -> Unit)? = null,
+    override val customMessageActionsComponent: (@Composable (MessageActionsProps) -> Unit)? = null,
+    override val customRoomListItemComponent: (@Composable (RoomListItemProps) -> Unit)? = null,
     override val customScrollableArea: (@Composable (CustomScrollableAreaProps) -> Unit)? = null,
     override val customDaySeparator: (@Composable (DaySeparatorProps) -> Unit)? = null,
     override val customNewMessageLabel: (@Composable (NewMessageLabelProps) -> Unit)? = null

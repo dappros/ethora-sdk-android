@@ -1,14 +1,17 @@
 package com.ethora.chat.core.store
 
 import android.util.Log
+import com.ethora.chat.core.models.HistoryPreloadState
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.xmpp.XMPPClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlin.random.Random
 
 /**
  * Message loader queue - processes rooms in batches
@@ -27,6 +30,8 @@ class MessageLoaderQueue(
     private val processedRooms = mutableSetOf<String>()
     private var isProcessing = false
     private var job: kotlinx.coroutines.Job? = null
+    private val retryAttempts = mutableMapOf<String, Int>()
+    private val maxRetries = 3
     
     private fun roomHasMoreMessages(room: Room, max: Int = 20): Boolean {
         val messageCount = MessageStore.getMessagesForRoom(room.jid).size
@@ -58,12 +63,13 @@ class MessageLoaderQueue(
         try {
             for (i in unprocessed.indices step batchSize) {
                 val batch = unprocessed.slice(i until minOf(i + batchSize, unprocessed.size))
-                
-                batch.forEachIndexed { index, room ->
-                    scope.launch {
+
+                batch.mapIndexed { index, room ->
+                    scope.async {
+                        var shouldMarkProcessed = true
                         try {
                             if (index > 0) {
-                                delay(80)
+                                delay(60 + Random.nextLong(80))
                             }
 
                             if (roomHasMoreMessages(room) &&
@@ -72,6 +78,9 @@ class MessageLoaderQueue(
 
                                 try {
                                     if (xmppClient?.isFullyConnected() == true) {
+                                        if (RoomStore.currentRoom.value?.jid == room.jid) {
+                                            xmppClient.promoteRoomHistory(room.jid)
+                                        }
                                         xmppClient.sendPresenceInRoom(room.jid)
                                         delay(50)
                                     }
@@ -79,26 +88,41 @@ class MessageLoaderQueue(
                                     Log.w(TAG, "Failed to send presence to ${room.jid}", e)
                                 }
                                 
+                                RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.LOADING)
                                 RoomStore.setRoomLoading(room.jid, true)
                                 
                                 try {
                                     val history = xmppClient?.getHistory(room.jid, max = pageSize, beforeMessageId = null)
                                     if (history != null && history.isNotEmpty()) {
                                         MessageStore.addMessages(room.jid, history)
+                                        RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.DONE)
+                                    } else {
+                                        RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.DONE)
                                     }
                                 } catch (e: Exception) {
                                     Log.e(TAG, "Error loading messages for ${room.jid}", e)
+                                    RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.ERROR)
+                                    val nextRetry = (retryAttempts[room.jid] ?: 0) + 1
+                                    if (nextRetry <= maxRetries) {
+                                        retryAttempts[room.jid] = nextRetry
+                                        shouldMarkProcessed = false
+                                        delay((110L * nextRetry) + Random.nextLong(150))
+                                    }
                                 } finally {
                                     RoomStore.setRoomLoading(room.jid, false)
                                 }
                             }
-                            
-                            processedRooms.add(room.jid)
                         } catch (e: Exception) {
                             Log.e(TAG, "Error processing room ${room.jid}", e)
+                            shouldMarkProcessed = false
+                        } finally {
+                            if (shouldMarkProcessed) {
+                                processedRooms.add(room.jid)
+                                retryAttempts.remove(room.jid)
+                            }
                         }
                     }
-                }
+                }.awaitAll()
                 
                 delay(60)
             }
@@ -128,6 +152,7 @@ class MessageLoaderQueue(
     
     fun reset() {
         processedRooms.clear()
+        retryAttempts.clear()
     }
     
     fun isRunning(): Boolean {

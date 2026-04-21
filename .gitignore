@@ -98,3 +98,6 @@ lint-results*.xml
 
 .idea/
 .gradle-home/
+
+sample-chat-app
+/sample-chat-app

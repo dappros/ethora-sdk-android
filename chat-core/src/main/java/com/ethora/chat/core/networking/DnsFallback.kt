@@ -16,7 +16,7 @@ object DnsFallback {
             } catch (e: java.net.UnknownHostException) {
                 android.util.Log.w("DnsFallback", "DNS lookup failed for $hostname, using fallback (overrides=${overrides?.size ?: 0})")
                 val ip = overrides?.get(hostname) ?: when (hostname) {
-                    "api.ethoradev.com", "xmpp.ethoradev.com", "conference.xmpp.ethoradev.com" -> ETHORADEV_IP
+                    "api.chat.ethora.com", "xmpp.chat.ethora.com", "conference.xmpp.chat.ethora.com" -> ETHORADEV_IP
                     else -> {
                         android.util.Log.e("DnsFallback", "No fallback for hostname=$hostname; overrides keys=${overrides?.keys?.joinToString() ?: "null"}")
                         throw e

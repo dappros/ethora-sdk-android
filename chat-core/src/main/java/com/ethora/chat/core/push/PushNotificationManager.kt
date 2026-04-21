@@ -90,6 +90,10 @@ object PushNotificationManager {
                 Log.d(TAG, "Subscribed to room: $roomJid")
             }
             success
+        } catch (e: CancellationException) {
+            // Compose scope was disposed (screen switched/closed) - not a real push failure.
+            Log.d(TAG, "Room subscribe cancelled due to scope disposal: $roomJid")
+            false
         } catch (e: Exception) {
             Log.e(TAG, "Failed to subscribe to room $roomJid", e)
             false
@@ -106,10 +110,38 @@ object PushNotificationManager {
     ) {
         var successful = 0
         var failed = 0
+        val failedRooms = mutableListOf<String>()
         for (jid in roomJids) {
+            if (!currentCoroutineContext().isActive) {
+                Log.d(TAG, "Room subscription loop cancelled")
+                break
+            }
             val result = subscribeToRoom(xmppClient, jid)
-            if (result) successful++ else failed++
+            if (result) {
+                successful++
+            } else {
+                failed++
+                failedRooms.add(jid)
+            }
             delay(100)
+        }
+        // Second pass for transient failures (connection race / stanza timeout).
+        if (failedRooms.isNotEmpty()) {
+            delay(1200)
+            val retryFailed = mutableListOf<String>()
+            for (jid in failedRooms) {
+                val retryOk = subscribeToRoom(xmppClient, jid)
+                if (retryOk) {
+                    successful++
+                    failed--
+                } else {
+                    retryFailed.add(jid)
+                }
+                delay(120)
+            }
+            if (retryFailed.isNotEmpty()) {
+                Log.w(TAG, "Rooms still not subscribed after retry (${retryFailed.size}): ${retryFailed.take(5)}")
+            }
         }
         Log.d(TAG, "Room subscription complete: $successful succeeded, $failed failed")
     }

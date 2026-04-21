@@ -15,7 +15,7 @@ data class PushSubscriptionPayload(
 )
 
 interface PushAPI {
-    @POST("push/subscriptions/{appId}")
+    @POST("push/subscription/{appId}")
     suspend fun subscribeToPush(
         @Path("appId") appId: String,
         @Body payload: PushSubscriptionPayload,
@@ -32,13 +32,15 @@ object PushAPIHelper {
         baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): Boolean {
         return try {
-            val userToken = UserStore.currentUser.value?.token
+            val currentUser = UserStore.currentUser.value
+            val userToken = currentUser?.token
             if (userToken.isNullOrBlank()) {
                 android.util.Log.e(TAG, "Cannot subscribe to push: no user token")
                 return false
             }
+            // RN parity: path appId comes from authenticated user first, then config fallback.
+            val pathAppId = currentUser?.appId?.takeIf { it.isNotBlank() } ?: appId
 
-            val api = ApiClient.createService(PushAPI::class.java, baseUrl)
             val payload = PushSubscriptionPayload(
                 registrationToken = fcmToken,
                 deviceType = "android"
@@ -50,16 +52,29 @@ object PushAPIHelper {
                 "Bearer $userToken"
             }
 
-            android.util.Log.d(TAG, "Subscribing to push: appId=$appId, tokenPrefix=${fcmToken.take(10)}...")
-            val response = api.subscribeToPush(appId, payload, authHeader)
-            if (response.isSuccessful) {
-                android.util.Log.d(TAG, "Successfully subscribed to push notifications")
-                true
-            } else {
-                android.util.Log.e(TAG, "Failed to subscribe to push: ${response.code()} ${response.message()}")
-                android.util.Log.e(TAG, "  Response body: ${response.errorBody()?.string()}")
-                false
+            // Backend environments differ: some expose push under /v1, some under root.
+            // Try current base URL first, then fallback stripped from trailing /v1.
+            val candidateBaseUrls = linkedSetOf(baseUrl).apply {
+                val trimmed = baseUrl.trimEnd('/')
+                if (trimmed.endsWith("/v1")) {
+                    add(trimmed.removeSuffix("/v1"))
+                }
             }
+            for (candidate in candidateBaseUrls) {
+                val api = ApiClient.createService(PushAPI::class.java, candidate)
+                android.util.Log.d(
+                    TAG,
+                    "Subscribing to push via base=$candidate pathAppId=$pathAppId configAppId=$appId userAppId=${currentUser?.appId} tokenPrefix=${fcmToken.take(10)}..."
+                )
+                val response = api.subscribeToPush(pathAppId, payload, authHeader)
+                if (response.isSuccessful) {
+                    android.util.Log.d(TAG, "Successfully subscribed to push notifications via base=$candidate")
+                    return true
+                }
+                android.util.Log.e(TAG, "Failed push subscribe via base=$candidate: ${response.code()} ${response.message()}")
+                android.util.Log.e(TAG, "  Response body: ${response.errorBody()?.string()}")
+            }
+            false
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Error subscribing to push notifications", e)
             false
