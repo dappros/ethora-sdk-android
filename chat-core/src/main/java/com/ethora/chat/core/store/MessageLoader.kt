@@ -71,26 +71,22 @@ object MessageLoader {
         try {
             RoomsPresenceInitializer.initRoomsPresence(xmppClient, rooms)
             
-            val roomsToLoad = rooms.filter { room ->
-                val existingMessages = MessageStore.messages.value[room.jid] ?: emptyList()
-                existingMessages.isEmpty()
+            // Always revalidate room history from server on initial sync.
+            // Relying only on local cache can produce divergent room history across devices.
+            val cachedMessagesBeforeSync = rooms.associate { room ->
+                room.jid to (MessageStore.messages.value[room.jid] ?: emptyList())
             }
-            
-            if (roomsToLoad.isEmpty()) {
-                hasSyncedHistory = true
-                return
-            }
-            
+
             val prioritizedRooms = if (activeRoomJid != null) {
-                val activeRoom = roomsToLoad.find { it.jid == activeRoomJid }
+                val activeRoom = rooms.find { it.jid == activeRoomJid }
                 if (activeRoom != null) {
                     xmppClient.promoteRoomHistory(activeRoom.jid)
-                    listOf(activeRoom) + roomsToLoad.filter { it.jid != activeRoomJid }
+                    listOf(activeRoom) + rooms.filter { it.jid != activeRoomJid }
                 } else {
-                    roomsToLoad
+                    rooms
                 }
             } else {
-                roomsToLoad
+                rooms
             }
 
             Log.d(TAG, "🚀 Starting batched history load for ${prioritizedRooms.size} rooms")
@@ -124,10 +120,17 @@ object MessageLoader {
                                 val history = xmppClient.getHistory(room.jid, max = messagesPerRoom, beforeMessageId = null)
                                 if (history.isNotEmpty()) {
                                     Log.d(TAG, "  ✅ Received ${history.size} messages for ${room.jid}")
-                                    MessageStore.addMessages(room.jid, history)
+                                    // Replace local room slice with authoritative latest server history
+                                    // to avoid cross-device divergence caused by stale cache.
+                                    MessageStore.setMessagesForRoom(room.jid, history.sortedBy { it.timestamp ?: it.date.time })
                                     RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.DONE)
                                 } else {
                                     Log.d(TAG, "  ℹ️ No history found for ${room.jid}")
+                                    // Preserve existing cache if server returned empty page.
+                                    val cached = cachedMessagesBeforeSync[room.jid] ?: emptyList()
+                                    if (cached.isNotEmpty()) {
+                                        MessageStore.setMessagesForRoom(room.jid, cached)
+                                    }
                                     RoomStore.setHistoryPreloadState(room.jid, HistoryPreloadState.DONE)
                                 }
                             } catch (e: Exception) {

@@ -716,6 +716,21 @@ class XMPPWebSocketConnection(
             .replace("&quot;", "\"")
             .replace("&apos;", "'")
     }
+
+    private fun resolveBareJid(raw: String?): String? {
+        val value = raw?.trim().orEmpty()
+        if (value.isEmpty()) return null
+        return if (value.contains("@")) value.substringBefore("/") else "$value@$host"
+    }
+
+    private fun resolveOccupantNick(): String {
+        val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
+        val base = currentUser?.xmppUsername?.substringBefore("@")
+            ?: username.substringBefore("@")
+        val normalizedBase = base.ifBlank { "user" }.replace("[^A-Za-z0-9._-]".toRegex(), "")
+        // Keep a per-connection suffix so the same account can join room from multiple devices.
+        return "$normalizedBase-$resource"
+    }
     
     /**
      * Parse and handle edit message stanza
@@ -957,9 +972,10 @@ class XMPPWebSocketConnection(
             currentUser?.fullName ?: senderFirstName.ifBlank { senderLastName }
         }
         val photoURL = photo ?: currentUser?.profileImage ?: ""
-        val senderJID = clientWrapper?.let { 
-            "${currentUser?.xmppUsername ?: ""}@${host}"
-        } ?: ""
+        val senderJID = resolveBareJid(currentUser?.userJID)
+            ?: resolveBareJid(currentUser?.xmppUsername)
+            ?: resolveBareJid(username)
+            ?: ""
         val senderWalletAddress = walletAddress ?: ""
         
         val messageId = customId ?: if (isReply) {
@@ -1182,7 +1198,10 @@ class XMPPWebSocketConnection(
         val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
         val senderFirstName = currentUser?.firstName ?: ""
         val senderLastName = currentUser?.lastName ?: ""
-        val fromJid = clientWrapper?.let { "${currentUser?.xmppUsername ?: ""}@$host" } ?: ""
+        val fromJid = resolveBareJid(currentUser?.userJID)
+            ?: resolveBareJid(currentUser?.xmppUsername)
+            ?: resolveBareJid(username)
+            ?: ""
         
         val id = "message-reaction:${System.currentTimeMillis()}"
         
@@ -1618,12 +1637,13 @@ class XMPPWebSocketConnection(
         
         // Get current user's local part (username without domain)
         val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
-        val localPart = currentUser?.xmppUsername?.split("@")?.firstOrNull() 
-            ?: username.split("@").firstOrNull() 
-            ?: "user"
+        val localPart = resolveOccupantNick()
         
         // Get full JID for from attribute
-        val fromJid = "${currentUser?.xmppUsername ?: username}@$host"
+        val fromJid = resolveBareJid(currentUser?.userJID)
+            ?: resolveBareJid(currentUser?.xmppUsername)
+            ?: resolveBareJid(username)
+            ?: ""
         
         val presence = """<presence from="$fromJid" to="$fixedRoomJid/$localPart" id="presenceInRoom"><x xmlns="http://jabber.org/protocol/muc"/></presence>"""
         sendRaw(presence)
@@ -1641,7 +1661,10 @@ class XMPPWebSocketConnection(
         }
         
         val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
-        val fromJid = "${currentUser?.xmppUsername ?: username}@$host"
+        val fromJid = resolveBareJid(currentUser?.userJID)
+            ?: resolveBareJid(currentUser?.xmppUsername)
+            ?: resolveBareJid(username)
+            ?: ""
         
         val iq = """<iq type="get" from="$fromJid" id="getUserRooms"><query xmlns="ns:getrooms"/></iq>"""
         sendRaw(iq)

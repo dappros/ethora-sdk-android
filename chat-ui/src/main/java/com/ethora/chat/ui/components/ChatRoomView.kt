@@ -38,6 +38,39 @@ import com.ethora.chat.core.store.ScrollPositionStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.xmpp.XMPPClient
 
+private fun normalizeLocalPart(value: String?): String {
+    return value
+        ?.trim()
+        ?.lowercase()
+        ?.substringBefore("/")
+        ?.substringBefore("@")
+        .orEmpty()
+}
+
+private fun isMessageFromCurrentUser(
+    message: com.ethora.chat.core.models.Message,
+    currentUserXmppUsername: String?,
+    currentUserId: String?
+): Boolean {
+    val currentLocal = normalizeLocalPart(currentUserXmppUsername)
+    val messageLocalFromXmpp = normalizeLocalPart(message.user.xmppUsername)
+    val messageLocalFromUserJid = normalizeLocalPart(message.user.userJID)
+    val messageLocalFromId = normalizeLocalPart(message.user.id)
+    val currentIdLocal = normalizeLocalPart(currentUserId)
+
+    if (currentLocal.isNotEmpty()) {
+        if (messageLocalFromXmpp == currentLocal) return true
+        if (messageLocalFromUserJid == currentLocal) return true
+        if (messageLocalFromId == currentLocal) return true
+    }
+    if (currentIdLocal.isNotEmpty()) {
+        if (messageLocalFromId == currentIdLocal) return true
+        if (messageLocalFromXmpp == currentIdLocal) return true
+        if (messageLocalFromUserJid == currentIdLocal) return true
+    }
+    return false
+}
+
 /**
  * Chat room view
  */
@@ -436,23 +469,11 @@ fun ChatRoomView(
                                 val messageXmppUsername = message.user.xmppUsername ?: ""
                                 val messageUserJID = message.user.userJID ?: ""
                                 
-                                val isUser = when {
-                                    // First check: if current user's xmppUsername is not null, check if message's xmppUsername or userJID contains it
-                                    !currentUserXmppUsername.isNullOrBlank() -> {
-                                        val containsXmppUsername = messageXmppUsername.isNotBlank() &&
-                                                messageXmppUsername.contains(currentUserXmppUsername, ignoreCase = false)
-                                        val containsUserJID = messageUserJID.isNotBlank() &&
-                                                messageUserJID.contains(currentUserXmppUsername, ignoreCase = false)
-                                        containsXmppUsername || containsUserJID
-                                    }
-                                    // Fallback: compare by user ID
-                                    else -> {
-                                        val currentUserId = viewModel.currentUserId
-                                        val messageUserId = message.user.id
-                                        !currentUserId.isNullOrBlank() && !messageUserId.isNullOrBlank() &&
-                                                currentUserId == messageUserId
-                                    }
-                                }
+                                val isUser = isMessageFromCurrentUser(
+                                    message = message,
+                                    currentUserXmppUsername = currentUserXmppUsername,
+                                    currentUserId = viewModel.currentUserId
+                                )
                                 
                                 // Determine if this is the first message in a group
                                 // Group messages from the same user that are within 5 minutes of each other
@@ -674,24 +695,11 @@ fun ChatRoomView(
                 val relTop = contextMenuBounds.first.second - boxTop
                 val relRight = contextMenuBounds.second.first - boxLeft
                 val relBottom = contextMenuBounds.second.second - boxTop
-                val currentUserXmppUsername = viewModel.currentUserXmppUsername
-                val messageXmppUsername = msg.user.xmppUsername ?: ""
-                val messageUserJID = msg.user.userJID ?: ""
-                val isUserMessage = when {
-                    !currentUserXmppUsername.isNullOrBlank() -> {
-                        val containsXmppUsername = messageXmppUsername.isNotBlank() &&
-                            messageXmppUsername.contains(currentUserXmppUsername, ignoreCase = false)
-                        val containsUserJID = messageUserJID.isNotBlank() &&
-                            messageUserJID.contains(currentUserXmppUsername, ignoreCase = false)
-                        containsXmppUsername || containsUserJID
-                    }
-                    else -> {
-                        val currentUserId = viewModel.currentUserId
-                        val messageUserId = msg.user.id
-                        !currentUserId.isNullOrBlank() && !messageUserId.isNullOrBlank() &&
-                            currentUserId == messageUserId
-                    }
-                }
+                val isUserMessage = isMessageFromCurrentUser(
+                    message = msg,
+                    currentUserXmppUsername = viewModel.currentUserXmppUsername,
+                    currentUserId = viewModel.currentUserId
+                )
                 val dismissMenu = {
                     contextMenuMessage = null
                     contextMenuTap = Pair(0f, 0f)

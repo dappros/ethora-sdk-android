@@ -13,6 +13,7 @@ buildscript {
 }
 
 plugins {
+    id("maven-publish")
     id("com.android.application") version "8.5.2" apply false
     id("com.android.library") version "8.5.2" apply false
     id("org.jetbrains.kotlin.android") version "1.9.22" apply false
@@ -39,7 +40,7 @@ subprojects {
     layout.buildDirectory.set(file("/tmp/android_build/${rootProject.name}/${project.name}"))
 }
 
-publishing {
+ publishing {
     publications {
         create<MavenPublication>("root") {
             val resolvedGroupId = project.group.toString()
