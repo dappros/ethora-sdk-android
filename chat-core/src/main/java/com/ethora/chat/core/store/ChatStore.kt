@@ -65,6 +65,7 @@ object ChatStore {
     fun clear() {
         _config.value = null
         _isInitialized.value = false
+        ConnectionStore.clear()
         UserStore.clear()
         RoomStore.clear()
         MessageStore.clear()

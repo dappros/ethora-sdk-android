@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import com.ethora.chat.core.config.ChatConfig
+import com.ethora.chat.core.config.ChatEvent
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.networking.ApiClient
@@ -25,6 +26,9 @@ import com.ethora.chat.core.persistence.LocalStorage
 import com.ethora.chat.core.service.LogoutService
 import com.ethora.chat.core.xmpp.XMPPClient
 import com.ethora.chat.core.store.ChatStore
+import com.ethora.chat.core.store.ChatConnectionStatus
+import com.ethora.chat.core.store.ChatEventDispatcher
+import com.ethora.chat.core.store.ConnectionStore
 import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.store.MessageLoaderQueue
 import com.ethora.chat.core.store.MessagePriorityQueue
@@ -189,6 +193,8 @@ fun Chat(
     }
     
     ChatTheme(colors = config.colors) {
+        var hadSuccessfulConnection by remember(currentUser?.id) { mutableStateOf(false) }
+
         // Initialize XMPP client if user is available
         // Key by essential XMPP credentials to avoid recreation on minor user updates
         val xmppClient = remember(currentUser?.xmppUsername, currentUser?.xmppPassword, config.xmppSettings) {
@@ -206,6 +212,14 @@ fun Chat(
                         // Set delegate to handle reconnection and sync
                         client.setDelegate(object : XMPPClientDelegate {
                             override fun onXMPPClientConnected(client: XMPPClient) {
+                                hadSuccessfulConnection = true
+                                val state = com.ethora.chat.core.store.ChatConnectionState(
+                                    status = ChatConnectionStatus.ONLINE,
+                                    reason = null,
+                                    isRecovering = false
+                                )
+                                ConnectionStore.setState(ChatConnectionStatus.ONLINE)
+                                ChatEventDispatcher.emit(ChatEvent.ConnectionChanged(state))
                                 // Sync messages when reconnected (after offline)
                                 CoroutineScope(Dispatchers.IO).launch {
                                     try {
@@ -233,11 +247,39 @@ fun Chat(
                             }
                             
                             override fun onXMPPClientDisconnected(client: XMPPClient) {
-                                // Handle disconnection if needed
+                                val state = com.ethora.chat.core.store.ChatConnectionState(
+                                    status = ChatConnectionStatus.OFFLINE,
+                                    reason = "Disconnected",
+                                    isRecovering = hadSuccessfulConnection
+                                )
+                                ConnectionStore.setState(
+                                    status = ChatConnectionStatus.OFFLINE,
+                                    reason = "Disconnected",
+                                    isRecovering = hadSuccessfulConnection
+                                )
+                                ChatEventDispatcher.emit(ChatEvent.ConnectionChanged(state))
                             }
                             
                             override fun onStatusChanged(client: XMPPClient, status: ConnectionStatus) {
-                                // Handle status changes if needed
+                                val mapped = when (status) {
+                                    ConnectionStatus.ONLINE -> ChatConnectionStatus.ONLINE
+                                    ConnectionStatus.CONNECTING -> if (hadSuccessfulConnection) ChatConnectionStatus.DEGRADED else ChatConnectionStatus.CONNECTING
+                                    ConnectionStatus.OFFLINE -> ChatConnectionStatus.OFFLINE
+                                    ConnectionStatus.DISCONNECTING -> ChatConnectionStatus.DEGRADED
+                                    ConnectionStatus.ERROR -> ChatConnectionStatus.ERROR
+                                }
+                                val isRecovering = mapped == ChatConnectionStatus.DEGRADED
+                                val state = com.ethora.chat.core.store.ChatConnectionState(
+                                    status = mapped,
+                                    reason = status.name,
+                                    isRecovering = isRecovering
+                                )
+                                ConnectionStore.setState(
+                                    status = mapped,
+                                    reason = status.name,
+                                    isRecovering = isRecovering
+                                )
+                                ChatEventDispatcher.emit(ChatEvent.ConnectionChanged(state))
                             }
                             
                             override fun onMessageReceived(client: XMPPClient, message: com.ethora.chat.core.models.Message) {
@@ -271,7 +313,28 @@ fun Chat(
         
         // Connect XMPP client
         LaunchedEffect(xmppClient) {
-            xmppClient?.initializeClient()
+            if (xmppClient != null) {
+                ConnectionStore.setReconnectAction {
+                    ConnectionStore.setState(
+                        status = ChatConnectionStatus.CONNECTING,
+                        reason = "Manual reconnect",
+                        isRecovering = false
+                    )
+                    xmppClient.initializeClient()
+                }
+                ConnectionStore.setState(
+                    status = if (hadSuccessfulConnection) ChatConnectionStatus.DEGRADED else ChatConnectionStatus.CONNECTING,
+                    reason = "Initializing XMPP client",
+                    isRecovering = hadSuccessfulConnection
+                )
+                xmppClient.initializeClient()
+            } else {
+                ConnectionStore.setState(
+                    status = ChatConnectionStatus.OFFLINE,
+                    reason = "XMPP client unavailable"
+                )
+                ConnectionStore.setReconnectAction(null)
+            }
         }
         
         // Message loader queue (for background loading after initial load)
@@ -333,6 +396,11 @@ fun Chat(
                 messageLoaderQueue?.stop()
                 messagePriorityQueue?.stop()
                 xmppClient?.disconnect()
+                ConnectionStore.setReconnectAction(null)
+                ConnectionStore.setState(
+                    status = ChatConnectionStatus.OFFLINE,
+                    reason = "Disposed"
+                )
             }
         }
         

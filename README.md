@@ -150,8 +150,7 @@ fun EthoraChatScreen(
             disableRooms = true,
             chatHeaderSettings = ChatHeaderSettingsConfig(
                 roomTitleOverrides = mapOf(singleRoomJid to "Playground Room 1"),
-                chatInfoButtonDisabled = true,
-                backButtonDisabled = true
+                chatInfoButtonDisabled = true
             ),
             xmppSettings = XMPPSettings(
                 xmppServerUrl = BuildConfig.XMPP_DEV_SERVER,
@@ -187,8 +186,10 @@ fun EthoraChatScreen(
 ### Config Notes
 
 - `disableRooms = true` + `roomJID` in `Chat(...)` gives you single-room mode.
+- In single-room mode (`disableRooms = true`), the SDK hides the header back arrow automatically.
 - `jwtLogin` is used when `enabled = true` and token is provided.
 - `chatHeaderSettings.roomTitleOverrides` lets you replace raw JID in header.
+- `chatHeaderSettings.backButtonDisabled` is useful in multi-room mode (or any custom header flow) when you want to hide back explicitly.
 - `dnsFallbackOverrides` helps when emulator DNS cannot resolve your hosts.
 - `customAppToken` is forwarded via `ApiClient.setBaseUrl(...)`.
 
@@ -230,6 +231,50 @@ fun ChatTabBadge() {
 - The unread state comes from SDK `RoomStore`.
 - Unread values are meaningful after chat data is loaded (the `Chat(...)` flow has initialized rooms/session).
 - If chat is not initialized yet, unread will be `0`.
+
+## Connection State Hook (Host Facing)
+
+SDK now exposes connection state for host UI:
+
+- `useConnectionState(): ChatConnectionState`
+- `reconnectChat()` (manual retry trigger)
+
+`ChatConnectionState.status` values:
+- `OFFLINE`
+- `CONNECTING`
+- `ONLINE`
+- `DEGRADED`
+- `ERROR`
+
+Example: show banner and disable send CTA in host shell
+
+```kotlin
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import com.ethora.chat.reconnectChat
+import com.ethora.chat.useConnectionState
+import com.ethora.chat.core.store.ChatConnectionStatus
+
+@Composable
+fun ChatConnectivityBanner() {
+    val connection = useConnectionState()
+    if (connection.status != ChatConnectionStatus.ONLINE) {
+        Text("Chat is reconnecting...")
+        Button(onClick = { reconnectChat() }) {
+            Text("Retry")
+        }
+    }
+}
+```
+
+## New Send/Event Hooks
+
+`ChatConfig` now supports:
+- `onBeforeSend`: intercept/modify/cancel outgoing text/media before optimistic update.
+- `onChatEvent`: structured event stream (`sent`, `failed`, `edited`, `deleted`, `reaction`, `connection`, `media upload`).
+
+Existing `eventHandlers` remain supported for backward compatibility.
 
 ## Build / Validate
 

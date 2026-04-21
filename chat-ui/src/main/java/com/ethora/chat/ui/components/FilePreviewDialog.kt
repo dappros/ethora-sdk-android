@@ -35,6 +35,8 @@ import java.net.URLConnection
 @Composable
 fun FilePreviewDialog(
     message: Message?,
+    galleryImageUrls: List<String> = emptyList(),
+    galleryInitialIndex: Int = 0,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -65,6 +67,8 @@ fun FilePreviewDialog(
                     FullScreenImageViewer(
                         imageUrl = fileUrl.ifEmpty { previewUrl ?: "" },
                         fileName = fileName,
+                        imageUrls = galleryImageUrls,
+                        initialIndex = galleryInitialIndex,
                         onDismiss = onDismiss
                     )
                 }

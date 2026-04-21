@@ -22,6 +22,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.ethora.chat.core.models.Room
+import com.ethora.chat.core.models.RoomListItemProps
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.MessageStore
 import com.ethora.chat.core.store.RoomStore
 import java.text.SimpleDateFormat
@@ -39,6 +41,7 @@ fun RoomListView(
     val viewModel = remember { RoomListViewModel() }
     val rooms by viewModel.rooms.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val config by ChatStore.config.collectAsState()
     
     // Observe MessageStore to get last messages for rooms
     val messagesByRoom by MessageStore.messages.collectAsState()
@@ -232,14 +235,26 @@ fun RoomListView(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     items(filteredRooms) { room ->
-                        RoomListItem(
-                            room = room,
-                            isActive = selectedRoom?.jid == room.jid,
-                            onClick = { 
-                                RoomStore.setCurrentRoom(room)
-                                onRoomSelected(room) 
-                            }
-                        )
+                        val onClick = {
+                            RoomStore.setCurrentRoom(room)
+                            onRoomSelected(room)
+                        }
+                        val customRoomItem = config?.customComponents?.customRoomListItemComponent
+                        if (customRoomItem != null) {
+                            customRoomItem(
+                                RoomListItemProps(
+                                    room = room,
+                                    isActive = selectedRoom?.jid == room.jid,
+                                    onClick = onClick
+                                )
+                            )
+                        } else {
+                            RoomListItem(
+                                room = room,
+                                isActive = selectedRoom?.jid == room.jid,
+                                onClick = onClick
+                            )
+                        }
                     }
                 }
             }

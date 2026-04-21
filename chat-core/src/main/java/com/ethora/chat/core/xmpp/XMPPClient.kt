@@ -25,6 +25,7 @@ import org.jivesoftware.smackx.ping.PingManager
 import org.jxmpp.jid.EntityBareJid
 import org.jxmpp.jid.impl.JidCreate
 import org.jxmpp.jid.parts.Resourcepart
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.PriorityQueue
@@ -67,6 +68,8 @@ class XMPPClient(
     private val devServer: String = settings?.devServer ?: "wss://xmpp.ethoradev.com:5443/ws"
     private val host: String = settings?.host ?: "xmpp.ethoradev.com"
     private val conference: String = settings?.conference ?: "conference.xmpp.ethoradev.com"
+    // Use per-client resource so same account can stay online across multiple sessions/devices.
+    private val resource: String = "android-${UUID.randomUUID().toString().take(8)}"
     
     // Use WebSocket by default if URL starts with ws:// or wss://
     private val useWebSocket: Boolean = devServer.startsWith("ws://") || devServer.startsWith("wss://")
@@ -232,7 +235,7 @@ class XMPPClient(
                     password = password,
                     host = host,
                     conference = conference,
-                    resource = "default",
+                    resource = resource,
                     dnsFallbackOverrides = dnsFallbackOverrides
                 )
                 webSocketConnection?.setClientWrapper(this@XMPPClient)
@@ -307,7 +310,7 @@ class XMPPClient(
                     .setPort(serverPort)
                     .setXmppDomain(host)
                     .setUsernameAndPassword(username, password)
-                    .setResource(Resourcepart.from("default"))
+                    .setResource(Resourcepart.from(resource))
                     .setSecurityMode(ConnectionConfiguration.SecurityMode.ifpossible)
                     .build()
 

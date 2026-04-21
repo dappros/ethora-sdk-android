@@ -544,6 +544,13 @@ class XMPPWebSocketConnection(
     private fun parseAndHandleRealtimeMessage(xml: String) {
         try {
             val messageId = extractAttribute(xml, "id") ?: ""
+            // For consistency with MAM history IDs, prefer server archive stanza-id when available.
+            val stanzaIdStart = xml.indexOf("<stanza-id")
+            val stanzaIdEnd = xml.indexOf(">", stanzaIdStart)
+            val stanzaIdXml = if (stanzaIdStart != -1 && stanzaIdEnd != -1) {
+                xml.substring(stanzaIdStart, stanzaIdEnd + 1)
+            } else ""
+            val archiveId = extractAttribute(stanzaIdXml, "id")
             val from = extractAttribute(xml, "from") ?: ""
             val body = extractElementText(xml, "body") ?: ""
             
@@ -568,7 +575,11 @@ class XMPPWebSocketConnection(
             val hasMedia = isMediafile == "true" || location != null
             val hasData = dataXml.isNotBlank()
             
-            val effectiveMessageId = if (messageId.isNotBlank()) messageId else "msg-${System.currentTimeMillis()}"
+            val effectiveMessageId = when {
+                !archiveId.isNullOrBlank() -> archiveId
+                messageId.isNotBlank() -> messageId
+                else -> "msg-${System.currentTimeMillis()}"
+            }
 
             if (!hasBody && !hasMedia && !hasData) {
                 Log.d(TAG, "⚠️ Skipping message: no body, media, or data, messageId=$messageId. XML: ${xml.take(500)}")
@@ -634,7 +645,7 @@ class XMPPWebSocketConnection(
                 body = body,
                 roomJid = roomJid,
                 timestamp = System.currentTimeMillis(),
-                xmppId = effectiveMessageId,
+                xmppId = if (messageId.isNotBlank()) messageId else effectiveMessageId,
                 xmppFrom = from,
                 pending = false, // Real-time messages are not pending
                 isDeleted = isDeleted,
@@ -666,7 +677,7 @@ class XMPPWebSocketConnection(
                 Log.d(TAG, "✅ Matched pending message via ID matching")
             }
             
-            Log.d(TAG, "📨 Parsed real-time message: ID=$effectiveMessageId, From=$from, Body=${body.take(50)}, isMedia=$hasMedia, wasPending=$wasPending")
+            Log.d(TAG, "📨 Parsed real-time message: ID=$effectiveMessageId, stanzaId=$messageId, archiveId=$archiveId, From=$from, Body=${body.take(50)}, isMedia=$hasMedia, wasPending=$wasPending")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing real-time message", e)
         }
