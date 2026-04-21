@@ -3,10 +3,13 @@ package com.ethora.chat.ui.components
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -19,6 +22,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
@@ -200,6 +204,14 @@ fun MessageBubble(
                             MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4
                     )
+                    val firstUrl = remember(message.body) { extractFirstUrl(message.body) }
+                    if (!firstUrl.isNullOrBlank()) {
+                        UrlPreviewCard(
+                            url = firstUrl,
+                            isUser = isUser,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
                 }
             }
         }
@@ -336,17 +348,25 @@ private fun FormattedMessageText(
     textColor: androidx.compose.ui.graphics.Color,
     lineHeight: androidx.compose.ui.unit.TextUnit
 ) {
+    val uriHandler = LocalUriHandler.current
     val annotatedText = remember(text) {
         buildFormattedText(text, textColor)
     }
-    
-    Text(
+
+    ClickableText(
         text = annotatedText,
         modifier = modifier,
         style = MaterialTheme.typography.bodyMedium.copy(
-            lineHeight = lineHeight
+            lineHeight = lineHeight,
+            color = textColor
         ),
-        color = textColor
+        onClick = { offset ->
+            annotatedText.getStringAnnotations(tag = "URL", start = offset, end = offset)
+                .firstOrNull()
+                ?.let { annotation ->
+                    runCatching { uriHandler.openUri(annotation.item) }
+                }
+        }
     )
 }
 
@@ -359,6 +379,22 @@ private data class TextMatch(val start: Int, val end: Int, val type: String)
  * Build formatted text with Markdown and autolink
  */
 private fun buildFormattedText(text: String, defaultColor: androidx.compose.ui.graphics.Color): AnnotatedString {
+    val normalizedText = text
+        .lineSequence()
+        .joinToString("\n") { line ->
+            when {
+                line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") -> {
+                    val cleaned = line.trimStart().drop(2)
+                    "• $cleaned"
+                }
+                line.trimStart().startsWith("> ") -> {
+                    val cleaned = line.trimStart().drop(2)
+                    "❝ $cleaned"
+                }
+                else -> line
+            }
+        }
+
     return buildAnnotatedString {
         // URL pattern (http, https, www)
         val urlPattern = Pattern.compile(
@@ -374,13 +410,13 @@ private fun buildFormattedText(text: String, defaultColor: androidx.compose.ui.g
         val matches = mutableListOf<TextMatch>()
         
         // Find all URLs
-        val urlMatcher = urlPattern.matcher(text)
+        val urlMatcher = urlPattern.matcher(normalizedText)
         while (urlMatcher.find()) {
             matches.add(TextMatch(urlMatcher.start(), urlMatcher.end(), "url"))
         }
         
         // Find Markdown formatting (avoid overlapping with URLs)
-        val boldMatcher = boldPattern.matcher(text)
+        val boldMatcher = boldPattern.matcher(normalizedText)
         while (boldMatcher.find()) {
             val start = boldMatcher.start()
             val end = boldMatcher.end()
@@ -391,7 +427,7 @@ private fun buildFormattedText(text: String, defaultColor: androidx.compose.ui.g
             }
         }
         
-        val italicMatcher = italicPattern.matcher(text)
+        val italicMatcher = italicPattern.matcher(normalizedText)
         while (italicMatcher.find()) {
             val start = italicMatcher.start()
             val end = italicMatcher.end()
@@ -402,7 +438,7 @@ private fun buildFormattedText(text: String, defaultColor: androidx.compose.ui.g
             }
         }
         
-        val codeMatcher = codePattern.matcher(text)
+        val codeMatcher = codePattern.matcher(normalizedText)
         while (codeMatcher.find()) {
             val start = codeMatcher.start()
             val end = codeMatcher.end()
@@ -423,13 +459,13 @@ private fun buildFormattedText(text: String, defaultColor: androidx.compose.ui.g
             val type = match.type
             // Add text before match
             if (start > currentIndex) {
-                append(text.substring(currentIndex, start))
+                append(normalizedText.substring(currentIndex, start))
             }
             
             // Add formatted text
             when (type) {
                 "url" -> {
-                    val url = text.substring(start, end)
+                    val url = normalizedText.substring(start, end)
                     val fullUrl = if (url.startsWith("www.")) "https://$url" else url
                     withStyle(
                         style = SpanStyle(
@@ -447,7 +483,7 @@ private fun buildFormattedText(text: String, defaultColor: androidx.compose.ui.g
                     )
                 }
                 "bold" -> {
-                    val content = text.substring(start + 2, end - 2) // Remove ** markers
+                    val content = normalizedText.substring(start + 2, end - 2) // Remove ** markers
                     withStyle(
                         style = SpanStyle(
                             fontWeight = FontWeight.Bold
@@ -457,7 +493,7 @@ private fun buildFormattedText(text: String, defaultColor: androidx.compose.ui.g
                     }
                 }
                 "italic" -> {
-                    val content = text.substring(start + 1, end - 1) // Remove * marker
+                    val content = normalizedText.substring(start + 1, end - 1) // Remove * marker
                     withStyle(
                         style = SpanStyle(
                             fontStyle = FontStyle.Italic
@@ -467,7 +503,7 @@ private fun buildFormattedText(text: String, defaultColor: androidx.compose.ui.g
                     }
                 }
                 "code" -> {
-                    val content = text.substring(start + 1, end - 1) // Remove ` markers
+                    val content = normalizedText.substring(start + 1, end - 1) // Remove ` markers
                     withStyle(
                         style = SpanStyle(
                             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
@@ -483,8 +519,71 @@ private fun buildFormattedText(text: String, defaultColor: androidx.compose.ui.g
         }
         
         // Add remaining text
-        if (currentIndex < text.length) {
-            append(text.substring(currentIndex))
+        if (currentIndex < normalizedText.length) {
+            append(normalizedText.substring(currentIndex))
+        }
+    }
+}
+
+private fun extractFirstUrl(text: String): String? {
+    val urlPattern = Pattern.compile(
+        "(?i)\\b(https?://[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=%]+|www\\.[\\w\\-._~:/?#\\[\\]@!$&'()*+,;=%]+)",
+        Pattern.CASE_INSENSITIVE
+    )
+    val matcher = urlPattern.matcher(text)
+    if (!matcher.find()) return null
+    val raw = matcher.group()
+    return if (raw.startsWith("www.")) "https://$raw" else raw
+}
+
+@Composable
+private fun UrlPreviewCard(
+    url: String,
+    isUser: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val previews by UrlPreviewStore.previews.collectAsState()
+    val uriHandler = LocalUriHandler.current
+    val preview = previews[url]
+
+    LaunchedEffect(url) {
+        UrlPreviewStore.prefetch(url)
+    }
+
+    Surface(
+        modifier = modifier.clickable {
+            runCatching { uriHandler.openUri(url) }
+        },
+        shape = RoundedCornerShape(12.dp),
+        color = if (isUser) {
+            MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.12f)
+        } else {
+            MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)
+        }
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            val title = preview?.title?.takeIf { it.isNotBlank() } ?: url
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 2
+            )
+            val description = preview?.description?.takeIf { it.isNotBlank() }
+            if (description != null) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 3,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = preview?.host ?: url,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
         }
     }
 }

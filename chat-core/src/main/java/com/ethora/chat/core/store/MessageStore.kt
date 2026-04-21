@@ -131,8 +131,9 @@ object MessageStore {
             val exactIdMatch = existing.id == message.id
             val incomingXmppIdMatchesExistingId = message.xmppId != null && existing.id == message.xmppId
             val existingXmppIdMatchesIncomingId = existing.xmppId != null && existing.xmppId == message.id
+            val xmppIdMatch = existing.xmppId != null && message.xmppId != null && existing.xmppId == message.xmppId
             
-            exactIdMatch || incomingXmppIdMatchesExistingId || existingXmppIdMatchesIncomingId
+            exactIdMatch || incomingXmppIdMatchesExistingId || existingXmppIdMatchesIncomingId || xmppIdMatch
         }
         
         if (existingIndex >= 0) {
@@ -336,8 +337,15 @@ object MessageStore {
     fun addMessages(roomJid: String, newMessages: List<Message>) {
         val currentMessages = _messages.value.toMutableMap()
         val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
-        val existingIds = roomMessages.map { it.id }.toSet()
-        val messagesToAdd = newMessages.filter { it.id !in existingIds }
+        val messagesToAdd = newMessages.filter { incoming ->
+            roomMessages.none { existing ->
+                val exactIdMatch = existing.id == incoming.id
+                val incomingXmppIdMatchesExistingId = incoming.xmppId != null && existing.id == incoming.xmppId
+                val existingXmppIdMatchesIncomingId = existing.xmppId != null && existing.xmppId == incoming.id
+                val xmppIdMatch = existing.xmppId != null && incoming.xmppId != null && existing.xmppId == incoming.xmppId
+                exactIdMatch || incomingXmppIdMatchesExistingId || existingXmppIdMatchesIncomingId || xmppIdMatch
+            }
+        }
         
         if (messagesToAdd.isNotEmpty()) {
             roomMessages.addAll(messagesToAdd)

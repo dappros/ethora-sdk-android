@@ -3,6 +3,9 @@ package com.ethora.chat.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -39,12 +42,23 @@ import java.io.InputStream
 fun FullScreenImageViewer(
     imageUrl: String,
     fileName: String,
+    imageUrls: List<String> = emptyList(),
+    initialIndex: Int = 0,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var isDownloading by remember { mutableStateOf(false) }
+    val gallery = remember(imageUrl, imageUrls) { if (imageUrls.isEmpty()) listOf(imageUrl) else imageUrls }
+    val startIndex = initialIndex.coerceIn(0, (gallery.size - 1).coerceAtLeast(0))
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = startIndex)
+    val currentIndex by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex.coerceIn(0, (gallery.size - 1).coerceAtLeast(0))
+        }
+    }
+    val currentUrl = gallery.getOrElse(currentIndex) { imageUrl }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     
@@ -53,26 +67,33 @@ fun FullScreenImageViewer(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // Image with zoom
-        AsyncImage(
-            model = imageUrl,
-            contentDescription = fileName,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer(
-                    scaleX = scale,
-                    scaleY = scale,
-                    translationX = offset.x,
-                    translationY = offset.y
+        // Gallery with swipe
+        LazyRow(
+            state = listState,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            itemsIndexed(gallery, key = { index, url -> "$index:$url" }) { _, url ->
+                AsyncImage(
+                    model = url,
+                    contentDescription = fileName,
+                    modifier = Modifier
+                        .fillParentMaxSize()
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offset.x,
+                            translationY = offset.y
+                        )
+                        .pointerInput(url) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                scale = (scale * zoom).coerceIn(1f, 5f)
+                                offset += pan
+                            }
+                        },
+                    contentScale = ContentScale.Fit
                 )
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        scale = (scale * zoom).coerceIn(1f, 5f)
-                        offset += pan
-                    }
-                },
-            contentScale = ContentScale.Fit
-        )
+            }
+        }
         
         // Top bar with close and download buttons
         Row(
@@ -104,7 +125,7 @@ fun FullScreenImageViewer(
                     scope.launch {
                         isDownloading = true
                         try {
-                            downloadImage(context, imageUrl, fileName)
+                            downloadImage(context, currentUrl, fileName)
                         } catch (e: Exception) {
                             Log.e("FullScreenImageViewer", "Error downloading image", e)
                         } finally {
@@ -132,6 +153,17 @@ fun FullScreenImageViewer(
                     )
                 }
             }
+        }
+
+        if (gallery.size > 1) {
+            Text(
+                text = "${currentIndex + 1}/${gallery.size}",
+                color = Color.White,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 24.dp)
+            )
         }
     }
 }
