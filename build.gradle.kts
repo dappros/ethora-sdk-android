@@ -13,14 +13,7 @@ buildscript {
 }
 
 plugins {
-    // `maven-publish` no longer applied at the root. The former root
-    // publication (see the removed block below) collided with
-    // :ethora-component's own publication on the same coordinate
-    // `com.github.dappros:ethora-sdk-android:<version>`, and JitPack
-    // shipped whichever of the two the build processed last — so the
-    // real AAR from :ethora-component was getting silently overwritten
-    // by a pom-only proxy that just listed ethora-component as a
-    // dependency.
+    id("maven-publish")
     id("com.android.application") version "8.5.2" apply false
     id("com.android.library") version "8.5.2" apply false
     id("org.jetbrains.kotlin.android") version "1.9.22" apply false
@@ -47,11 +40,55 @@ subprojects {
     layout.buildDirectory.set(file("/tmp/android_build/${rootProject.name}/${project.name}"))
 }
 
-// (Root publishing {} block intentionally removed — see plugins{} comment.)
+// Root publication restored after the 5645139 experiment.
 //
-// Existing consumers of `com.github.dappros:ethora-sdk-android:<version>`
-// continue to work: :ethora-component's publication keeps that exact
-// artifactId and now ships the real AAR directly rather than a pom-only
-// proxy. Contents are identical — chat-core + chat-ui sources are
-// merged into ethora-component via its sourceSets, so a transitive
-// dependency on "ethora-component" was never actually needed.
+// Background: v1.0.21's root 'root' publication and :ethora-component's
+// 'release' publication both claimed artifactId 'ethora-sdk-android'
+// and collided — Gradle warned, JitPack shipped whichever Gradle
+// processed last. Experiment 5645139 removed the root publication
+// entirely; the build compiled fine, but JitPack's artifact-discovery
+// step expects a root-level POM at the canonical coordinate and
+// returned 'No build artifacts found' (build 9b8126f — "BUILD
+// SUCCESSFUL / No build artifacts found").
+//
+// Fixing both the collision AND the discovery gap by giving the two
+// publications DISTINCT artifactIds:
+//
+//   com.github.dappros:ethora-sdk-android:<version>  — pom-only,
+//     from this root publication. Serves existing consumers; its POM
+//     declares a transitive runtime dependency on ethora-component so
+//     Gradle resolves the real AAR when someone writes:
+//         implementation("com.github.dappros:ethora-sdk-android:<ver>")
+//
+//   com.github.dappros:ethora-component:<version>  — the real AAR,
+//     produced by :ethora-component (see ethora-component/build.gradle.kts
+//     afterEvaluate block — its artifactId is also renamed to
+//     "ethora-component" in the same commit that brings this block back).
+//
+// JitPack's yml invokes both publishToMavenLocal tasks, so both POMs
+// land in ~/.m2 and both coordinates become resolvable.
+publishing {
+    publications {
+        create<MavenPublication>("root") {
+            val resolvedGroupId = project.group.toString()
+            val resolvedVersion = project.version.toString()
+
+            groupId = resolvedGroupId
+            artifactId = "ethora-sdk-android"
+            version = resolvedVersion
+            pom.packaging = "pom"
+            pom.withXml {
+                val dependenciesNode = asNode().appendNode("dependencies")
+                val dependencyNode = dependenciesNode.appendNode("dependency")
+                dependencyNode.appendNode("groupId", resolvedGroupId)
+                dependencyNode.appendNode("artifactId", "ethora-component")
+                dependencyNode.appendNode("version", resolvedVersion)
+                dependencyNode.appendNode("scope", "runtime")
+            }
+        }
+    }
+}
+
+tasks.named("publishToMavenLocal") {
+    dependsOn(":ethora-component:publishReleasePublicationToMavenLocal")
+}

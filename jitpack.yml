@@ -2,10 +2,13 @@ jdk:
   - openjdk17
 
 install:
-  # :publishRootPublicationToMavenLocal removed — the root project no
-  # longer declares a maven-publish publication (it was a pom-only
-  # proxy that collided with :ethora-component on the same coordinate,
-  # so JitPack silently clobbered one with the other). :ethora-component
-  # alone now produces the real AAR at
-  # com.github.dappros:ethora-sdk-android:<version>.
-  - ./gradlew clean -xtest -xlint assemble :ethora-component:publishReleasePublicationToMavenLocal -Pversion=$VERSION -Pgroup=com.github.dappros
+  # Publishes two DISTINCT coordinates (previously collided on the same
+  # one, which caused JitPack to silently replace the AAR with a
+  # pom-only proxy):
+  #   :publishRootPublicationToMavenLocal
+  #     → com.github.dappros:ethora-sdk-android:<SHA>    (pom, depends on ethora-component)
+  #   :ethora-component:publishReleasePublicationToMavenLocal
+  #     → com.github.dappros:ethora-component:<SHA>      (real AAR)
+  # Consumers using the legacy 'ethora-sdk-android' coord still resolve
+  # the AAR transitively via the pom's dependency.
+  - ./gradlew clean -xtest -xlint assemble :publishRootPublicationToMavenLocal :ethora-component:publishReleasePublicationToMavenLocal -Pversion=$VERSION -Pgroup=com.github.dappros

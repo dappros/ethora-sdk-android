@@ -140,13 +140,19 @@ afterEvaluate {
     val cmdProps = gradle.startParameter.projectProperties
     val resolvedGroup = cmdProps["group"] ?: "com.github.dappros"
     val resolvedVersion = cmdProps["version"] ?: libs.versions.versionName.get()
-    println("[JitPack] Publishing ethora-sdk-android → $resolvedGroup:ethora-sdk-android:$resolvedVersion")
+    // artifactId renamed from "ethora-sdk-android" to "ethora-component".
+    // Previously both root and this module claimed the same coordinate,
+    // which collided and caused JitPack to ship whichever Gradle wrote
+    // last (a pom-only proxy that masked the real AAR). Distinct coords
+    // now — root publishes ethora-sdk-android (pom, depends on this),
+    // this module publishes ethora-component (the actual AAR).
+    println("[JitPack] Publishing ethora-component → $resolvedGroup:ethora-component:$resolvedVersion")
     publishing {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
                 groupId = resolvedGroup
-                artifactId = "ethora-sdk-android"
+                artifactId = "ethora-component"
                 version = resolvedVersion
             }
         }
