@@ -7,7 +7,12 @@ import com.ethora.chat.core.store.RoomStore
 import androidx.compose.runtime.collectAsState
 
 data class UnreadState(
+    /** True when ANY room has unread messages. Use for dot-style indicators. */
+    val hasUnread: Boolean,
+    /** Total unread across rooms. Kept for backward compat / diagnostics —
+     *  prefer `hasUnread` when you only need a boolean indicator. */
     val totalCount: Int,
+    /** Pretty-printed total (`0`, `3`, `10+`). */
     val displayCount: String
 )
 
@@ -21,6 +26,7 @@ fun useUnread(maxCount: Int = 10): UnreadState {
         }
         val displayCount = if (totalCount > maxCount) "$maxCount+" else totalCount.toString()
         UnreadState(
+            hasUnread = totalCount > 0,
             totalCount = totalCount,
             displayCount = displayCount
         )

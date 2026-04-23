@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -17,13 +16,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -52,29 +49,47 @@ fun ChatInput(
     var text by remember { mutableStateOf(editText ?: "") }
     var selectedFile by remember { mutableStateOf<Pair<File, String>?>(null) }
     var isFocused by remember { mutableStateOf(false) }
-    var typingJob by remember { mutableStateOf<Job?>(null) }
+    var idleTypingJob by remember { mutableStateOf<Job?>(null) }
+    // Tracks whether we've already sent a "composing" for the current focus session
+    // so we don't spam the server on every keystroke. Matches web: one composing on
+    // focus, one paused on blur / idle timeout.
+    var composingSent by remember { mutableStateOf(false) }
     var showAttachSheet by remember { mutableStateOf(false) }
-    
+
+    fun sendStop() {
+        if (composingSent) {
+            composingSent = false
+            onStopTyping?.invoke()
+        }
+    }
+    fun sendStart() {
+        if (!composingSent && editText == null) {
+            composingSent = true
+            onStartTyping?.invoke()
+        }
+    }
+    fun resetIdleTimer() {
+        idleTypingJob?.cancel()
+        if (!composingSent) return
+        idleTypingJob = coroutineScope.launch {
+            // Auto-pause after 3s of no typing; keeps XMPP chatter bounded.
+            delay(3_000)
+            sendStop()
+        }
+    }
+
     // Update text when editText changes
     LaunchedEffect(editText) {
         if (editText != null) {
             text = editText
         }
     }
-    
-    // Debounce typing indicator (matches web: setTimeout in useComposing)
-    LaunchedEffect(text, isFocused) {
-        typingJob?.cancel()
-        if (text.isBlank() || !isFocused) {
-            onStopTyping?.invoke()
-        } else if (text.isNotBlank() && isFocused && editText == null) {
-            // Only send typing indicator if not in edit mode
-            onStartTyping?.invoke()
-            // Debounce: send stop typing after 100ms of no typing (matches web)
-            typingJob = coroutineScope.launch {
-                delay(100)
-                onStopTyping?.invoke()
-            }
+
+    // Stop typing when the composable leaves composition (navigation, screen close).
+    DisposableEffect(Unit) {
+        onDispose {
+            idleTypingJob?.cancel()
+            if (composingSent) onStopTyping?.invoke()
         }
     }
     
@@ -145,7 +160,11 @@ fun ChatInput(
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                    // Opaque surface so the preview does not blend with chat messages
+                    // behind the input area. Matches web: file preview stacks above the
+                    // text field inside the input container, never overlaying chat.
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    tonalElevation = 2.dp
                 ) {
                     Row(
                         modifier = Modifier
@@ -303,23 +322,28 @@ fun ChatInput(
                 
                 OutlinedTextField(
                     value = text,
-                    onValueChange = { 
+                    onValueChange = {
                         text = it
-                        // Send typing indicator when user starts typing (matches web: onFocus)
-                        if (it.isNotBlank() && isFocused && onStartTyping != null && editText == null) {
-                            onStartTyping()
+                        // One "composing" per focus session; the 3s idle timer handles
+                        // sending "paused" after the user stops typing — no per-keystroke
+                        // XMPP traffic.
+                        if (it.isNotBlank() && isFocused && editText == null) {
+                            sendStart()
+                            resetIdleTimer()
+                        } else if (it.isBlank()) {
+                            sendStop()
                         }
                     },
                     modifier = Modifier
                         .weight(1f)
                         .onFocusChanged { focusState ->
                             isFocused = focusState.isFocused
-                            if (focusState.isFocused && text.isNotBlank() && onStartTyping != null && editText == null) {
-                                // Send start typing on focus (matches web: onFocus)
-                                onStartTyping()
-                            } else if (!focusState.isFocused && onStopTyping != null) {
-                                // Send stop typing on blur (matches web: onBlur)
-                                onStopTyping()
+                            if (focusState.isFocused && text.isNotBlank() && editText == null) {
+                                sendStart()
+                                resetIdleTimer()
+                            } else if (!focusState.isFocused) {
+                                idleTypingJob?.cancel()
+                                sendStop()
                             }
                         },
                     placeholder = { 
@@ -346,6 +370,10 @@ fun ChatInput(
                     FloatingActionButton(
                         onClick = {
                             if (!canSendMessage) return@FloatingActionButton
+                            // Always pause typing on send — bounds XMPP traffic and matches
+                            // the user's actual state (they finished composing this message).
+                            idleTypingJob?.cancel()
+                            sendStop()
                             if (selectedFile != null && onSendMedia != null && editText == null) {
                                 val (file, mimeType) = selectedFile!!
                                 onSendMedia(file, mimeType)
@@ -412,71 +440,59 @@ fun ChatInput(
     }
 
     if (showAttachSheet && onSendMedia != null && editText == null) {
-        Dialog(onDismissRequest = { showAttachSheet = false }) {
-            Box(
-                modifier = Modifier.fillMaxSize()
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showAttachSheet = false },
+            sheetState = sheetState,
+            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            // fillMaxWidth is the default for ModalBottomSheet; explicit modifier guarantees
+            // edge-to-edge even when parent wraps in a constrained Surface.
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.35f))
-                        .clickable { showAttachSheet = false }
+                Text(
+                    text = "Attach media",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 8.dp)
                 )
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .clickable(enabled = false) {},
-                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 2.dp,
-                    shadowElevation = 8.dp
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 20.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            text = "Attach media",
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
 
-                        ListItem(
-                            headlineContent = { Text("Media") },
-                            supportingContent = { Text("Photo or video from gallery") },
-                            leadingContent = { Icon(Icons.Default.Image, contentDescription = null) },
-                            modifier = Modifier.clickable {
-                                showAttachSheet = false
-                                mediaPickerLauncher.launch(arrayOf("image/*", "video/*"))
-                            }
-                        )
-
-                        ListItem(
-                            headlineContent = { Text("Camera") },
-                            supportingContent = { Text("Take a photo") },
-                            leadingContent = { Icon(Icons.Default.PhotoCamera, contentDescription = null) },
-                            modifier = Modifier.clickable {
-                                showAttachSheet = false
-                                cameraLauncher.launch(null)
-                            }
-                        )
-
-                        ListItem(
-                            headlineContent = { Text("File") },
-                            supportingContent = { Text("PDF, docs and other files") },
-                            leadingContent = { Icon(Icons.Default.InsertDriveFile, contentDescription = null) },
-                            modifier = Modifier.clickable {
-                                showAttachSheet = false
-                                filePickerLauncher.launch(arrayOf("*/*"))
-                            }
-                        )
-
-                        Spacer(modifier = Modifier.height(8.dp))
+                ListItem(
+                    headlineContent = { Text("Media") },
+                    supportingContent = { Text("Photo or video from gallery") },
+                    leadingContent = { Icon(Icons.Default.Image, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        showAttachSheet = false
+                        mediaPickerLauncher.launch(arrayOf("image/*", "video/*"))
                     }
-                }
+                )
+
+                ListItem(
+                    headlineContent = { Text("Camera") },
+                    supportingContent = { Text("Take a photo") },
+                    leadingContent = { Icon(Icons.Default.PhotoCamera, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        showAttachSheet = false
+                        cameraLauncher.launch(null)
+                    }
+                )
+
+                ListItem(
+                    headlineContent = { Text("File") },
+                    supportingContent = { Text("PDF, docs and other files") },
+                    leadingContent = { Icon(Icons.Default.InsertDriveFile, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        showAttachSheet = false
+                        filePickerLauncher.launch(arrayOf("*/*"))
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
             }
         }
     }

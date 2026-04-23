@@ -2,6 +2,7 @@ package com.ethora.chat.core.store
 
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.persistence.MessageCache
+import com.ethora.chat.core.xmpp.TimestampUtils
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,6 +18,47 @@ import kotlinx.coroutines.sync.withLock
  * Persists messages to Room Database (matches web: redux-persist with localStorage)
  */
 object MessageStore {
+    // -------- Ordering: port of web's `compareMessageOrder` (roomsSlice.ts) --------
+
+    /** Matches web's getMessageTimestampValue — 4-source fallback using
+     *  TimestampUtils.getTimestampFromUnknown so numeric chunks inside id
+     *  strings ("send-text-message-1704067200000") still resolve. */
+    private fun messageTimestampValue(m: Message): Long {
+        val stored = m.timestamp ?: 0L
+        if (stored > 0) return stored
+        return TimestampUtils.getTimestampFromUnknown(m.date).takeIf { it > 0 }
+            ?: TimestampUtils.getTimestampFromUnknown(m.xmppId).takeIf { it > 0 }
+            ?: TimestampUtils.getTimestampFromUnknown(m.id).takeIf { it > 0 }
+            ?: m.date.time
+    }
+
+    /** Web's compareMessageOrder: ts asc → pending last → stable key → body. */
+    private val messageOrder: Comparator<Message> = Comparator { a, b ->
+        val tsA = messageTimestampValue(a)
+        val tsB = messageTimestampValue(b)
+        if (tsA != tsB) return@Comparator tsA.compareTo(tsB)
+        val pendingA = if (a.pending == true) 1 else 0
+        val pendingB = if (b.pending == true) 1 else 0
+        if (pendingA != pendingB) return@Comparator pendingA.compareTo(pendingB)
+        val keyA = (a.xmppId ?: a.id)
+        val keyB = (b.xmppId ?: b.id)
+        if (keyA != keyB) return@Comparator keyA.compareTo(keyB)
+        a.body.compareTo(b.body)
+    }
+
+    private fun List<Message>.sortedForUi(): List<Message> = sortedWith(messageOrder)
+
+    /**
+     * Most recent known server-side timestamp across a room. Optimistic
+     * messages set their own `timestamp` to `max(now, last + 1)` using this
+     * so they never sort before a server message with a slightly drifted
+     * clock. Public helper because `ChatRoomViewModel` needs it at send time.
+     */
+    fun lastKnownTimestamp(roomJid: String): Long {
+        val list = _messages.value[roomJid] ?: return 0L
+        return list.maxOfOrNull { messageTimestampValue(it) } ?: 0L
+    }
+
     private val _messages = MutableStateFlow<Map<String, List<Message>>>(emptyMap())
     val messages: StateFlow<Map<String, List<Message>>> = _messages.asStateFlow()
     
@@ -34,6 +76,10 @@ object MessageStore {
         android.util.Log.d("MessageStore", "✅ MessageStore initialized with MessageCache")
     }
     
+    // Per-room persistence cap — bumped from 50 to 200 so offline users don't lose the
+    // scrollback they had before; web keeps a larger cache too.
+    private const val PERSIST_LIMIT_PER_ROOM = 200
+
     /**
      * Load messages from persistence for a room
      */
@@ -41,11 +87,10 @@ object MessageStore {
         return try {
             val cache = messageCache
             if (cache != null) {
-                // Load last 50 messages (matches web: limitMessagesTransform)
-                val persistedMessages = cache.getLatestMessages(roomJid, 50)
+                val persistedMessages = cache.getLatestMessages(roomJid, PERSIST_LIMIT_PER_ROOM)
                 android.util.Log.d("MessageStore", "📂 Loaded ${persistedMessages.size} messages from persistence for $roomJid")
                 // Sort by timestamp (oldest first) to match store expectations and ensure takeLast() works correctly
-                persistedMessages.sortedBy { it.timestamp ?: it.date.time }
+                persistedMessages.sortedForUi()
             } else {
                 android.util.Log.w("MessageStore", "⚠️ MessageCache not initialized, cannot load from persistence")
                 emptyList()
@@ -82,9 +127,8 @@ object MessageStore {
         persistenceScope.launch {
             persistenceMutex.withLock {
                 try {
-                    // Limit to last 50 messages per room (matches web: limitMessagesTransform)
-                    val messagesToSave = if (messages.size > 50) {
-                        messages.takeLast(50)
+                    val messagesToSave = if (messages.size > PERSIST_LIMIT_PER_ROOM) {
+                        messages.takeLast(PERSIST_LIMIT_PER_ROOM)
                     } else {
                         messages
                     }
@@ -141,21 +185,28 @@ object MessageStore {
             
             // If it's a pending message, update it and clear pending state
             if (existingMessage.pending == true) {
-                // Deep merge: keep existing values but update with new message and set pending: false
+                // Deep merge: prefer the incoming server echo but fall back to every
+                // upload-side field the client set locally before the server was
+                // asked to echo it. Missing ANY of these (isMediafile/originalName/
+                // body) causes the UI to render the message as plain text because
+                // MessageBubble gates on `isMediafile == "true"`.
                 val updatedMessage = message.copy(
                     id = existingMessage.id, // Keep original optimistic ID
-                    pending = false, // Always set pending to false when confirmed
-                    // Preserve upload metadata for media messages
-                    location = message.location ?: existingMessage.location,
-                    locationPreview = message.locationPreview ?: existingMessage.locationPreview,
+                    pending = false,
+                    body = if (message.body.isNotBlank()) message.body else existingMessage.body,
+                    isMediafile = message.isMediafile ?: existingMessage.isMediafile,
+                    location = message.location?.takeIf { it.isNotBlank() } ?: existingMessage.location,
+                    locationPreview = message.locationPreview?.takeIf { it.isNotBlank() } ?: existingMessage.locationPreview,
                     fileName = message.fileName ?: existingMessage.fileName,
                     mimetype = message.mimetype ?: existingMessage.mimetype,
-                    size = message.size ?: existingMessage.size
+                    originalName = message.originalName ?: existingMessage.originalName,
+                    size = message.size ?: existingMessage.size,
+                    waveForm = message.waveForm ?: existingMessage.waveForm
                 )
                 roomMessages[existingIndex] = updatedMessage
                 android.util.Log.d("MessageStore", "✅ Updated pending message ${existingMessage.id} (matched by ID/xmppId)")
                 
-                val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
+                val sorted = roomMessages.sortedForUi()
                 currentMessages[roomJid] = sorted
                 _messages.value = currentMessages
                 
@@ -174,7 +225,7 @@ object MessageStore {
         roomMessages.add(message)
         android.util.Log.d("MessageStore", "✅ Added new message ${message.id}")
         
-        val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
+        val sorted = roomMessages.sortedForUi()
         currentMessages[roomJid] = sorted
         _messages.value = currentMessages
         
@@ -187,23 +238,37 @@ object MessageStore {
         return false
     }
 
-    private fun schedulePendingTimeout(roomJid: String, messageId: String, timeoutMs: Long = 8000L) {
+    // Tracks ids that already have a pending timeout scheduled so re-entering
+    // `addMessage`/`updateMessage` with the same pending message doesn't spawn
+    // a pile of parallel timers.
+    private val pendingTimeoutScheduled = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    )
+
+    private fun schedulePendingTimeout(roomJid: String, messageId: String, timeoutMs: Long = 6000L) {
+        val key = "$roomJid|$messageId"
+        if (!pendingTimeoutScheduled.add(key)) return
         pendingScope.launch {
             kotlinx.coroutines.delay(timeoutMs)
             val currentMessages = _messages.value.toMutableMap()
-            val roomMessages = currentMessages[roomJid]?.toMutableList() ?: return@launch
+            val roomMessages = currentMessages[roomJid]?.toMutableList()
+            if (roomMessages == null) {
+                pendingTimeoutScheduled.remove(key)
+                return@launch
+            }
             val index = roomMessages.indexOfFirst { it.id == messageId && it.pending == true }
             if (index >= 0) {
                 val updated = roomMessages[index].copy(pending = false)
                 roomMessages[index] = updated
-                val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
+                val sorted = roomMessages.sortedForUi()
                 currentMessages[roomJid] = sorted
                 _messages.value = currentMessages
                 persistMessage(roomJid, updated)
                 updateRoomLastMessage(roomJid, sorted)
                 com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
-                android.util.Log.w("MessageStore", "⏱️ Pending timeout applied for message $messageId in $roomJid")
+                android.util.Log.w("MessageStore", "⏱️ Pending timeout cleared pending=$messageId in $roomJid")
             }
+            pendingTimeoutScheduled.remove(key)
         }
     }
     
@@ -300,21 +365,27 @@ object MessageStore {
                 roomMessages.removeAt(duplicateIndex)
             }
             
-            // Update pending message with received message data, keeping the original ID
-            // Deep merge: keep existing values but update with new message and set pending: false
+            // Update pending message with received message data, keeping the original ID.
+            // Must preserve every upload-side attribute the client already set — missing
+            // any one (isMediafile in particular) causes the UI to treat the message as
+            // plain text and drop the photo.
             val updatedMessage = receivedMessage.copy(
                 id = pendingMessage.id, // Keep original optimistic ID
                 pending = false,
-                // Preserve upload metadata if present
-                location = receivedMessage.location ?: pendingMessage.location,
-                locationPreview = receivedMessage.locationPreview ?: pendingMessage.locationPreview,
+                body = if (receivedMessage.body.isNotBlank()) receivedMessage.body else pendingMessage.body,
+                isMediafile = receivedMessage.isMediafile ?: pendingMessage.isMediafile,
+                location = receivedMessage.location?.takeIf { it.isNotBlank() } ?: pendingMessage.location,
+                locationPreview = receivedMessage.locationPreview?.takeIf { it.isNotBlank() } ?: pendingMessage.locationPreview,
                 fileName = receivedMessage.fileName ?: pendingMessage.fileName,
-                mimetype = receivedMessage.mimetype ?: pendingMessage.mimetype
+                mimetype = receivedMessage.mimetype ?: pendingMessage.mimetype,
+                originalName = receivedMessage.originalName ?: pendingMessage.originalName,
+                size = receivedMessage.size ?: pendingMessage.size,
+                waveForm = receivedMessage.waveForm ?: pendingMessage.waveForm
             )
             roomMessages[pendingIndex] = updatedMessage
             android.util.Log.d("MessageStore", "✅ Matched pending message ${pendingMessage.id} with received message ${receivedMessage.id} (${if (isFromCurrentUser) "current user" else "content match"})")
             
-            val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
+            val sorted = roomMessages.sortedForUi()
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
             
@@ -332,36 +403,98 @@ object MessageStore {
     }
 
     /**
-     * Add multiple messages to room
+     * Add multiple messages to room.
+     * Dedups by id/xmppId AND performs pending reconciliation for any incoming
+     * message that content-matches a still-pending optimistic one. This makes
+     * MAM fetches after send (fast-ack) correctly clear the pending flag even
+     * when the server echo was missed by the real-time stanza router.
      */
     fun addMessages(roomJid: String, newMessages: List<Message>) {
         val currentMessages = _messages.value.toMutableMap()
         val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
-        val messagesToAdd = newMessages.filter { incoming ->
-            roomMessages.none { existing ->
+
+        val messagesToAdd = mutableListOf<Message>()
+        val pendingResolved = mutableListOf<Message>()
+
+        for (incoming in newMessages) {
+            // Exact id/xmppId dedup against current list (never duplicate confirmed messages).
+            val duplicate = roomMessages.any { existing ->
                 val exactIdMatch = existing.id == incoming.id
                 val incomingXmppIdMatchesExistingId = incoming.xmppId != null && existing.id == incoming.xmppId
                 val existingXmppIdMatchesIncomingId = existing.xmppId != null && existing.xmppId == incoming.id
                 val xmppIdMatch = existing.xmppId != null && incoming.xmppId != null && existing.xmppId == incoming.xmppId
                 exactIdMatch || incomingXmppIdMatchesExistingId || existingXmppIdMatchesIncomingId || xmppIdMatch
             }
+            if (duplicate) continue
+
+            // Pending reconciliation: if a local optimistic message content-matches this incoming,
+            // replace it in place instead of adding a new row.
+            val pendingIdx = findMatchingPending(roomMessages, incoming)
+            if (pendingIdx >= 0) {
+                val pending = roomMessages[pendingIdx]
+                val merged = incoming.copy(
+                    id = pending.id, // keep original optimistic ID for any callers that held onto it
+                    pending = false,
+                    body = if (incoming.body.isNotBlank()) incoming.body else pending.body,
+                    isMediafile = incoming.isMediafile ?: pending.isMediafile,
+                    location = incoming.location?.takeIf { it.isNotBlank() } ?: pending.location,
+                    locationPreview = incoming.locationPreview?.takeIf { it.isNotBlank() } ?: pending.locationPreview,
+                    fileName = incoming.fileName ?: pending.fileName,
+                    mimetype = incoming.mimetype ?: pending.mimetype,
+                    originalName = incoming.originalName ?: pending.originalName,
+                    size = incoming.size ?: pending.size,
+                    waveForm = incoming.waveForm ?: pending.waveForm
+                )
+                roomMessages[pendingIdx] = merged
+                pendingResolved.add(merged)
+            } else {
+                messagesToAdd.add(incoming)
+            }
         }
-        
-        if (messagesToAdd.isNotEmpty()) {
-            roomMessages.addAll(messagesToAdd)
-            // Sort by timestamp (oldest first) - this ensures reverse layout shows newest at bottom
-            val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
-            currentMessages[roomJid] = sorted
-            _messages.value = currentMessages
-            
-            // Persist to Room Database (background)
-            persistMessages(roomJid, sorted)
-            
-            // Update room's last message
-            updateRoomLastMessage(roomJid, sorted)
-            
-            // Update pending count
-            com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
+
+        if (messagesToAdd.isEmpty() && pendingResolved.isEmpty()) return
+
+        roomMessages.addAll(messagesToAdd)
+        // Sort ascending by timestamp; newest ends up at the end (reverseLayout=false renders at bottom).
+        val sorted = roomMessages.sortedForUi()
+        currentMessages[roomJid] = sorted
+        _messages.value = currentMessages
+
+        persistMessages(roomJid, sorted)
+        updateRoomLastMessage(roomJid, sorted)
+        com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
+    }
+
+    private fun findMatchingPending(roomMessages: List<Message>, incoming: Message): Int {
+        val now = System.currentTimeMillis()
+        return roomMessages.indexOfFirst { existing ->
+            if (existing.pending != true) return@indexOfFirst false
+            val isMedia = existing.isMediafile == "true" || existing.location != null ||
+                existing.fileName != null || existing.body == "media"
+            val windowMs = if (isMedia) 120_000L else 60_000L
+            if ((now - existing.date.time) > windowMs) return@indexOfFirst false
+
+            val existingUserId = existing.user.id.lowercase()
+            val incomingUserId = incoming.user.id.lowercase()
+            val existingXmpp = existing.user.xmppUsername?.split("@")?.firstOrNull()?.lowercase()
+            val incomingXmpp = incoming.user.xmppUsername?.split("@")?.firstOrNull()?.lowercase()
+            val userMatch = existingUserId == incomingUserId ||
+                (existingXmpp != null && existingXmpp == incomingXmpp) ||
+                (existingXmpp != null && existingXmpp == incomingUserId) ||
+                (incomingXmpp != null && incomingXmpp == existingUserId)
+            if (!userMatch) return@indexOfFirst false
+
+            val incomingIsMedia = incoming.isMediafile == "true" || incoming.location != null ||
+                incoming.fileName != null || incoming.body == "media"
+            if (isMedia || incomingIsMedia) {
+                val locationMatch = !existing.location.isNullOrBlank() && existing.location == incoming.location
+                val fileNameMatch = !existing.fileName.isNullOrBlank() && existing.fileName == incoming.fileName
+                val originalNameMatch = !existing.originalName.isNullOrBlank() && existing.originalName == incoming.originalName
+                val mediaBodyMatch = existing.body == "media" && incoming.body == "media"
+                locationMatch || fileNameMatch || originalNameMatch || mediaBodyMatch
+            } else {
+                existing.body == incoming.body
+            }
         }
     }
     
@@ -422,12 +555,19 @@ object MessageStore {
         val index = roomMessages.indexOfFirst { it.id == message.id }
         if (index >= 0) {
             roomMessages[index] = message
-            val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
+            val sorted = roomMessages.sortedForUi()
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
             persistMessage(roomJid, message)
             updateRoomLastMessage(roomJid, sorted)
             com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
+            // If the caller is keeping the message in pending state (e.g. after a
+            // media upload completes while we wait for server echo), make sure a
+            // timeout is scheduled. The ConcurrentHashMap-guarded helper dedups
+            // so we don't spawn duplicate timers.
+            if (message.pending == true) {
+                schedulePendingTimeout(roomJid, message.id)
+            }
         }
     }
 
@@ -494,7 +634,7 @@ object MessageStore {
             val originalMessage = roomMessages[index]
             val updatedMessage = originalMessage.copy(body = newText)
             roomMessages[index] = updatedMessage
-            val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
+            val sorted = roomMessages.sortedForUi()
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
             android.util.Log.d("MessageStore", "✏️ Edited message $messageId in $roomJid")
@@ -537,7 +677,7 @@ object MessageStore {
             
             val updatedMessage = originalMessage.copy(reaction = existingReactions)
             roomMessages[index] = updatedMessage
-            val sorted = roomMessages.sortedBy { it.timestamp ?: it.date.time }
+            val sorted = roomMessages.sortedForUi()
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
             android.util.Log.d("MessageStore", "😀 Updated reaction for message $messageId in $roomJid: from=$fromId, reactions=$reactions")

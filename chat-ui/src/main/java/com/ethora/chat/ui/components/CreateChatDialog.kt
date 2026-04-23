@@ -26,7 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.RoomMember
 import com.ethora.chat.core.models.RoomType
 import com.ethora.chat.core.store.RoomStore

@@ -98,6 +98,9 @@ class XMPPClient(
 
     // Track rooms that have received presence responses
     private val roomsWithPresenceResponse = CopyOnWriteArraySet<String>()
+    private val roomPresenceInFlight = ConcurrentHashMap<String, Deferred<Boolean>>()
+    private val roomPresenceBlockedUntil = ConcurrentHashMap<String, Long>()
+    private val presenceFailureBackoffMs: Long = 2_000L
 
     // Active MUCs
     private val activeMUCs = ConcurrentHashMap<String, MultiUserChat>()
@@ -193,6 +196,9 @@ class XMPPClient(
     fun markPresenceResponseReceived(roomJID: String) {
         val bareRoomJID = roomJID.split("/").firstOrNull() ?: roomJID
         roomsWithPresenceResponse.add(bareRoomJID)
+        roomPresenceBlockedUntil.remove(bareRoomJID)
+        roomPresenceInFlight.remove(bareRoomJID)
+        LogStore.success(TAG, "Presence acknowledged for $bareRoomJID", category = "presence")
     }
 
     /**
@@ -200,6 +206,71 @@ class XMPPClient(
      */
     fun clearPresenceResponseTracking() {
         roomsWithPresenceResponse.clear()
+        roomPresenceInFlight.clear()
+        roomPresenceBlockedUntil.clear()
+    }
+
+    suspend fun ensureRoomPresence(
+        roomJID: String,
+        timeoutMs: Long = 2_000L,
+        waitForJoin: Boolean = true,
+        source: String = "other"
+    ): Boolean {
+        val bareRoomJid = roomJID.substringBefore("/")
+        if (bareRoomJid.isBlank()) return true
+        if (hasPresenceResponseForRoom(bareRoomJid)) return true
+
+        val blockedUntil = roomPresenceBlockedUntil[bareRoomJid] ?: 0L
+        if (System.currentTimeMillis() < blockedUntil) {
+            LogStore.warning(TAG, "Presence temporarily blocked for $bareRoomJid from $source", category = "presence")
+            return false
+        }
+
+        roomPresenceInFlight[bareRoomJid]?.let { existing ->
+            return if (waitForJoin) {
+                runCatching { existing.await() }.getOrDefault(false)
+            } else {
+                true
+            }
+        }
+
+        val deferred = scope.async {
+            try {
+                LogStore.info(TAG, "Presence send start room=$bareRoomJid source=$source", category = "presence")
+                val sent = sendPresenceInRoom(bareRoomJid)
+                if (!sent) {
+                    roomPresenceBlockedUntil[bareRoomJid] = System.currentTimeMillis() + presenceFailureBackoffMs
+                    LogStore.warning(TAG, "Presence send failed room=$bareRoomJid source=$source", category = "presence")
+                    return@async false
+                }
+
+                val startedAt = System.currentTimeMillis()
+                while (System.currentTimeMillis() - startedAt < timeoutMs) {
+                    if (hasPresenceResponseForRoom(bareRoomJid)) {
+                        LogStore.success(TAG, "Presence ack room=$bareRoomJid source=$source", category = "presence")
+                        return@async true
+                    }
+                    delay(100)
+                }
+
+                roomPresenceBlockedUntil[bareRoomJid] = System.currentTimeMillis() + presenceFailureBackoffMs
+                LogStore.warning(TAG, "Presence timeout room=$bareRoomJid source=$source timeoutMs=$timeoutMs", category = "presence")
+                false
+            } catch (e: Exception) {
+                roomPresenceBlockedUntil[bareRoomJid] = System.currentTimeMillis() + presenceFailureBackoffMs
+                LogStore.error(TAG, "Presence error room=$bareRoomJid source=$source error=${e.message}", category = "presence")
+                false
+            } finally {
+                roomPresenceInFlight.remove(bareRoomJid)
+            }
+        }
+        roomPresenceInFlight[bareRoomJid] = deferred
+
+        return if (waitForJoin) {
+            runCatching { deferred.await() }.getOrDefault(false)
+        } else {
+            true
+        }
     }
 
     /**
@@ -442,15 +513,16 @@ class XMPPClient(
             onCriticalSend()
             val sendStartedAt = System.currentTimeMillis()
             if (!isFullyConnected()) {
+                LogStore.error(TAG, "Send blocked: XMPP not fully connected for $roomJID", category = "xmpp-send")
                 Log.e(TAG, "Cannot send message: not fully connected")
                 return null
             }
-            
-            if (!hasPresenceResponseForRoom(roomJID)) {
-                sendPresenceInRoom(roomJID)
-                kotlinx.coroutines.delay(200)
+
+            val joined = ensureRoomPresence(roomJID, timeoutMs = 900, waitForJoin = true, source = "send")
+            if (!joined) {
+                ensureRoomPresence(roomJID, timeoutMs = 900, waitForJoin = false, source = "send_background")
             }
-            
+
             if (useWebSocket && webSocketConnection != null) {
                 val wsConnection = webSocketConnection
                 if (wsConnection != null) {
@@ -468,6 +540,7 @@ class XMPPClient(
                     )
                     if (!sentId.isNullOrBlank()) {
                         sentMessageAtMs[sentId] = sendStartedAt
+                        LogStore.success(TAG, "Send transport accepted room=$roomJID id=$sentId", category = "xmpp-send")
                     }
                     if (!customId.isNullOrBlank()) {
                         sentMessageAtMs[customId] = sendStartedAt
@@ -479,10 +552,13 @@ class XMPPClient(
                 val messageId = customId ?: "msg_${System.currentTimeMillis()}"
                 muc.sendMessage(messageBody)
                 sentMessageAtMs[messageId] = sendStartedAt
+                LogStore.success(TAG, "Send transport accepted room=$roomJID id=$messageId", category = "xmpp-send")
                 return messageId
             }
+            LogStore.error(TAG, "Send failed: no transport available room=$roomJID", category = "xmpp-send")
             null
         } catch (e: Exception) {
+            LogStore.error(TAG, "Send failed room=$roomJID error=${e.message}", category = "xmpp-send")
             Log.e(TAG, "Failed to send message", e)
             null
         }
@@ -499,14 +575,15 @@ class XMPPClient(
             if (!isFullyConnected()) {
                 Log.w(TAG, "Send media: not fully connected yet, waiting for connection (ensureConnected)...")
                 if (!ensureConnected(15000)) {
+                    LogStore.error(TAG, "Media send blocked: XMPP not connected room=$roomJID", category = "xmpp-send")
                     Log.e(TAG, "Cannot send media message: still not fully connected after wait")
                     return false
                 }
             }
-            
-            if (!hasPresenceResponseForRoom(roomJID)) {
-                sendPresenceInRoom(roomJID)
-                kotlinx.coroutines.delay(500)
+
+            val joined = ensureRoomPresence(roomJID, timeoutMs = 1200, waitForJoin = true, source = "send_media")
+            if (!joined) {
+                ensureRoomPresence(roomJID, timeoutMs = 900, waitForJoin = false, source = "send_media_background")
             }
             
             if (useWebSocket && webSocketConnection != null) {
@@ -702,9 +779,8 @@ class XMPPClient(
         beforeMessageId: String?
     ): List<Message> {
         val ws = webSocketConnection ?: return emptyList()
-        val isInitialLoad = beforeMessageId == null
         val queryId = "get-history:${System.currentTimeMillis()}:${roomJID.hashCode()}"
-        val messages = mutableListOf<Message>()
+        val collected = mutableListOf<Message>()
         val latch = Mutex()
         var queryComplete = false
 
@@ -712,13 +788,13 @@ class XMPPClient(
             scope.launch {
                 latch.withLock {
                     if (queryComplete) return@withLock
-                    val parsedMessages = parseMAMResult(stanza, roomJID)
-                    val filteredMessages = parsedMessages.filter { message ->
-                        message.roomJid == roomJID
-                    }
-                    if (filteredMessages.isNotEmpty()) {
-                        com.ethora.chat.core.store.MessageStore.addMessages(roomJID, filteredMessages)
-                        messages.addAll(filteredMessages)
+                    val parsed = parseMAMResult(stanza, roomJID)
+                        .filter { it.roomJid == roomJID }
+                    if (parsed.isNotEmpty()) {
+                        collected.addAll(parsed)
+                        // Incremental write-through so the UI updates as results arrive;
+                        // MessageStore dedups and sorts by timestamp.
+                        com.ethora.chat.core.store.MessageStore.addMessages(roomJID, parsed)
                     }
                 }
             }
@@ -736,26 +812,18 @@ class XMPPClient(
             val startTime = System.currentTimeMillis()
             while (!queryComplete && (System.currentTimeMillis() - startTime) < timeout) {
                 delay(100)
-                if (ws.isMAMQueryComplete(queryId)) {
-                    queryComplete = true
-                }
-                latch.withLock {
-                    if (messages.size >= max && (System.currentTimeMillis() - startTime) > 1000) {
-                        queryComplete = true
-                    }
-                }
+                if (ws.isMAMQueryComplete(queryId)) queryComplete = true
             }
-
             if (!queryComplete) {
-                Log.w(TAG, "MAM query $queryId reached timeout. Collected ${messages.size}/$max messages")
+                Log.w(TAG, "MAM query $queryId timeout. Collected ${collected.size}/$max")
             }
 
+            // Web's parseMamMessages returns in server order; compareMessageOrder
+            // (MessageStore's sort) then orders ascending by timestamp. Ascending
+            // = oldest first, so the caller can use .first() as the pagination
+            // anchor for an older page.
             return latch.withLock {
-                if (isInitialLoad) {
-                    messages.sortedByDescending { it.timestamp ?: it.date.time }
-                } else {
-                    messages.sortedBy { it.timestamp ?: it.date.time }
-                }
+                collected.sortedBy { it.timestamp ?: it.date.time }
             }
         } finally {
             ws.unregisterMAMCollector(queryId)
@@ -835,24 +903,20 @@ class XMPPClient(
             }
             
             val forwardedXml = xml.substring(forwardedStart, forwardedEnd)
-            
-            // Extract delay element for timestamp (before message)
-            val delayStart = forwardedXml.indexOf("<delay")
-            val delayEnd = forwardedXml.indexOf("/>", delayStart)
-            val delayXml = if (delayStart != -1 && delayEnd != -1) {
-                forwardedXml.substring(delayStart, delayEnd + 2)
-            } else ""
-            
-            val timestampStr = extractAttribute(delayXml, "stamp")
-            val timestamp = timestampStr?.let {
-                try {
-                    // Parse XEP-0082 timestamp format: 2024-10-03T15:30:10.723554Z
-                    java.time.Instant.parse(it).toEpochMilli()
-                } catch (e: Exception) {
-                    Log.w(TAG, "  Failed to parse timestamp: $it", e)
-                    System.currentTimeMillis()
-                }
-            } ?: System.currentTimeMillis()
+
+            // Find <stanza-id id="..."/> — Ethora's archive id, usually numeric.
+            val stanzaIdMatch = Regex("<stanza-id\\b[^>]*\\bid=['\"]([^'\"]+)['\"]")
+                .find(forwardedXml)
+            val stanzaIdValue = stanzaIdMatch?.groupValues?.get(1).orEmpty()
+
+            // <delay>/<x jabber:x:delay> — extract the `stamp` attribute when present.
+            val delayStamp: String? = run {
+                val delayRegex = Regex("<delay(\\s[^>]*?/?)>")
+                val delayFragment = delayRegex.find(forwardedXml)?.value
+                    ?: Regex("<x\\s[^>]*jabber:x:delay[^>]*/>").find(forwardedXml)?.value
+                    ?: return@run null
+                extractAttribute(delayFragment, "stamp")
+            }
             
             // Extract inner message element
             val messageStart = forwardedXml.indexOf("<message")
@@ -897,6 +961,19 @@ class XMPPClient(
             val from = extractAttribute(messageXml, "from") ?: ""
             val messageId = extractAttribute(messageXml, "id") ?: ""
             val type = extractAttribute(messageXml, "type") ?: "groupchat"
+
+            // Port of web getDataFromXml messageTimestampMs resolution:
+            //   delayStamp || stanzaIdValue || xmppId || id
+            // `TimestampUtils.getTimestampFromUnknown` extracts the numeric
+            // chunk from Ethora ids like "send-text-message-1704067200000",
+            // so we get a usable ms timestamp even when <delay> is absent.
+            val resolvedTimestamp: Long = TimestampUtils.getTimestampFromUnknown(delayStamp)
+                .takeIf { it > 0 }
+                ?: TimestampUtils.getTimestampFromUnknown(stanzaIdValue).takeIf { it > 0 }
+                ?: TimestampUtils.getTimestampFromUnknown(messageId).takeIf { it > 0 }
+                ?: TimestampUtils.getTimestampFromUnknown(resultId).takeIf { it > 0 }
+                ?: System.currentTimeMillis()
+            val timestamp = resolvedTimestamp
             
             // Extract room JID from 'from' attribute (format: room@conference.domain/user@domain/resource)
             // This prevents messages from going to wrong chats when multiple rooms load history simultaneously
@@ -1182,22 +1259,22 @@ class XMPPClient(
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendPresenceInRoom($roomJID)")
         return try {
             if (!isFullyConnected()) {
-                com.ethora.chat.core.store.LogStore.error(TAG, "Cannot send presence in room: not fully connected")
+                com.ethora.chat.core.store.LogStore.error(TAG, "Cannot send presence in room: not fully connected", category = "presence")
                 Log.e(TAG, "Cannot send presence: not fully connected")
                 return false
             }
             
             if (useWebSocket && webSocketConnection != null) {
-                com.ethora.chat.core.store.LogStore.send(TAG, "Sending presence in room: $roomJID")
+                com.ethora.chat.core.store.LogStore.send(TAG, "Sending presence in room: $roomJID", category = "presence")
                 webSocketConnection?.sendPresenceInRoom(roomJID)
                 return true
             } else {
-                com.ethora.chat.core.store.LogStore.error(TAG, "Presence in room not supported for TCP connection")
+                com.ethora.chat.core.store.LogStore.error(TAG, "Presence in room not supported for TCP connection", category = "presence")
                 Log.e(TAG, "Presence in room not supported for TCP connection")
                 return false
             }
         } catch (e: Exception) {
-            com.ethora.chat.core.store.LogStore.error(TAG, "Failed to send presence in room: ${e.message}")
+            com.ethora.chat.core.store.LogStore.error(TAG, "Failed to send presence in room: ${e.message}", category = "presence")
             Log.e(TAG, "Failed to send presence", e)
             false
         }
@@ -1232,6 +1309,60 @@ class XMPPClient(
         }
     }
     
+    // ---- Private-store (XEP-0049) — ports of web's
+    // getChatsPrivateStoreRequest / setChatsPrivateStoreRequest /
+    // actionSetTimestampToPrivateStore. Used to sync per-room
+    // lastViewedTimestamp across devices.
+
+    /** Returns the parsed chatjson blob (roomJid → timestamp string) or null. */
+    suspend fun getChatsPrivateStore(): Map<String, String>? {
+        if (!isFullyConnected()) return null
+        val ws = webSocketConnection ?: return null
+        val json = ws.getChatsPrivateStore() ?: return null
+        return try {
+            // Tiny JSON parser for { "jid": "ts", ... } — no deps.
+            org.json.JSONObject(json).let { obj ->
+                obj.keys().asSequence().associateWith { key -> obj.optString(key, "0") }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Persists a full chatjson blob (roomJid → timestamp). */
+    suspend fun setChatsPrivateStore(store: Map<String, String>): Boolean {
+        if (!isFullyConnected()) return false
+        val ws = webSocketConnection ?: return false
+        val json = org.json.JSONObject().also { obj ->
+            store.forEach { (jid, ts) -> obj.put(jid, ts) }
+        }.toString()
+        return ws.setChatsPrivateStore(json)
+    }
+
+    /**
+     * Port of web's `actionSetTimestampToPrivateStore`: read current blob,
+     * merge in the new `chatId → timestamp`, write it back. If the store is
+     * missing, bootstrap it with all provided `chats` set to "0".
+     */
+    suspend fun setTimestampInPrivateStore(
+        chatId: String,
+        timestamp: Long,
+        chats: List<String>? = null
+    ): Boolean {
+        if (chatId.isBlank()) return false
+        val current = getChatsPrivateStore()
+        val ts = timestamp.toString()
+        return if (current != null) {
+            setChatsPrivateStore(current + (chatId to ts))
+        } else {
+            val bootstrap = mutableMapOf(chatId to ts)
+            chats?.forEach { jid ->
+                if (jid.isNotBlank() && jid != chatId && jid !in bootstrap) bootstrap[jid] = "0"
+            }
+            setChatsPrivateStore(bootstrap)
+        }
+    }
+
     /**
      * Get last message archive
      * Matches web: getLastMessageArchiveStanza

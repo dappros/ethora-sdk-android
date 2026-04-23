@@ -4,19 +4,19 @@ androidGradlePlugin = "8.7.0"
 compileSdk = "37"
 minSdk = "26"
 targetSdk = "37"
-jvmTarget = "21"
+jvmTarget = "17"
 versionCode = "1"
 versionName = "1.0.0"
 
 # Core Android
-coreKtx = "1.18.0"
+coreKtx = "1.13.1"
 appcompat = "1.7.0"
-lifecycle = "2.10.0"
-activityCompose = "1.13.0"
-navigationCompose = "2.10.0"
+lifecycle = "2.8.7"
+activityCompose = "1.9.3"
+navigationCompose = "2.8.5"
 
 # Compose
-composeBom = "2026.04.00"
+composeBom = "2024.10.01"
 # Compose Compiler is now handled by the Kotlin plugin for 2.0+
 # composeCompiler = "1.5.8"
 
@@ -89,6 +89,10 @@ smack-android-extensions = { group = "org.igniterealtime.smack", name = "smack-a
 
 # Image Loading
 coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
+# Coil 3 ships network fetching in a separate artifact — without this, remote
+# http(s) image URLs silently fail to load (previews appear black). Required
+# for both message bubble thumbnails and the full-screen image viewer.
+coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 
 # Dependency Injection
 hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }

@@ -108,6 +108,10 @@ class ChatRoomViewModel(
                     _messages.value = persistedMessages.sortedBy { it.timestamp ?: it.date.time }
                     RoomStore.setRoomLoading(room.jid, false)
                     android.util.Log.d("ChatRoomViewModel", "Loaded ${persistedMessages.size} messages from persistence")
+                    // Critical: even when cache hit, refresh newest MAM in background so any messages
+                    // that arrived while the app was closed are merged in. Fixes "latest messages disappear
+                    // after reload" where the cached view is shown but server has newer messages.
+                    refreshNewestMessages()
                     return@launch
                 }
                 // No persistence - wait for global loader or load from XMPP
@@ -124,6 +128,7 @@ class ChatRoomViewModel(
                         _messages.value = afterWaitMessages.sortedBy { it.timestamp ?: it.date.time }
                         android.util.Log.d("ChatRoomViewModel", "Global loader filled messages (${afterWaitMessages.size})")
                         RoomStore.setRoomLoading(room.jid, false)
+                        refreshNewestMessages()
                         return@launch
                     }
                 }
@@ -136,6 +141,43 @@ class ChatRoomViewModel(
             val sorted = storedMessages.sortedBy { it.timestamp ?: it.date.time }
             _messages.value = sorted
             android.util.Log.d("ChatRoomViewModel", "Using pre-loaded messages (${sorted.size} messages, sorted oldest-first)")
+            // Refresh newest MAM to catch anything missed while on another screen.
+            viewModelScope.launch { refreshNewestMessages() }
+        }
+    }
+
+    /**
+     * Fetch the newest page of MAM in background and merge with the current store.
+     * Safe to call whenever the user (re-)enters a room; dedup in MessageStore.addMessages
+     * prevents duplicates. Fixes cache-only re-entry where server has newer messages.
+     */
+    private suspend fun refreshNewestMessages() {
+        val client = xmppClient ?: return
+        try {
+            if (!client.isFullyConnected()) {
+                if (!client.ensureConnected(5_000)) return
+            }
+            client.promoteRoomHistory(room.jid)
+            try { client.sendPresenceInRoom(room.jid) } catch (_: Exception) {}
+
+            val latest = client.getHistory(room.jid, max = 50, beforeMessageId = null)
+            if (latest.isEmpty()) return
+
+            // Web parity: `useRoomInitialization.getDefaultHistory` calls
+            // `setRoomMessages` (= mergeRoomMessages reducer). ALWAYS a merge —
+            // never a replace — so re-entering a room doesn't wipe cached
+            // older messages the user had already scrolled through. Any gap
+            // between cache and the latest page stays until the user scrolls
+            // up (which fills it via `<before>anchor</before>` pagination).
+            MessageStore.addMessages(room.jid, latest)
+            android.util.Log.d(
+                "ChatRoomViewModel",
+                "refreshNewest: merged ${latest.size} newest msgs into ${room.jid}"
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("ChatRoomViewModel", "refreshNewestMessages failed for ${room.jid}", e)
         }
     }
     
@@ -241,13 +283,22 @@ class ChatRoomViewModel(
             )
             
             if (messageId != null) {
-                // Create optimistic message with pending state
-                // Set both id and xmppId to messageId for proper matching when server echo arrives
+                // Force the optimistic message's timestamp strictly AFTER the
+                // most recent known message. Without this, server messages
+                // whose archive stanza-id resolves to a ts slightly ahead of
+                // our wall clock (clock drift / µs-precision) land AFTER the
+                // optimistic in the sort → user sees their freshly-sent
+                // message appearing in the MIDDLE of the list. Matches web's
+                // useSendMessage, which sets messageTimestampMs = Date.now()
+                // and benefits from the same server clock behaviour.
+                val lastKnownTs = MessageStore.lastKnownTimestamp(room.jid)
+                val optimisticTs = maxOf(System.currentTimeMillis(), lastKnownTs + 1)
                 val optimisticMessage = Message(
                     id = messageId,
                     body = finalText,
                     user = currentUser,
-                    date = java.util.Date(),
+                    date = java.util.Date(optimisticTs),
+                    timestamp = optimisticTs,
                     roomJid = room.jid,
                     pending = true,
                     xmppId = messageId, // Set xmppId for bidirectional matching
@@ -257,6 +308,9 @@ class ChatRoomViewModel(
                 )
                 MessageStore.addMessage(room.jid, optimisticMessage)
                 android.util.Log.d("ChatRoomViewModel", "Created optimistic message with pending=true, ID: $messageId, xmppId: $messageId")
+                // Web parity (useSendMessage.tsx L316-317): fast-ack immediately,
+                // then start the 5-second catchup poll.
+                launch { triggerFastAckFetch() }
                 schedulePendingFallback(messageId)
                 ChatEventDispatcher.emit(
                     ChatEvent.MessageSent(
@@ -333,7 +387,8 @@ class ChatRoomViewModel(
                         android.util.Log.w("ChatRoomViewModel", "Failed to send presence to ${room.jid}", e)
                     }
                     
-                    val initialHistory = client.getHistory(room.jid, max = 30, beforeMessageId = null)
+                    val initialLoadMax = 50
+                    val initialHistory = client.getHistory(room.jid, max = initialLoadMax, beforeMessageId = null)
                     if (initialHistory.isNotEmpty()) {
                         MessageStore.addMessages(room.jid, initialHistory)
                     }
@@ -356,12 +411,13 @@ class ChatRoomViewModel(
                         }
                     }
 
+                    // hasMoreMessages should only be set `false` by an authoritative
+                    // `<fin complete="true">` signal — NOT by a short page (server
+                    // may return < max but still have older history). This matches
+                    // web which only trusts historyComplete from the fin IQ.
                     val updatedRoom = RoomStore.getRoomByJid(room.jid)
                     val historyComplete = updatedRoom?.historyComplete == true
-                    _hasMoreMessages.value = !historyComplete && initialHistory.size >= 30
-                    if (historyComplete) {
-                        _hasMoreMessages.value = false
-                    }
+                    _hasMoreMessages.value = !historyComplete
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -443,17 +499,24 @@ class ChatRoomViewModel(
                     !msg.id.startsWith("send-text-message-") && !msg.id.startsWith("pending-")
                 } ?: oldestMessage
 
+                // Match web's `loadMoreMessages(chatJID, 30, Number(firstMessageId))`:
+                // the server expects a NUMERIC `<before>` value. If the message id
+                // has a 10+ digit numeric chunk (Ethora's archive ids embed a ms
+                // timestamp — e.g. "1704067200000" or "send-media-message:…-1704067200000"),
+                // use that; otherwise fall through to the message timestamp.
+                // Sending a non-numeric id was making the server drop the `<before>`
+                // constraint and return the FIRST page of the archive, producing
+                // the classic "skip middle, jump to 1-9" pagination bug.
                 val idStr = anchorMsg.id
-                val isOptimistic = idStr.startsWith("send-text-message-") || idStr.startsWith("pending-")
-                // Critical: for server messages use archive id as-is (matches web MAM pagination semantics).
-                // Numeric/timestamp fallback only for optimistic local messages not present in archive.
-                val beforeId = if (!isOptimistic && idStr.isNotBlank()) {
-                    idStr
-                } else {
-                    anchorMsg.timestamp?.toString() ?: anchorMsg.date.time.toString()
-                }
+                val numericFromId = Regex("\\d{10,}").find(idStr)?.value
+                val beforeId = numericFromId
+                    ?: anchorMsg.timestamp?.takeIf { it > 0 }?.toString()
+                    ?: anchorMsg.date.time.toString()
 
-                android.util.Log.d("ChatRoomViewModel", "Triggering loadMoreMessages for ${room.jid} beforeId=$beforeId (anchorId=${anchorMsg.id})")
+                android.util.Log.d(
+                    "ChatRoomViewModel",
+                    "Triggering loadMoreMessages room=${room.jid} anchorId=${anchorMsg.id} beforeId=$beforeId"
+                )
                 
                 xmppClient?.let { client ->
                     val history = client.getHistory(room.jid, max = 30, beforeMessageId = beforeId)
@@ -570,11 +633,16 @@ class ChatRoomViewModel(
                 // Create optimistic message
                 // Use timestamp-based ID that will be replaced by server echo
                 val messageId = "send-media-message:${UUID.randomUUID()}"
+                // Same max(now, last+1) trick as text send — keeps the freshly
+                // sent media at the very bottom even if server clocks drift.
+                val lastKnownTs = MessageStore.lastKnownTimestamp(room.jid)
+                val optimisticTs = maxOf(System.currentTimeMillis(), lastKnownTs + 1)
                 val optimisticMessage = Message(
                     id = messageId,
                     body = "media",
                     user = currentUser,
-                    date = Date(),
+                    date = Date(optimisticTs),
+                    timestamp = optimisticTs,
                     roomJid = room.jid,
                     pending = true,
                     isDeleted = false,
@@ -583,8 +651,12 @@ class ChatRoomViewModel(
                     isSystemMessage = "false",
                     isMediafile = "true",
                     fileName = uploadFile.name,
-                    location = "", // Will be set after upload
-                    locationPreview = "",
+                    // Use the local file URI so the image/video appears in the bubble
+                    // immediately while the upload runs. Coil handles `file://` URIs.
+                    // When the server echo returns, both `location` and `locationPreview`
+                    // get replaced with the real CDN URL in the deep-merge.
+                    location = "file://${uploadFile.absolutePath}",
+                    locationPreview = if (uploadMimeType.startsWith("image/")) "file://${uploadFile.absolutePath}" else "",
                     mimetype = uploadMimeType,
                     originalName = uploadFile.name,
                     size = uploadFile.length().toString()
@@ -696,6 +768,9 @@ class ChatRoomViewModel(
                         pending = true
                     )
                     MessageStore.updateMessage(room.jid, updatedMessage)
+                    // Web parity: fast-ack immediately after successful XMPP send
+                    // so pending flips as soon as server echo hits MAM.
+                    launch { triggerFastAckFetch() }
                     android.util.Log.d("ChatRoomViewModel", "Updated optimistic message with upload data (pending=true, waiting for server echo to match by location: ${uploadResult.location})")
                     ChatEventDispatcher.emit(
                         ChatEvent.MessageSent(
@@ -766,17 +841,80 @@ class ChatRoomViewModel(
         }
     }
 
+    /**
+     * Port of web's `triggerFastAckFetch` — throttled (600 ms per room) presence
+     * + short MAM fetch immediately after a send. Pulls the server echo fast if
+     * the real-time stanza route missed it. Web: useSendMessage.tsx L184-203.
+     */
+    private suspend fun triggerFastAckFetch() {
+        val client = xmppClient ?: return
+        if (!client.isFullyConnected()) return
+        val now = System.currentTimeMillis()
+        val lastAt = fastAckLastByRoom[room.jid] ?: 0L
+        if (now - lastAt < 600L) return
+        fastAckLastByRoom[room.jid] = now
+        try {
+            client.promoteRoomHistory(room.jid)
+            try { client.sendPresenceInRoom(room.jid) } catch (_: Exception) {}
+            val latest = client.getHistory(room.jid, max = 10, beforeMessageId = null)
+            if (latest.isNotEmpty()) {
+                MessageStore.addMessages(room.jid, latest)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("ChatRoomViewModel", "triggerFastAckFetch failed", e)
+        }
+    }
+
+    /**
+     * Port of web's `scheduleAckCatchup` — useSendMessage.tsx L205-236.
+     * After a send, aggressively polls MAM (presence + 20-message fetch) until
+     * either the message transitions out of `pending` state or 5 seconds elapse.
+     *   Initial delay: 150 ms
+     *   Poll interval: 700 ms
+     *   Window:        5000 ms (≈ 7 polls)
+     *
+     * Web's final safety net (forcibly clearing `pending`) is handled for us by
+     * `MessageStore.schedulePendingTimeout` which fires at 6 s regardless of
+     * ViewModel lifecycle.
+     */
     private fun schedulePendingFallback(messageId: String) {
         viewModelScope.launch {
-            kotlinx.coroutines.delay(8000)
-            val stillPending = MessageStore
-                .getMessagesForRoom(room.jid)
-                .firstOrNull { it.id == messageId && it.pending == true }
-            if (stillPending != null) {
-                MessageStore.updateMessage(room.jid, stillPending.copy(pending = false))
-                android.util.Log.w("ChatRoomViewModel", "Pending fallback applied for message: $messageId")
+            kotlinx.coroutines.delay(150)
+            val started = System.currentTimeMillis()
+            while (System.currentTimeMillis() - started < 5_000) {
+                if (!isStillPending(messageId)) return@launch
+                val client = xmppClient
+                if (client != null && client.isFullyConnected()) {
+                    try {
+                        client.promoteRoomHistory(room.jid)
+                        try { client.sendPresenceInRoom(room.jid) } catch (_: Exception) {}
+                        val latest = client.getHistory(room.jid, max = 20, beforeMessageId = null)
+                        if (latest.isNotEmpty()) {
+                            MessageStore.addMessages(room.jid, latest)
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w("ChatRoomViewModel", "ackCatchup poll failed", e)
+                    }
+                }
+                if (!isStillPending(messageId)) return@launch
+                kotlinx.coroutines.delay(700)
             }
         }
+    }
+
+    private fun isStillPending(messageId: String): Boolean {
+        return MessageStore.getMessagesForRoom(room.jid)
+            .any { it.id == messageId && it.pending == true }
+    }
+
+    companion object {
+        // Room-keyed "last fast-ack" timestamps — shared across ViewModel
+        // instances so switching chats doesn't reset the 600 ms throttle.
+        private val fastAckLastByRoom = java.util.concurrent.ConcurrentHashMap<String, Long>()
     }
     
     /**

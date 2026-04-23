@@ -13,7 +13,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
 
 /**
@@ -82,25 +82,55 @@ private fun ImageMessage(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val displayUrl = previewUrl ?: imageUrl
-    
+    // Blank string != null; fall through to imageUrl when preview is empty
+    // (important for local-file optimistic messages where preview may be "").
+    // Convert a local absolute path or file:// URI to a java.io.File model so
+    // Coil's FileFetcher picks it up reliably — some builds don't resolve
+    // bare "file://" strings as model.
+    val rawUrl = previewUrl?.takeIf { it.isNotBlank() } ?: imageUrl.takeIf { it.isNotBlank() }
+    val model: Any? = rawUrl?.let { url ->
+        when {
+            url.startsWith("file://") -> java.io.File(url.removePrefix("file://"))
+            url.startsWith("/") -> java.io.File(url)
+            else -> url
+        }
+    }
+
     Surface(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onClick),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
     ) {
-        AsyncImage(
-            model = displayUrl,
-            contentDescription = fileName,
-            modifier = Modifier
-                .widthIn(max = 300.dp)
-                .heightIn(max = 400.dp),
-            contentScale = ContentScale.Fit,
-            onError = {
-                // Show placeholder on error
+        if (model != null) {
+            AsyncImage(
+                model = model,
+                contentDescription = fileName,
+                modifier = Modifier
+                    .widthIn(min = 160.dp, max = 300.dp)
+                    .heightIn(min = 120.dp, max = 400.dp),
+                contentScale = ContentScale.Fit,
+                onError = {
+                    // Swallow — placeholder below keeps the bubble visible.
+                }
+            )
+        } else {
+            // Placeholder bubble so the message is never a zero-size blob
+            // while we wait for upload / CDN URL to arrive.
+            Box(
+                modifier = Modifier
+                    .widthIn(min = 160.dp)
+                    .heightIn(min = 120.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Image,
+                    contentDescription = fileName,
+                    modifier = Modifier.size(40.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
             }
-        )
+        }
     }
 }
 

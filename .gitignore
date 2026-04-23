@@ -1,6 +1,11 @@
 /web
 /swift
 
+# sample-chat-app
+# /sample-chat-app
+
+claude.md
+
 # Built application files
 *.apk
 *.aar
@@ -98,6 +103,3 @@ lint-results*.xml
 
 .idea/
 .gradle-home/
-
-sample-chat-app
-/sample-chat-app

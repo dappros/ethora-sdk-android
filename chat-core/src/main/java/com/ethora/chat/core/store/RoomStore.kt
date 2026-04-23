@@ -1,7 +1,7 @@
 package com.ethora.chat.core.store
 
-import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.HistoryPreloadState
+import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.persistence.ChatPersistenceManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -119,7 +119,10 @@ object RoomStore {
      * Set rooms
      */
     fun setRooms(rooms: List<Room>) {
-        _rooms.value = rooms
+        val existingByJid = _rooms.value.associateBy { it.jid }
+        _rooms.value = rooms.map { room ->
+            mergeSingleRoomPlaceholder(room, existingByJid[room.jid])
+        }
         // Persist rooms (background)
         persistRooms()
     }
@@ -129,12 +132,14 @@ object RoomStore {
      */
     fun addRoom(room: Room) {
         val currentRooms = _rooms.value.toMutableList()
-        if (!currentRooms.any { it.id == room.id || it.jid == room.jid }) {
+        val existingIndex = currentRooms.indexOfFirst { it.id == room.id || it.jid == room.jid }
+        if (existingIndex == -1) {
             currentRooms.add(room)
-            _rooms.value = currentRooms
-            // Persist rooms (background)
-            persistRooms()
+        } else {
+            currentRooms[existingIndex] = mergeSingleRoomPlaceholder(room, currentRooms[existingIndex])
         }
+        _rooms.value = currentRooms
+        persistRooms()
     }
 
     /**
@@ -144,7 +149,7 @@ object RoomStore {
         val currentRooms = _rooms.value.toMutableList()
         val index = currentRooms.indexOfFirst { it.id == room.id || it.jid == room.jid }
         if (index >= 0) {
-            currentRooms[index] = room
+            currentRooms[index] = mergeSingleRoomPlaceholder(room, currentRooms[index])
             _rooms.value = currentRooms
             // Persist rooms (background)
             persistRooms()
@@ -173,12 +178,28 @@ object RoomStore {
     }
 
     /**
-     * Set current room
+     * Set current room. Also recomputes unread counts — web's unreadMiddleware
+     * listens for `setCurrentRoom` and zeroes the new-active room's counter
+     * immediately. Without this, the room the user just opened would keep its
+     * stale unread badge until the next message arrived to trigger a recompute.
      */
     fun setCurrentRoom(room: Room?) {
+        val prev = _currentRoom.value
         _currentRoom.value = room
-        // Persist current room JID (background)
         persistCurrentRoomJid()
+
+        // Force the new active room's badge to 0 synchronously.
+        if (room != null) {
+            val messagesForRoom = com.ethora.chat.core.store.MessageStore.getMessagesForRoom(room.jid)
+            updateUnreadCount(room.jid, messagesForRoom)
+        }
+        // And re-evaluate the previous active room now that it's backgrounded —
+        // messages that arrived while it was active but marked unread=0 by the
+        // shortcut might need to be counted from now on.
+        if (prev != null && prev.jid != room?.jid) {
+            val messagesForPrev = com.ethora.chat.core.store.MessageStore.getMessagesForRoom(prev.jid)
+            updateUnreadCount(prev.jid, messagesForPrev)
+        }
     }
 
     /**
@@ -193,6 +214,18 @@ object RoomStore {
      */
     fun getRoomByJid(roomJid: String): Room? {
         return _rooms.value.firstOrNull { it.jid == roomJid }
+    }
+
+    fun upsertRoom(room: Room) {
+        val currentRooms = _rooms.value.toMutableList()
+        val index = currentRooms.indexOfFirst { it.jid == room.jid || it.id == room.id }
+        if (index >= 0) {
+            currentRooms[index] = mergeSingleRoomPlaceholder(room, currentRooms[index])
+        } else {
+            currentRooms.add(room)
+        }
+        _rooms.value = currentRooms
+        persistRooms()
     }
     
     /**
@@ -285,12 +318,16 @@ object RoomStore {
     fun setLastViewedTimestamp(roomJid: String, timestamp: Long) {
         val room = getRoomByJid(roomJid)
         room?.let {
+            // Reset BOTH unreadMessages and unreadCapped so the per-room dot
+            // AND the "10+" flag disappear atomically. Web zeroes both via
+            // the unreadMiddleware setLastViewedTimestamp action.
             val updatedRoom = it.copy(
                 lastViewedTimestamp = timestamp,
-                unreadMessages = 0 // Reset unread count when timestamp is updated
+                unreadMessages = 0,
+                unreadCapped = false
             )
             updateRoom(updatedRoom)
-            android.util.Log.d("RoomStore", "📅 Set lastViewedTimestamp for $roomJid: $timestamp")
+            android.util.Log.d("RoomStore", "📅 lastViewedTimestamp=$timestamp + unread zeroed room=$roomJid")
         }
     }
     
@@ -310,38 +347,57 @@ object RoomStore {
     }
     
     /**
-     * Calculate and update unread messages count for a room
-     * Matches web: unreadMiddleware logic
+     * Calculate and update unread messages count for a room.
+     * One-for-one port of `web/src/roomStore/Middleware/unreadMidlleware.tsx`
+     * `computeUnreadForRoom`:
+     *   • Active room → always 0 (the user is looking at it).
+     *   • Non-active + lastViewed missing-or-zero → EVERY countable message is
+     *     unread (fresh room, never opened). Previous Android logic treated
+     *     this branch as "all read" which is why the chat-tab badge went to 0
+     *     immediately and the per-room dot never appeared on first app open.
+     *   • Non-active + lastViewed > 0 → count countable messages whose
+     *     timestamp > lastViewed.
+     * "Countable" excludes: delimiter-new, pending, system, and messages from
+     * the current user.
      */
     fun updateUnreadCount(roomJid: String, messages: List<com.ethora.chat.core.models.Message>) {
-        val room = getRoomByJid(roomJid)
-        val currentRoom = _currentRoom.value
-        
-        // Don't count unread for the currently active room
-        if (room != null && roomJid != currentRoom?.jid && room.lastViewedTimestamp != null && room.lastViewedTimestamp != 0L) {
-            val unreadCountRaw = messages.count { message ->
-                // Exclude delimiter messages
-                message.id != "delimiter-new" &&
-                // Count messages newer than lastViewedTimestamp
-                (message.timestamp ?: message.date.time) > room.lastViewedTimestamp!!
-            }
-            val unreadCount = unreadCountRaw.coerceAtMost(MAX_UNREAD_COUNT)
-            val isUnreadCapped = unreadCountRaw > MAX_UNREAD_COUNT
-            
-            if (room.unreadMessages != unreadCount || room.unreadCapped != isUnreadCapped) {
-                val updatedRoom = room.copy(
-                    unreadMessages = unreadCount,
-                    unreadCapped = isUnreadCapped
-                )
-                updateRoom(updatedRoom)
-                android.util.Log.d("RoomStore", "📊 Updated unread count for $roomJid: $unreadCount")
-            }
-        } else if (room != null && (room.lastViewedTimestamp == null || room.lastViewedTimestamp == 0L)) {
-            // If lastViewedTimestamp is 0 or null, all messages are read
+        val room = getRoomByJid(roomJid) ?: return
+        val activeJid = _currentRoom.value?.jid
+
+        // Active room → always 0 unread
+        if (roomJid == activeJid) {
             if (room.unreadMessages != 0 || room.unreadCapped) {
-                val updatedRoom = room.copy(unreadMessages = 0, unreadCapped = false)
-                updateRoom(updatedRoom)
+                updateRoom(room.copy(unreadMessages = 0, unreadCapped = false))
             }
+            return
+        }
+
+        val currentUserXmppUsername = UserStore.currentUser.value?.xmppUsername
+        val userLocal = currentUserXmppUsername?.substringBefore("@")?.takeIf { it.isNotBlank() }
+        val lastViewed = room.lastViewedTimestamp ?: 0L
+
+        val countable = messages.count { msg ->
+            if (msg.id == "delimiter-new") return@count false
+            if (msg.pending == true) return@count false
+            if (msg.isSystemMessage == "true") return@count false
+
+            // Skip own messages (web: toLocal(msg.user.id) === toLocal(currentXmppUsername))
+            val msgLocal = msg.user.id.substringBefore("@").takeIf { it.isNotBlank() }
+            if (userLocal != null && msgLocal != null &&
+                msgLocal.equals(userLocal, ignoreCase = true)) return@count false
+
+            val ts = msg.timestamp ?: msg.date.time
+            if (ts <= 0) return@count false
+            if (lastViewed <= 0) return@count true
+            ts > lastViewed
+        }
+
+        val unread = countable.coerceAtMost(MAX_UNREAD_COUNT)
+        val capped = countable > MAX_UNREAD_COUNT
+
+        if ((room.unreadMessages) != unread || room.unreadCapped != capped) {
+            updateRoom(room.copy(unreadMessages = unread, unreadCapped = capped))
+            android.util.Log.d("RoomStore", "📊 Unread count for $roomJid: $unread (capped=$capped)")
         }
     }
 

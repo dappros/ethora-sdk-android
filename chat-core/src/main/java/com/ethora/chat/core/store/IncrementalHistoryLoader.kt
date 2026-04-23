@@ -10,131 +10,151 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Incremental history loader - loads messages until finding last cached message timestamp
- * Process in batches of 5 rooms
- * For each room: load messages in chunks of 5 until finding message matching last timestamp
- * or maxFetchAttempts (4) reached
+ * Background catchup fetcher. Ports web's
+ * `helpers/updateMessagesTillLast.tsx` one-for-one:
+ *   • Sort rooms: active room first, then by last activity score.
+ *   • Process in batches (default 2) with a 125 ms stagger per batch slot.
+ *   • For each room, do ONE fetch of 20 messages.
+ *   • Compute "anchor" = last non-pending, non-delimiter message in the
+ *     local cache (not merely the `lastMessageTimestamp` on the Room).
+ *   • If anchor is found inside the fetched messages → append only the
+ *     messages newer than it (delta merge).
+ *   • If anchor is NOT found → the local cache is stale; replace the room
+ *     cache with the server's latest page.
+ *   • If there is no anchor (empty cache) → just set the fetched page.
  */
 object IncrementalHistoryLoader {
     private const val TAG = "IncrementalHistoryLoader"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    
+
     private data class RoomAnchor(
         val id: String?,
         val xmppId: String?,
-        val timestamp: Long?
+        val timestamp: Long
     )
 
+    /** Last non-pending, non-delimiter message. Matches web's
+     * `getAnchorFromRoom`: scans from newest → oldest and picks the first
+     * message that was actually delivered. */
     private fun getRoomAnchor(room: Room): RoomAnchor? {
-        val cachedLast = MessageStore.getMessagesForRoom(room.jid).maxByOrNull { it.timestamp ?: it.date.time }
-        val timestamp = cachedLast?.timestamp ?: room.lastMessageTimestamp
-        if (cachedLast == null && timestamp == null) return null
-        return RoomAnchor(
-            id = cachedLast?.id,
-            xmppId = cachedLast?.xmppId,
-            timestamp = timestamp
-        )
+        val cached = MessageStore.getMessagesForRoom(room.jid)
+        if (cached.isEmpty()) return null
+        val sorted = cached.sortedBy { it.timestamp ?: it.date.time }
+        for (i in sorted.indices.reversed()) {
+            val m = sorted[i]
+            if (m.id == "delimiter-new") continue
+            if (m.pending == true) continue
+            if (m.body.isBlank() && m.isMediafile != "true") continue
+            return RoomAnchor(
+                id = m.id,
+                xmppId = m.xmppId,
+                timestamp = m.timestamp ?: m.date.time
+            )
+        }
+        return null
     }
 
-    private fun hasAnchor(messages: List<com.ethora.chat.core.models.Message>, anchor: RoomAnchor): Boolean {
-        return messages.any { message ->
-            val messageTs = message.timestamp ?: message.date.time
-            (anchor.id != null && message.id == anchor.id) ||
-                (anchor.xmppId != null && message.xmppId == anchor.xmppId) ||
-                (anchor.timestamp != null && messageTs == anchor.timestamp)
-        }
+    /** 4-level fallback match, same priority as web's `anchorMatches`:
+     *  stableKey (xmppId || id), then xmppId, then id, then timestamp. */
+    private fun anchorMatches(
+        anchor: RoomAnchor,
+        candidate: com.ethora.chat.core.models.Message
+    ): Boolean {
+        val candidateStable = (candidate.xmppId ?: candidate.id).trim()
+        val anchorStable = (anchor.xmppId ?: anchor.id).orEmpty().trim()
+        if (anchorStable.isNotEmpty() && candidateStable.isNotEmpty() && anchorStable == candidateStable) return true
+
+        if (!anchor.xmppId.isNullOrBlank() && !candidate.xmppId.isNullOrBlank() &&
+            anchor.xmppId == candidate.xmppId) return true
+
+        if (!anchor.id.isNullOrBlank() && anchor.id == candidate.id) return true
+
+        val ts = candidate.timestamp ?: candidate.date.time
+        return ts > 0 && anchor.timestamp > 0 && ts == anchor.timestamp
     }
-    
+
+    private fun roomActivityScore(room: Room): Long =
+        room.lastMessageTimestamp ?: 0L
+
     suspend fun updateMessagesTillLast(
         xmppClient: XMPPClient?,
-        batchSize: Int = 5,
-        maxFetchAttempts: Int = 4,
-        messagesPerFetch: Int = 5
+        batchSize: Int = 2,
+        messagesPerFetch: Int = 20
     ) {
         if (xmppClient == null) {
-            Log.w(TAG, "XMPP client is null, cannot load messages")
+            Log.w(TAG, "XMPP client is null, skipping catchup")
             return
         }
-        
         val rooms = RoomStore.rooms.value
-        if (rooms.isEmpty()) {
-            return
-        }
-        
+        if (rooms.isEmpty()) return
+
+        // Active room first, then by most recent activity, then alphabetical.
+        val activeJid = RoomStore.currentRoom.value?.jid
+        val sorted = rooms.sortedWith(
+            compareByDescending<Room> { it.jid == activeJid }
+                .thenByDescending { roomActivityScore(it) }
+                .thenBy { it.jid }
+        )
+
+        val normalizedBatchSize = maxOf(1, batchSize)
         var processedIndex = 0
-        
-        while (processedIndex < rooms.size) {
-            val currentBatch = rooms.slice(processedIndex until minOf(processedIndex + batchSize, rooms.size))
-            
-            val anchorsByJid = currentBatch.associate { room ->
-                room.jid to getRoomAnchor(room)
-            }
-            
+        while (processedIndex < sorted.size) {
+            val currentBatch = sorted.subList(
+                processedIndex,
+                minOf(processedIndex + normalizedBatchSize, sorted.size)
+            )
+
             currentBatch.mapIndexed { index, room ->
                 scope.launch {
                     try {
-                        if (index > 0) {
-                            delay(125)
-                        }
-                        
-                        try {
-                            // Only send presence if fully connected, but continue with message loading regardless
-                            if (xmppClient.isFullyConnected()) {
-                                xmppClient.sendPresenceInRoom(room.jid)
-                                delay(100)
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed to send presence to ${room.jid}", e)
-                        }
-                        
-                        val anchor = anchorsByJid[room.jid]
-                        if (anchor == null) {
-                            return@launch
-                        }
-                        
-                        var counter = 0
-                        var isAnchorFound = false
-                        var currentJidNewMessages = mutableListOf<com.ethora.chat.core.models.Message>()
-                        
-                        while (!isAnchorFound && counter < maxFetchAttempts) {
-                            val lastMessageId = if (counter > 0) {
-                                currentJidNewMessages.firstOrNull()?.id
-                            } else {
-                                null
-                            }
-                            
-                            val fetchedMessages = xmppClient.getHistory(
+                        if (index > 0) delay(125)
+
+                        // Anchor snapshot must be taken from the latest store
+                        // state, not a pre-batch snapshot — messages can arrive
+                        // via real-time between the sort and this point.
+                        val anchor = getRoomAnchor(room)
+
+                        val latest = try {
+                            xmppClient.getHistory(
                                 room.jid,
                                 max = messagesPerFetch,
-                                beforeMessageId = lastMessageId?.toString()
+                                beforeMessageId = null
                             )
-                            
-                            if (fetchedMessages.isEmpty()) {
-                                break
-                            }
-                            
-                            counter++
-                            currentJidNewMessages = (fetchedMessages + currentJidNewMessages).toMutableList()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "getHistory failed for ${room.jid}", e)
+                            emptyList()
+                        }
+                        if (latest.isEmpty()) return@launch
 
-                            isAnchorFound = hasAnchor(currentJidNewMessages, anchor)
+                        if (anchor == null) {
+                            // Empty cache — seed with what the server has.
+                            MessageStore.setMessagesForRoom(room.jid, latest)
+                            return@launch
                         }
 
-                        if (currentJidNewMessages.isNotEmpty()) {
-                            if (isAnchorFound) {
-                                MessageStore.addMessages(room.jid, currentJidNewMessages)
-                            } else {
-                                // Anchor miss fallback: prefer latest server state to avoid stale local cache.
-                                Log.w(TAG, "Anchor miss for ${room.jid}. Replacing room cache with fetched history.")
-                                MessageStore.setMessagesForRoom(room.jid, currentJidNewMessages)
+                        val anchorFound = latest.any { anchorMatches(anchor, it) }
+                        if (anchorFound) {
+                            // Delta merge: only messages strictly newer than the anchor.
+                            val delta = latest.filter { msg ->
+                                val ts = msg.timestamp ?: msg.date.time
+                                ts > anchor.timestamp
                             }
+                            if (delta.isNotEmpty()) {
+                                MessageStore.addMessages(room.jid, delta)
+                            }
+                        } else {
+                            // Anchor miss — local cache diverged (e.g. a long
+                            // offline window). Trust the server's latest page.
+                            Log.w(TAG, "Anchor miss for ${room.jid}; replacing cache")
+                            MessageStore.setMessagesForRoom(room.jid, latest)
                         }
-                    } catch (error: Exception) {
-                        Log.e(TAG, "Error processing room ${room.jid}", error)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error processing room ${room.jid}", e)
                     }
                 }
             }.forEach { it.join() }
-            
-            processedIndex += batchSize
+
+            processedIndex += normalizedBatchSize
         }
     }
 }
