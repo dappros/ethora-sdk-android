@@ -1,41 +1,42 @@
 [versions]
-kotlin = "1.9.22"
-androidGradlePlugin = "8.5.2"
-compileSdk = "34"
-minSdk = "24"
-targetSdk = "34"
-jvmTarget = "17"
+kotlin = "2.3.0"
+androidGradlePlugin = "8.7.0"
+compileSdk = "37"
+minSdk = "26"
+targetSdk = "37"
+jvmTarget = "21"
 versionCode = "1"
 versionName = "1.0.0"
 
 # Core Android
-coreKtx = "1.12.0"
-appcompat = "1.6.1"
-lifecycle = "2.6.2"
-activityCompose = "1.8.1"
-navigationCompose = "2.7.5"
+coreKtx = "1.18.0"
+appcompat = "1.7.0"
+lifecycle = "2.10.0"
+activityCompose = "1.13.0"
+navigationCompose = "2.10.0"
 
 # Compose
-composeBom = "2023.10.01"
-composeCompiler = "1.5.8"
+composeBom = "2026.04.00"
+# Compose Compiler is now handled by the Kotlin plugin for 2.0+
+# composeCompiler = "1.5.8"
 
 # Networking
-retrofit = "2.9.0"
-okhttp = "4.12.0"
-gson = "2.10.1"
+retrofit = "3.0.0"
+okhttp = "5.3.2"
+gson = "2.11.0"
 
 # XMPP
-smack = "4.4.7"
+smack = "4.4.8"
 
 # Image Loading
-coil = "2.5.0"
+coil = "3.4.0"
 
 # Dependency Injection
-hilt = "2.48"
-hiltNavigationCompose = "1.1.0"
+hilt = "2.57.1"
+hiltNavigationCompose = "1.3.0"
 
 # Persistence
-room = "2.6.1"
+room = "2.8.4"
 datastore = "1.0.0"
 security-crypto = "1.1.0-alpha06"
 
@@ -87,7 +88,7 @@ smack-android = { group = "org.igniterealtime.smack", name = "smack-android", ve
 smack-android-extensions = { group = "org.igniterealtime.smack", name = "smack-android-extensions", version.ref = "smack" }
 
 # Image Loading
-coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
+coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
 
 # Dependency Injection
 hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }
@@ -114,11 +115,15 @@ junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxJunit" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
 mockito-core = { group = "org.mockito", name = "mockito-core", version.ref = "mockitoCore" }
-mockito-kotlin = { group = "org.mockito.kotlin", name = "mockito-kotlin", version.ref = "mockitoKotlin" }
+# Build Tools
+android-gradle-plugin = { group = "com.android.tools.build", name = "gradle", version.ref = "androidGradlePlugin" }
+kotlin-gradle-plugin = { group = "org.jetbrains.kotlin", name = "kotlin-gradle-plugin", version.ref = "kotlin" }
+hilt-android-gradle-plugin = { group = "com.google.dagger", name = "hilt-android-gradle-plugin", version.ref = "hilt" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "androidGradlePlugin" }
 android-library = { id = "com.android.library", version.ref = "androidGradlePlugin" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-kapt = { id = "org.jetbrains.kotlin.kapt", version.ref = "kotlin" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }

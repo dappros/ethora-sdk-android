@@ -1,5 +1,5 @@
 jdk:
-  - openjdk17
+  - openjdk21
 
 install:
   - ./gradlew clean -xtest -xlint assemble :publishRootPublicationToMavenLocal :ethora-component:publishReleasePublicationToMavenLocal -Pversion=$VERSION -Pgroup=com.github.dappros
