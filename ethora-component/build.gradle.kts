@@ -140,19 +140,30 @@ afterEvaluate {
     val cmdProps = gradle.startParameter.projectProperties
     val resolvedGroup = cmdProps["group"] ?: "com.github.dappros"
     val resolvedVersion = cmdProps["version"] ?: libs.versions.versionName.get()
-    // artifactId renamed from "ethora-sdk-android" to "ethora-component".
-    // Previously both root and this module claimed the same coordinate,
-    // which collided and caused JitPack to ship whichever Gradle wrote
-    // last (a pom-only proxy that masked the real AAR). Distinct coords
-    // now — root publishes ethora-sdk-android (pom, depends on this),
-    // this module publishes ethora-component (the actual AAR).
-    println("[JitPack] Publishing ethora-component → $resolvedGroup:ethora-component:$resolvedVersion")
+    // artifactId kept as "ethora-sdk-android" to match the root
+    // publication's artifactId. Gradle emits a warning about the
+    // coordinate collision — that's expected and benign. The root
+    // task ('publishRootPublicationToMavenLocal') runs first and
+    // writes a pom-only artifact; this task runs after it
+    // (dependsOn wired in the root build.gradle.kts) and overwrites
+    // the pom with the real AAR+pom+sources+module files. JitPack's
+    // artifact discovery then ships the full AAR bundle at
+    // com.github.dappros:ethora-sdk-android:<version>.
+    //
+    // An earlier experiment (91e542d) gave the two publications
+    // distinct artifactIds ("ethora-sdk-android" vs "ethora-component")
+    // to eliminate the warning. That broke JitPack: JitPack only
+    // exposes the single coordinate it auto-discovers at the root,
+    // so the split produced a pom-only artifact with a transitive
+    // dep on a second coordinate ("ethora-component") that JitPack
+    // never published — consumers 404'd resolving the transitive.
+    println("[JitPack] Publishing ethora-sdk-android AAR → $resolvedGroup:ethora-sdk-android:$resolvedVersion")
     publishing {
         publications {
             create<MavenPublication>("release") {
                 from(components["release"])
                 groupId = resolvedGroup
-                artifactId = "ethora-component"
+                artifactId = "ethora-sdk-android"
                 version = resolvedVersion
             }
         }

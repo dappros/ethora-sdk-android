@@ -40,33 +40,34 @@ subprojects {
     layout.buildDirectory.set(file("/tmp/android_build/${rootProject.name}/${project.name}"))
 }
 
-// Root publication restored after the 5645139 experiment.
+// Root publication — intentionally claims the same coordinate as
+// :ethora-component's 'release' publication. Gradle warns about this
+// ("Multiple publications with coordinates ... will overwrite each
+// other"), which is the behaviour we're relying on: the root task
+// runs first (pom-only), :ethora-component runs second (real AAR +
+// pom + sources + module) and overwrites the pom with the full
+// artifact bundle. JitPack's discovery then serves the full AAR at
+//   com.github.dappros:ethora-sdk-android:<version>
 //
-// Background: v1.0.21's root 'root' publication and :ethora-component's
-// 'release' publication both claimed artifactId 'ethora-sdk-android'
-// and collided — Gradle warned, JitPack shipped whichever Gradle
-// processed last. Experiment 5645139 removed the root publication
-// entirely; the build compiled fine, but JitPack's artifact-discovery
-// step expects a root-level POM at the canonical coordinate and
-// returned 'No build artifacts found' (build 9b8126f — "BUILD
-// SUCCESSFUL / No build artifacts found").
+// This is how v1.0.21 shipped and how it kept working. Two
+// alternative factorings were tried on tf-dev and both regressed:
+//   5645139 — dropped the root publication. JitPack's discovery
+//             step expects a root POM and returned 'No build
+//             artifacts found'.
+//   91e542d — split root (artifactId=ethora-sdk-android, pom-only)
+//             and :ethora-component (artifactId=ethora-component,
+//             AAR) into distinct coordinates. JitPack only exposes
+//             one coordinate per repo, so the split produced a
+//             pom-only artifact with a transitive dep on a second
+//             coordinate that JitPack never published — consumers
+//             404'd resolving the transitive.
 //
-// Fixing both the collision AND the discovery gap by giving the two
-// publications DISTINCT artifactIds:
-//
-//   com.github.dappros:ethora-sdk-android:<version>  — pom-only,
-//     from this root publication. Serves existing consumers; its POM
-//     declares a transitive runtime dependency on ethora-component so
-//     Gradle resolves the real AAR when someone writes:
-//         implementation("com.github.dappros:ethora-sdk-android:<ver>")
-//
-//   com.github.dappros:ethora-component:<version>  — the real AAR,
-//     produced by :ethora-component (see ethora-component/build.gradle.kts
-//     afterEvaluate block — its artifactId is also renamed to
-//     "ethora-component" in the same commit that brings this block back).
-//
-// JitPack's yml invokes both publishToMavenLocal tasks, so both POMs
-// land in ~/.m2 and both coordinates become resolvable.
+// Reverting to the v1.0.21 layout because it's the shape JitPack
+// actually supports. Cleaning up the warning would need either a
+// different distribution (e.g. publishing directly to Maven Central
+// / Google Maven with per-module coordinates) or a larger refactor
+// where the SDK is a single module, neither of which is in scope for
+// tf-dev testing.
 publishing {
     publications {
         create<MavenPublication>("root") {
@@ -83,7 +84,6 @@ publishing {
                 dependencyNode.appendNode("groupId", resolvedGroupId)
                 dependencyNode.appendNode("artifactId", "ethora-component")
                 dependencyNode.appendNode("version", resolvedVersion)
-                dependencyNode.appendNode("scope", "runtime")
             }
         }
     }
