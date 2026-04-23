@@ -41,6 +41,24 @@ class XMPPWebSocketConnection(
 
     init {
         Log.d(TAG, "XMPP WebSocket DNS overrides: ${dnsFallbackOverrides?.size ?: 0} hosts")
+        // Self-identifying stamp in LogStore so the sample playground's
+        // Logs tab shows immediately whether the tf-dev SDK build is
+        // actually loaded. If you don't see this line, Gradle resolved an
+        // older cached AAR — force --refresh-dependencies.
+        com.ethora.chat.core.store.LogStore.info(
+            TAG,
+            "🛠️ chat-core tf-dev build — WebSocket instance created"
+        )
+    }
+
+    // Also log each incoming WebSocket frame at the WebSocketListener layer,
+    // before handleIncomingStanza, so we can distinguish between
+    // "server never sent anything" vs "handleIncomingStanza swallowed it".
+    private fun logFrameReceived(source: String, text: String) {
+        com.ethora.chat.core.store.LogStore.receive(
+            TAG,
+            "📡 $source frame: ${text.take(300)}${if (text.length > 300) "…" else ""}"
+        )
     }
 
     private var delegate: XMPPClientDelegate? = null
@@ -115,35 +133,41 @@ class XMPPWebSocketConnection(
             webSocket = client.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     Log.d(TAG, "✅ WebSocket opened")
+                    com.ethora.chat.core.store.LogStore.success(TAG, "✅ WebSocket opened")
                     isConnected = true
                     scope.launch {
                         sendStreamOpen()
                     }
                 }
-                
+
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     Log.d(TAG, "📨 Received WebSocket message: ${text.take(200)}")
+                    logFrameReceived("text", text)
                     scope.launch {
                         handleIncomingStanza(text)
                     }
                 }
-                
+
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                     Log.d(TAG, "📨 Received WebSocket binary message")
+                    val utf8 = bytes.utf8()
+                    logFrameReceived("binary", utf8)
                     scope.launch {
-                        handleIncomingStanza(bytes.utf8())
+                        handleIncomingStanza(utf8)
                     }
                 }
-                
+
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                     Log.d(TAG, "🔌 WebSocket closing: $code - $reason")
+                    com.ethora.chat.core.store.LogStore.warning(TAG, "🔌 closing $code — $reason")
                     isConnected = false
                     isAuthenticated = false
                     authState = AuthState.NOT_STARTED
                 }
-                
+
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     Log.d(TAG, "🔌 WebSocket closed: $code - $reason")
+                    com.ethora.chat.core.store.LogStore.warning(TAG, "🔌 closed $code — $reason")
                     this@XMPPWebSocketConnection.webSocket = null
                     isConnected = false
                     isAuthenticated = false
@@ -154,9 +178,10 @@ class XMPPWebSocketConnection(
                         }
                     }
                 }
-                
+
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.e(TAG, "❌ WebSocket failure", t)
+                    com.ethora.chat.core.store.LogStore.error(TAG, "❌ WebSocket failure: ${t.message ?: t.javaClass.simpleName}")
                     this@XMPPWebSocketConnection.webSocket = null
                     isConnected = false
                     isAuthenticated = false
