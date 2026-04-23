@@ -18,4 +18,7 @@ dependencyResolutionManagement {
 rootProject.name = "ethora-chat-android"
 
 include(":ethora-component")
-include(":sample-chat-app")
+// sample-chat-app module extracted into the dappros/ethora-sample-android
+// repo on 2026-04-21 (commit 86fd0a2 "Stop tracking sample-chat-app").
+// The directory no longer exists in this repo, so the stale include was
+// failing standalone builds and would fail composite-build consumers too.
