@@ -44,13 +44,17 @@ internal object XMPPClientRegistry {
      * create a new one with the supplied [settings] and
      * [dnsFallbackOverrides]. Switching users disconnects the previous
      * client before returning the new one.
+     *
+     * Nullability mirrors the XMPPClient constructor: both [settings]
+     * and [dnsFallbackOverrides] are optional, defaulting to the
+     * XMPPClient's own fallbacks when absent.
      */
     @Synchronized
     fun getOrCreate(
         username: String,
         password: String,
-        settings: XMPPSettings,
-        dnsFallbackOverrides: Map<String, List<String>>?
+        settings: XMPPSettings?,
+        dnsFallbackOverrides: Map<String, String>?
     ): XMPPClient {
         val existing = current
         if (existing != null && currentKey == username) {
