@@ -2,7 +2,12 @@ package com.ethora.chat.ui.components
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -27,6 +32,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.runtime.snapshotFlow
 import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.MessageActionsProps
@@ -104,12 +110,20 @@ fun ChatRoomView(
         android.util.Log.d("ChatRoomView", "Room opened: $room.jid, set lastViewedTimestamp to 0")
     }
     
-    // Update lastViewedTimestamp when room is closed (set to current time)
-    DisposableEffect(room.jid) {
+    // Update lastViewedTimestamp when room is closed (set to current time).
+    // Web parity: also write the new read marker to the server's private store
+    // (XEP-0049) so other devices see the same read state.
+    val disposeScope = rememberCoroutineScope()
+    DisposableEffect(room.jid, xmppClient) {
         onDispose {
             val currentTime = System.currentTimeMillis()
             com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, currentTime)
-            android.util.Log.d("ChatRoomView", "Room closed: $room.jid, set lastViewedTimestamp to $currentTime")
+            disposeScope.launch {
+                com.ethora.chat.core.store.InitBeforeLoadFlow.writeCurrentTimestamp(
+                    xmppClient, room.jid, currentTime
+                )
+            }
+            android.util.Log.d("ChatRoomView", "Room closed: ${room.jid}, lastViewedTimestamp=$currentTime")
         }
     }
     
@@ -165,44 +179,135 @@ fun ChatRoomView(
     
     // Track if scroll to bottom button should be shown
     var showScrollToBottom by remember { mutableStateOf(false) }
-    
+
     // Track unread count (messages that arrived while scrolled up)
     var unreadCount by remember { mutableStateOf(0) }
     var lastMessageCount by remember { mutableStateOf(messages.size) }
     var pendingOwnMessageAutoScroll by remember { mutableStateOf(false) }
-    
-    // Check scroll position to show/hide scroll to bottom button
+
+    // True when the viewport ends within ~3 items of the list's tail. Used to
+    // decide "new incoming → auto-scroll" AND to know whether the user has
+    // manually scrolled up (if not near bottom, they're reading older messages).
+    // Web's equivalent: `isUserScrolledUp.current = distanceFromBottom > 150`.
+    val isNearBottom by remember {
+        derivedStateOf {
+            if (messages.isEmpty()) return@derivedStateOf true
+            val totalCount = listState.layoutInfo.totalItemsCount
+            if (totalCount == 0) return@derivedStateOf true
+            val lastVisibleIdx = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val isAtEndOfContent = !listState.canScrollForward
+            isAtEndOfContent || lastVisibleIdx >= totalCount - 3
+        }
+    }
+
+    // (Removed the snapshotFlow-based `userHasScrolledUp` latch — it read
+    // listState during the brief window when MAM had populated the list but
+    // the initial auto-scroll hadn't run yet, so it flipped to "user scrolled
+    // up" by mistake and disabled subsequent auto-scroll. The unified
+    // messages.size effect below uses listState.layoutInfo directly AFTER the
+    // auto-scroll has settled, which avoids the race.)
+
+    // Two-stage scroll-to-bottom (option Q11=c):
+    //   1) INSTANT jump to the last index via `scrollToItem(lastIdx)`. This
+    //      guarantees the tail of the list is actually laid out — no more
+    //      "landed at a random spot" because `animateScrollToItem` decided to
+    //      short-circuit before the item was composed.
+    //   2) `animateScrollBy(Float.MAX_VALUE)` (clamped by LazyColumn to max
+    //      scroll). Flushes any remaining pixels below the item — trailing
+    //      contentPadding, the typing-indicator item's own height, or late
+    //      image expansions — and the animation settles smoothly at the real
+    //      bottom instead of a few pixels short.
+    suspend fun scrollToTrueBottom(animate: Boolean = true) {
+        val total = listState.layoutInfo.totalItemsCount
+        if (total <= 0) return
+        listState.scrollToItem(total - 1)
+        if (animate) {
+            listState.animateScrollBy(Float.MAX_VALUE)
+        } else {
+            listState.scrollBy(Float.MAX_VALUE)
+        }
+    }
+
+    // ---- Show/hide the "scroll to bottom" FAB ----
     LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, messages.size) {
         val isAtBottom = !listState.canScrollForward
-        
-        // Show button if we're not at bottom and have messages
-        val shouldShow = !isAtBottom && messages.isNotEmpty()
-        
-        // If user scrolled to bottom, reset unread count
-        if (isAtBottom) {
-            unreadCount = 0
-        }
-        
-        showScrollToBottom = shouldShow
+        showScrollToBottom = !isAtBottom && messages.isNotEmpty()
+        if (isAtBottom) unreadCount = 0
     }
-    
-    // Track new messages that arrive while user is NOT at the bottom.
-    // (Older messages loaded at the top must not increase unread counter.)
-    LaunchedEffect(messages.size) {
-        if (messages.size > lastMessageCount) {
-            val delta = messages.size - lastMessageCount
 
-            // If we are loading older messages (pagination) - ignore for unread counter.
-            if (!isLoadingMore) {
-                val isAtBottomNow = !listState.canScrollForward
-                if (!isAtBottomNow) {
-                    unreadCount += delta
-                }
+    // ---- Unified scroll-on-messages-change effect ----
+    // Matches web's MessageList.tsx restoreScrollPosition + new-message logic:
+    //   • First non-empty load for a room → jump to bottom (no animation).
+    //   • Every subsequent increase → if the user is AT or NEAR the bottom
+    //     (last ≥ 3 items visible or !canScrollForward), re-pin to the new
+    //     bottom; otherwise bump `unreadCount`.
+    //
+    // The "second load wave" bug is now impossible because the near-bottom
+    // check always runs AFTER the previous auto-scroll has settled — if we
+    // were pinned, canScrollForward is still false and we re-pin.
+    var initialAutoScrollDone by remember(room.jid) { mutableStateOf(false) }
+    LaunchedEffect(room.jid, messages.size) {
+        if (messages.isEmpty()) return@LaunchedEffect
+
+        // Let the new items measure before we inspect listState.
+        kotlinx.coroutines.delay(60)
+
+        if (!initialAutoScrollDone) {
+            // Wait for LazyColumn to finish composing the new items — without
+            // this, animateScrollToItem can land BEFORE the last item is laid
+            // out, leaving the list a few pixels above the true bottom.
+            kotlinx.coroutines.withTimeoutOrNull(600) {
+                snapshotFlow { listState.layoutInfo.totalItemsCount }
+                    .first { it >= messages.size }
+            }
+            // Initial jump.
+            scrollToTrueBottom(animate = false)
+            // Async renderers (AsyncImage, media players, avatar bitmaps) can
+            // grow items AFTER first layout, which shifts the bottom further
+            // down. Re-pin a few times, but only while the user hasn't scrolled
+            // away — so gestures aren't fought.
+            repeat(4) {
+                kotlinx.coroutines.delay(120)
+                val total = listState.layoutInfo.totalItemsCount
+                val lastVisibleIdx = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                val nearBottom = !listState.canScrollForward ||
+                    (total > 0 && lastVisibleIdx >= total - 2)
+                if (!nearBottom) return@repeat
+                scrollToTrueBottom(animate = false)
+            }
+            initialAutoScrollDone = true
+            lastMessageCount = messages.size
+            unreadCount = 0
+            return@LaunchedEffect
+        }
+
+        if (messages.size > lastMessageCount && !isLoadingMore) {
+            val delta = messages.size - lastMessageCount
+            val total = listState.layoutInfo.totalItemsCount
+            val lastVisibleIdx = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val atEndOfContent = !listState.canScrollForward
+            val atOrNearBottom = atEndOfContent ||
+                (total > 0 && lastVisibleIdx >= total - 3)
+            if (atOrNearBottom) {
+                scrollToTrueBottom(animate = true)
+                unreadCount = 0
+            } else {
+                unreadCount += delta
             }
         }
         lastMessageCount = messages.size
     }
-    
+
+    // ---- Scroll after the user sends a message — ALWAYS ----
+    LaunchedEffect(messages.size, pendingOwnMessageAutoScroll) {
+        if (!pendingOwnMessageAutoScroll) return@LaunchedEffect
+        if (messages.isEmpty()) return@LaunchedEffect
+        kotlinx.coroutines.delay(50)
+        scrollToTrueBottom(animate = true)
+        unreadCount = 0
+        pendingOwnMessageAutoScroll = false
+    }
+
     // Debug logging
     LaunchedEffect(messages.size, isLoading) {
         if (messages.isEmpty() && !isLoading) {
@@ -210,50 +315,28 @@ fun ChatRoomView(
         }
     }
 
-    // Scroll only after the sent message is actually present in the list.
-    LaunchedEffect(messages.size, pendingOwnMessageAutoScroll) {
-        if (!pendingOwnMessageAutoScroll || messages.isEmpty()) return@LaunchedEffect
-
-        val latestMessage = messages.lastOrNull()
-        val currentUserXmppUsername = viewModel.currentUserXmppUsername
-        val currentUserId = viewModel.currentUserId
-
-        val isLatestFromCurrentUser = latestMessage?.let { message ->
-            when {
-                !currentUserXmppUsername.isNullOrBlank() -> {
-                    val messageXmppUsername = message.user.xmppUsername ?: ""
-                    val messageUserJID = message.user.userJID ?: ""
-                    val containsXmppUsername = messageXmppUsername.isNotBlank() &&
-                        messageXmppUsername.contains(currentUserXmppUsername, ignoreCase = false)
-                    val containsUserJID = messageUserJID.isNotBlank() &&
-                        messageUserJID.contains(currentUserXmppUsername, ignoreCase = false)
-                    containsXmppUsername || containsUserJID
-                }
-                else -> {
-                    val messageUserId = message.user.id
-                    !currentUserId.isNullOrBlank() && !messageUserId.isNullOrBlank() &&
-                        currentUserId == messageUserId
-                }
+    // Keyboard-aware auto-scroll: when the IME opens, pin the list to the bottom
+    // so the newest message is visible above the keyboard. Matches web's onFocus scroll.
+    val density = LocalDensity.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
+    val isImeVisible = imeBottom > 0
+    var wasImeVisible by remember { mutableStateOf(isImeVisible) }
+    LaunchedEffect(isImeVisible, messages.size) {
+        if (isImeVisible && !wasImeVisible && messages.isNotEmpty()) {
+            val isAtBottomNow = !listState.canScrollForward
+            // Use totalItemsCount so the trailing typing-indicator item is accounted for.
+            val total = listState.layoutInfo.totalItemsCount
+            val nearBottom = isAtBottomNow ||
+                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let {
+                    total > 0 && it >= total - 3
+                } == true
+            if (nearBottom) {
+                // Small delay lets the list re-layout after the IME insets apply.
+                kotlinx.coroutines.delay(50)
+                scrollToTrueBottom(animate = true)
             }
-        } ?: false
-
-        if (isLatestFromCurrentUser) {
-            kotlinx.coroutines.delay(50)
-            listState.animateScrollToItem((messages.size - 1).coerceAtLeast(0))
-            unreadCount = 0
-            pendingOwnMessageAutoScroll = false
         }
-    }
-    
-    // Auto-scroll to bottom when entering chat (only once per room)
-    var initialAutoScrollDone by remember(room.jid) { mutableStateOf(false) }
-    LaunchedEffect(messages.size, room.jid) {
-        if (!initialAutoScrollDone && messages.isNotEmpty()) {
-            kotlinx.coroutines.delay(100)
-            listState.scrollToItem((messages.size - 1).coerceAtLeast(0))
-            initialAutoScrollDone = true
-            android.util.Log.d("ChatRoomView", "Auto-scrolled to bottom (initial load)")
-        }
+        wasImeVisible = isImeVisible
     }
 
     // Restore scroll position after loading older messages (avoid jumps)
@@ -411,12 +494,10 @@ fun ChatRoomView(
                     }
                 }
                 messages.isNotEmpty() -> {
-                    // Show messages
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 0.dp, vertical = 12.dp),
-                        // Keep messages anchored to the bottom when there are few items.
                         verticalArrangement = Arrangement.spacedBy(4.dp, Alignment.Bottom),
                         reverseLayout = false
                     ) {
@@ -535,7 +616,12 @@ fun ChatRoomView(
                                             parentMessage = parentMessage,
                                             showAvatar = isFirstInGroup, // Show avatar on first message in group
                                             showUsername = isFirstInGroup, // Only show username on first message
-                                            showTimestamp = true,
+                                            // Web parity: timestamp only on the LAST message of a
+                                            // consecutive same-sender group (within the 5-minute
+                                            // window). Otherwise every bubble carries "20:25" which
+                                            // is visual noise. `isLastInGroup` is already computed
+                                            // above from chronological neighbours + time window.
+                                            showTimestamp = isLastInGroup,
                                             onMediaClick = { msg -> previewMessage = msg },
                                             onLongPress = { tapX, tapY, left, top, right, bottom ->
                                                 contextMenuMessage = message
@@ -553,8 +639,22 @@ fun ChatRoomView(
                                 }
                             }
                         }
+
+                        // Typing indicator as the LAST item inside the scroll
+                        // container — matches web's Composing.tsx which renders
+                        // inside MessagesScroll. This way it scrolls together
+                        // with the messages, never overlaps any bubble, and
+                        // "user at bottom" + auto-scroll keeps it visible.
+                        if (composingUsers.isNotEmpty()) {
+                            item(key = "typing-indicator") {
+                                TypingIndicator(users = composingUsers)
+                            }
+                        }
                     }
-                    
+
+                    // (Typing indicator is now a LazyColumn item above; no
+                    // overlay or sibling row is needed.)
+
                     // History loader overlayed at the top of the messages list when loading more
                     // Positioned over the oldest messages (top of the list in reverseLayout)
                     if (isLoadingMore && isAtTop) {
@@ -613,10 +713,9 @@ fun ChatRoomView(
                             Box {
                                 FloatingActionButton(
                                     onClick = {
-                                        // Scroll to bottom (index 0 in reverseLayout = newest messages)
                                         coroutineScope.launch {
-                                            listState.animateScrollToItem((messages.size - 1).coerceAtLeast(0))
-                                            unreadCount = 0 // Reset unread count when scrolling to bottom
+                                            scrollToTrueBottom(animate = true)
+                                            unreadCount = 0
                                         }
                                     },
                                     modifier = Modifier.size(48.dp),
@@ -755,11 +854,11 @@ fun ChatRoomView(
             }
         }
         
-        // Typing indicator
-        if (composingUsers.isNotEmpty()) {
-            TypingIndicator(users = composingUsers)
-        }
-        
+        // Typing indicator is now rendered as the final `item` inside the
+        // LazyColumn (see above), so the list itself carries it. No sibling
+        // row here — that previously ate ~46 dp off the messages Box and made
+        // the last bubble feel hidden when someone started typing.
+
         // Input (disable media if config says so)
         val disableMedia = config?.disableMedia == true
         val canSendMessage = connectionState.status == ChatConnectionStatus.ONLINE
@@ -773,7 +872,16 @@ fun ChatRoomView(
             } else {
                 // Normal mode: send new message (could be a reply)
                 viewModel.sendMessage(text, parentId)
+                // ALWAYS pin to the bottom on send — web parity. Arming the
+                // flag AND kicking off an immediate scroll covers both the race
+                // where the optimistic message hasn't reached the LazyColumn yet
+                // (flag causes the LaunchedEffect to fire when it does) and the
+                // common case where it's already there.
                 pendingOwnMessageAutoScroll = true
+                coroutineScope.launch {
+                    kotlinx.coroutines.delay(60)
+                    scrollToTrueBottom(animate = true)
+                }
                 if (replyingToMessage != null) {
                     replyingToMessage = null
                 }
@@ -784,6 +892,12 @@ fun ChatRoomView(
         val handleSendMedia: ((java.io.File, String) -> Unit)? = if (disableMedia) null else mediaHandler@{ file, mimeType ->
             if (!canSendMessage) return@mediaHandler
             viewModel.sendMedia(file, mimeType)
+            // Same always-scroll-on-send rule for media.
+            pendingOwnMessageAutoScroll = true
+            coroutineScope.launch {
+                kotlinx.coroutines.delay(60)
+                scrollToTrueBottom(animate = true)
+            }
             // Stop typing when media is sent
             viewModel.sendStopTyping()
         }

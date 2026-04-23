@@ -20,7 +20,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.RoomListItemProps
 import com.ethora.chat.core.store.ChatStore
@@ -52,15 +52,21 @@ fun RoomListView(
     // Track selected room for active state
     val selectedRoom by RoomStore.currentRoom.collectAsState()
     
-    // Enrich rooms with last messages from MessageStore
+    // Enrich rooms with last messages AND a freshly-computed pending count
+    // from MessageStore. The stored `room.pendingMessages` field can go stale
+    // (e.g. if a pending echo clear fires before the RoomStore updateRoom
+    // dispatch reaches RoomListView, or if persistence brings back a non-zero
+    // count on restart). Deriving it per render from the single source of
+    // truth — the actual message list — avoids the "N sending" indicator
+    // sticking after the message has already flipped to pending=false.
     val enrichedRooms = remember(rooms, messagesByRoom) {
         rooms.map { room ->
             val roomMessages = messagesByRoom[room.jid] ?: emptyList()
+            val livePending = roomMessages.count { it.pending == true }
+            val base = room.copy(pendingMessages = livePending)
             if (roomMessages.isNotEmpty()) {
-                // Get the last message (newest) from MessageStore
                 val lastMessage = roomMessages.lastOrNull()
                 lastMessage?.let { msg ->
-                    // Create LastMessage from Message
                     val lastMessageModel = com.ethora.chat.core.models.LastMessage(
                         body = msg.body,
                         date = msg.date,
@@ -70,15 +76,13 @@ fun RoomListView(
                         mimetype = msg.mimetype,
                         originalName = msg.originalName
                     )
-                    // Update room with last message from MessageStore (takes priority over room.lastMessage)
-                    room.copy(
+                    base.copy(
                         lastMessage = lastMessageModel,
                         lastMessageTimestamp = msg.timestamp ?: msg.date.time
                     )
-                } ?: room
+                } ?: base
             } else {
-                // No messages in MessageStore, use room's lastMessage if available
-                room
+                base
             }
         }
     }
@@ -475,7 +479,10 @@ private fun RoomListItem(
                         }
                     }
                     
-                    // Unread badge
+                    // Unread dot — boolean indicator rather than a numeric badge.
+                    // A filled circle next to the row is enough to signal "there
+                    // is new activity here" without us having to keep the count
+                    // perfectly accurate across device/session boundaries.
                     if (room.unreadMessages > 0) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Surface(
@@ -485,25 +492,8 @@ private fun RoomListItem(
                             } else {
                                 MaterialTheme.colorScheme.primary
                             },
-                            modifier = Modifier.size(20.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = androidx.compose.ui.Alignment.Center
-                            ) {
-                                Text(
-                                    text = if (room.unreadMessages > 99) "99+" else room.unreadMessages.toString(),
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontWeight = FontWeight.Bold
-                                    ),
-                                    color = if (isActive) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onPrimary
-                                    }
-                                )
-                            }
-                        }
+                            modifier = Modifier.size(10.dp)
+                        ) {}
                     }
                 }
             }

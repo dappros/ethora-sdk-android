@@ -35,7 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
 import java.util.regex.Pattern
@@ -550,23 +550,26 @@ private fun UrlPreviewCard(
         UrlPreviewStore.prefetch(url)
     }
 
+    // Opaque gray-white surface regardless of own/received — 12% alpha over
+    // the primary colour of an own bubble made the card read as "dimmed /
+    // disabled". Keep the preview visually prominent so the URL is actually
+    // readable against both purple (user) and light-gray (other) backgrounds.
+    val previewBg = androidx.compose.ui.graphics.Color(0xFFF4F4F6) // soft gray-white
+    val previewText = MaterialTheme.colorScheme.onSurface
     Surface(
         modifier = modifier.clickable {
             runCatching { uriHandler.openUri(url) }
         },
         shape = RoundedCornerShape(12.dp),
-        color = if (isUser) {
-            MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.12f)
-        } else {
-            MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)
-        }
+        color = previewBg
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
             val title = preview?.title?.takeIf { it.isNotBlank() } ?: url
             Text(
                 text = title,
                 style = MaterialTheme.typography.labelLarge,
-                maxLines = 2
+                maxLines = 2,
+                color = previewText
             )
             val description = preview?.description?.takeIf { it.isNotBlank() }
             if (description != null) {
@@ -575,7 +578,7 @@ private fun UrlPreviewCard(
                     text = description,
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 3,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
+                    color = previewText.copy(alpha = 0.75f)
                 )
             }
             Spacer(modifier = Modifier.height(4.dp))

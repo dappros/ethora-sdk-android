@@ -74,7 +74,9 @@ data class Room(
     val role: String? = null,
     val messageStats: MessageStats? = null,
     val historyComplete: Boolean? = null,
-    val historyPreloadState: HistoryPreloadState = HistoryPreloadState.IDLE
+    val historyPreloadState: HistoryPreloadState = HistoryPreloadState.IDLE,
+    val isPlaceholder: Boolean = false,
+    val presenceReady: Boolean = false
 )
 
 /**
@@ -133,6 +135,8 @@ fun createRoomFromApi(apiRoom: ApiRoom, conferenceDomain: String, usersArrayLeng
         role = null,
         messageStats = null,
         historyComplete = null,
-        historyPreloadState = HistoryPreloadState.IDLE
+        historyPreloadState = HistoryPreloadState.IDLE,
+        isPlaceholder = false,
+        presenceReady = false
     )
 }

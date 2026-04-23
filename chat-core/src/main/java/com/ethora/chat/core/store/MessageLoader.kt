@@ -31,6 +31,10 @@ object MessageLoader {
 
     fun isSynced(): Boolean = hasSyncedHistory
     fun isSyncInProgress(): Boolean = syncInProgress
+
+    /** Allow external bootstrap (EthoraChatBootstrap) to claim that the first
+     *  pass is done so subsequent opens skip the full initial load. */
+    fun markSynced() { hasSyncedHistory = true }
     
     /**
      * Initialize with LocalStorage for sync timestamp tracking

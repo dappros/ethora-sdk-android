@@ -15,7 +15,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.RoomMember
 import java.text.SimpleDateFormat
@@ -34,7 +34,13 @@ fun ChatInfoScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Chat Profile") },
+                title = {
+                    // Show the actual room title instead of a generic "Chat Profile"
+                    // label — matches web's ChatProfileModal which puts the room
+                    // name in the modal header.
+                    val headerText = room.title.ifBlank { room.name.ifBlank { room.jid.substringBefore("@") } }
+                    Text(text = headerText, maxLines = 1)
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
@@ -118,14 +124,6 @@ fun ChatInfoScreen(
                         value = roomDescription
                     )
                 }
-            }
-            
-            // Chat type
-            item {
-                InfoCard(
-                    label = "Chat type",
-                    value = room.type?.name?.lowercase()?.capitalize() ?: "Unknown"
-                )
             }
             
             // Members list

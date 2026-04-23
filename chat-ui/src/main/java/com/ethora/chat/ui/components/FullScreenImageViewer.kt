@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -22,7 +23,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import kotlinx.coroutines.launch
 import java.io.File
 import java.net.URL
@@ -73,32 +74,76 @@ fun FullScreenImageViewer(
             modifier = Modifier.fillMaxSize()
         ) {
             itemsIndexed(gallery, key = { index, url -> "$index:$url" }) { _, url ->
-                AsyncImage(
-                    model = url,
-                    contentDescription = fileName,
-                    modifier = Modifier
-                        .fillParentMaxSize()
-                        .graphicsLayer(
-                            scaleX = scale,
-                            scaleY = scale,
-                            translationX = offset.x,
-                            translationY = offset.y
-                        )
-                        .pointerInput(url) {
-                            detectTransformGestures { _, pan, zoom, _ ->
-                                scale = (scale * zoom).coerceIn(1f, 5f)
-                                offset += pan
-                            }
-                        },
-                    contentScale = ContentScale.Fit
-                )
+                // Coil 3's default FileFetcher only handles `java.io.File` / `Uri`
+                // models reliably. Passing a raw "file:///..." String fails silently
+                // on some devices, leaving the viewer black. Convert local paths to
+                // a File so the fetcher picks the right loader. Http(s) URLs go
+                // through as String unchanged.
+                val model: Any = when {
+                    url.isBlank() -> url
+                    url.startsWith("file://") -> java.io.File(url.removePrefix("file://"))
+                    url.startsWith("/") -> java.io.File(url)
+                    else -> url
+                }
+                var loadFailed by remember(url) { mutableStateOf(false) }
+                Box(modifier = Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
+                    AsyncImage(
+                        model = model,
+                        contentDescription = fileName,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer(
+                                scaleX = scale,
+                                scaleY = scale,
+                                translationX = offset.x,
+                                translationY = offset.y
+                            )
+                            .pointerInput(url) {
+                                detectTransformGestures { _, pan, zoom, _ ->
+                                    scale = (scale * zoom).coerceIn(1f, 5f)
+                                    offset += pan
+                                }
+                            },
+                        contentScale = ContentScale.Fit,
+                        onError = { err ->
+                            loadFailed = true
+                            Log.w(
+                                "FullScreenImageViewer",
+                                "Failed to load image: $url (${err.result.throwable.message})"
+                            )
+                        }
+                    )
+                    if (loadFailed || url.isBlank()) {
+                        // Surface a visible error instead of a silent black screen.
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                modifier = Modifier.size(48.dp),
+                                tint = Color.White.copy(alpha = 0.6f)
+                            )
+                            Text(
+                                text = "Failed to load image",
+                                color = Color.White.copy(alpha = 0.7f),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                }
             }
         }
         
-        // Top bar with close and download buttons
+        // Top bar with close and download buttons. The Dialog renders edge-to-edge
+        // (decorFitsSystemWindows = false), so we must explicitly pad the buttons
+        // below the status bar / any device cutout — otherwise the round buttons
+        // sit under the system UI and become untappable.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .statusBarsPadding()
                 .padding(16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.Top
@@ -162,6 +207,8 @@ fun FullScreenImageViewer(
                 style = MaterialTheme.typography.labelLarge,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
+                    // Keep the counter above the gesture/3-button navigation bar.
+                    .navigationBarsPadding()
                     .padding(bottom = 24.dp)
             )
         }

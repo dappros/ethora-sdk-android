@@ -1,5 +1,9 @@
 jdk:
   - openjdk21
 
+# -Ppublish=true is required: ethora-component/build.gradle.kts only configures
+# the "release" Maven publication when publish=true (or PUBLISH_SDK=true env),
+# so without it the :ethora-component:publishReleasePublicationToMavenLocal
+# task does not exist and the install step fails.
 install:
-  - ./gradlew clean -xtest -xlint assemble :publishRootPublicationToMavenLocal :ethora-component:publishReleasePublicationToMavenLocal -Pversion=$VERSION -Pgroup=com.github.dappros
+  - ./gradlew clean :ethora-component:assemble :publishRootPublicationToMavenLocal :ethora-component:publishReleasePublicationToMavenLocal -Ppublish=true -Pversion=$VERSION -Pgroup=com.github.dappros -x test -x lint

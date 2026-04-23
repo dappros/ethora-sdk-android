@@ -29,8 +29,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
@@ -65,6 +65,10 @@ dependencies {
 
     // Image Loading
     implementation(libs.coil.compose)
+    // Required for Coil 3 to fetch remote http(s) URLs (ServiceLoader auto-registers
+    // OkHttpNetworkFetcherFactory). Without this, only local File/resource models
+    // load and every remote preview stays blank.
+    implementation(libs.coil.network.okhttp)
 
     // Media Viewers
     implementation(libs.media3.exoplayer)

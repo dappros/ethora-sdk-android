@@ -9,11 +9,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import com.ethora.chat.core.config.ChatConfig
 import com.ethora.chat.core.config.ChatEvent
 import com.ethora.chat.core.models.Room
@@ -33,8 +37,13 @@ import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.store.MessageLoaderQueue
 import com.ethora.chat.core.store.MessagePriorityQueue
 import com.ethora.chat.core.store.IncrementalHistoryLoader
+import com.ethora.chat.core.store.LogStore
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
+import com.ethora.chat.core.store.buildPlaceholderRoom
+import com.ethora.chat.core.store.findRoomByJid
+import com.ethora.chat.core.store.normalizeRoomJid
+import com.ethora.chat.core.store.toBareRoomName
 import com.ethora.chat.core.push.PushNotificationManager
 import com.ethora.chat.core.xmpp.XMPPClientDelegate
 import com.ethora.chat.core.xmpp.ConnectionStatus
@@ -66,13 +75,38 @@ fun Chat(
 ) {
     val context = LocalContext.current
     val localStorage = remember { LocalStorage(context) }
-    
+
     ChatStore.setConfig(config)
 
     // Set base URL and app token immediately (mirrors React: setBaseURL in LoginWrapper useEffect)
     // Must run before any API call - config values replace defaults project-wide
     val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
     ApiClient.setBaseUrl(baseUrl, config.customAppToken)
+
+    // Auto-trigger initBeforeLoad bootstrap when the config asks for it.
+    // Matches web's xmppProvider.tsx (L216-332) — there `useEffect` fires on
+    // `config.initBeforeLoad` changes, runs the bootstrap, and caches it via
+    // `completedInitBeforeLoadKeyRef`. Our bootstrap is already key-cached
+    // inside `EthoraChatBootstrap`, so repeated calls are free.
+    LaunchedEffect(config.initBeforeLoad, config.jwtLogin?.token, config.xmppSettings) {
+        if (config.initBeforeLoad == true) {
+            EthoraChatBootstrap.initialize(context, config)
+        }
+    }
+
+    // Chat-area lifecycle: the moment the Chat composable leaves composition
+    // (user switched away from the CHAT tab / navigated away from the whole
+    // chat area), clear `_currentRoom`. Matches option Q13=c — nothing gets
+    // cleared on a simple RoomListView ↔ ChatRoomView back-navigation (those
+    // share this Chat composable), only when the user exits the chat area.
+    // That makes the "active room" shortcut in updateUnreadCount wake up and
+    // recompute unread for the freshly-backgrounded room.
+    DisposableEffect(Unit) {
+        onDispose {
+            com.ethora.chat.core.store.RoomStore.setCurrentRoom(null)
+            android.util.Log.d("EthoraChat", "Chat area left → setCurrentRoom(null)")
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (user == null && UserStore.currentUser.value == null) {
@@ -155,11 +189,32 @@ fun Chat(
     
     // Get current user from store
     val currentUser by UserStore.currentUser.collectAsState()
+    val requestedSingleRoomJid = roomJID ?: config.defaultRooms?.firstOrNull()?.jid
+    val normalizedSingleRoomJid = remember(requestedSingleRoomJid, config.xmppSettings?.conference) {
+        requestedSingleRoomJid?.let { normalizeRoomJid(it, config.xmppSettings?.conference) }
+    }
+
+    LaunchedEffect(normalizedSingleRoomJid, currentUser?.id) {
+        val singleRoomJid = normalizedSingleRoomJid ?: return@LaunchedEffect
+        val existing = RoomStore.getRoomByJid(singleRoomJid)
+        if (existing == null) {
+            val placeholder = buildPlaceholderRoom(
+                normalizedRoomJid = singleRoomJid,
+                originalRoomJid = requestedSingleRoomJid,
+                titleOverride = resolveRoomTitle(singleRoomJid, requestedSingleRoomJid, config)
+            )
+            RoomStore.upsertRoom(placeholder)
+            RoomStore.setCurrentRoom(placeholder)
+            LogStore.info("EthoraChat", "Single-room placeholder created room=$singleRoomJid", category = "single-room")
+        } else {
+            RoomStore.setCurrentRoom(existing)
+        }
+    }
     
     // Load rooms (cache-first, then refresh from API) similar to chat-app/AuthManager.loadRooms().
     // Important: do NOT skip API refresh just because cache is non-empty (stale rooms issue).
     var didFetchRoomsFromApi by remember(currentUser?.id) { mutableStateOf(false) }
-    LaunchedEffect(currentUser?.id) {
+    LaunchedEffect(currentUser?.id, normalizedSingleRoomJid) {
         if (currentUser == null) return@LaunchedEffect
         if (didFetchRoomsFromApi) return@LaunchedEffect
 
@@ -180,12 +235,25 @@ fun Chat(
             }
 
             // 2) Always refresh from API (chats/my)
+            LogStore.info("EthoraChat", "Rooms sync start (GET /chats/my)", category = "api")
             val rooms = withContext(Dispatchers.IO) {
                 RoomsAPIHelper.getRooms()
             }
             RoomStore.setRooms(rooms)
+            LogStore.success(
+                "EthoraChat",
+                "Rooms sync result count=${rooms.size}",
+                category = "api"
+            )
             android.util.Log.d("EthoraChat", "✅ Loaded ${rooms.size} rooms from API")
+            normalizedSingleRoomJid?.let { targetJid ->
+                findRoomByJid(RoomStore.rooms.value, targetJid)?.let { resolved ->
+                    RoomStore.setCurrentRoom(resolved)
+                    LogStore.success("EthoraChat", "Single-room hydrated from API room=$targetJid", category = "single-room")
+                } ?: LogStore.warning("EthoraChat", "Single-room still using placeholder after /chats/my room=$targetJid", category = "single-room")
+            }
         } catch (e: Exception) {
+            LogStore.error("EthoraChat", "Rooms sync failed: ${e.message}", category = "api")
             android.util.Log.e("EthoraChat", "❌ Failed to load rooms", e)
         } finally {
             RoomStore.setLoading(false)
@@ -195,10 +263,25 @@ fun Chat(
     ChatTheme(colors = config.colors) {
         var hadSuccessfulConnection by remember(currentUser?.id) { mutableStateOf(false) }
 
-        // Initialize XMPP client if user is available
-        // Key by essential XMPP credentials to avoid recreation on minor user updates
-        val xmppClient = remember(currentUser?.xmppUsername, currentUser?.xmppPassword, config.xmppSettings) {
-            currentUser?.let { user ->
+        // Initialize XMPP client if user is available.
+        // Reuse the instance from EthoraChatBootstrap if the host app already
+        // ran preload — otherwise we'd open a second socket for the same JID
+        // and the XMPP server typically kicks one, crashing/confusing the
+        // other. Bootstrap ALWAYS creates the client for the current user, so
+        // if both are non-null we can safely trust the match without a
+        // substring hack on XMPPClient.toString().
+        val bootstrappedClient by EthoraChatBootstrap.sharedXmppClient.collectAsState()
+        val xmppClient = remember(currentUser?.xmppUsername, currentUser?.xmppPassword, config.xmppSettings, bootstrappedClient) {
+            if (bootstrappedClient != null && currentUser?.xmppUsername != null) {
+                // CRITICAL: the bootstrapped client was built with an EMPTY
+                // delegate, so onComposingReceived / onMessageEdited / … all
+                // no-op. The typing indicator, edit/reaction callbacks etc.
+                // silently never reach the stores. Before returning this
+                // instance we MUST swap in the full delegate below (see the
+                // `LaunchedEffect(xmppClient)` that runs setDelegate). Here
+                // we just hand back the inherited client.
+                bootstrappedClient
+            } else currentUser?.let { user ->
                 user.xmppUsername?.let { username ->
                     user.xmppPassword?.let { password ->
                         android.util.Log.d("EthoraChat", "🏗️ Creating new XMPPClient for $username")
@@ -208,8 +291,14 @@ fun Chat(
                             settings = config.xmppSettings,
                             dnsFallbackOverrides = config.dnsFallbackOverrides
                         )
-                        
-                        // Set delegate to handle reconnection and sync
+
+                        // Set delegate — ONLY reports connection state to the
+                        // ConnectionStore/dispatcher. History loading is driven
+                        // from the `LaunchedEffect(xmppClient)` below, not from
+                        // this delegate: the delegate's onXMPPClientConnected
+                        // doesn't fire for clients inherited from
+                        // EthoraChatBootstrap that are already online, and we
+                        // can't afford to miss the initial load in that case.
                         client.setDelegate(object : XMPPClientDelegate {
                             override fun onXMPPClientConnected(client: XMPPClient) {
                                 hadSuccessfulConnection = true
@@ -220,28 +309,23 @@ fun Chat(
                                 )
                                 ConnectionStore.setState(ChatConnectionStatus.ONLINE)
                                 ChatEventDispatcher.emit(ChatEvent.ConnectionChanged(state))
-                                // Sync messages when reconnected (after offline)
-                                CoroutineScope(Dispatchers.IO).launch {
-                                    try {
-                                        delay(300)
-                                        if (!MessageLoader.isSynced()) {
-                                            val activeRoomJid = RoomStore.currentRoom.value?.jid
-                                            MessageLoader.loadInitialMessagesForAllRooms(
-                                                xmppClient = client,
-                                                activeRoomJid = activeRoomJid,
-                                                batchSize = 5,
-                                                messagesPerRoom = 30
-                                            )
-                                        } else {
-                                            // Incremental sync after reconnect
+                                // On genuine reconnects (not initial connect), fire a
+                                // delta catchup to grab whatever we missed while offline.
+                                // This path runs IN ADDITION to the LaunchedEffect-driven
+                                // initial preload — guarded by MessageLoader.isSynced so
+                                // the two don't double-fetch.
+                                if (MessageLoader.isSynced()) {
+                                    CoroutineScope(Dispatchers.IO).launch {
+                                        try {
+                                            delay(300)
                                             MessageLoader.syncMessagesSince(
                                                 xmppClient = client,
                                                 batchSize = 5,
                                                 messagesPerRoom = 10
                                             )
+                                        } catch (e: Exception) {
+                                            android.util.Log.e("EthoraChat", "reconnect delta sync failed", e)
                                         }
-                                    } catch (e: Exception) {
-                                        android.util.Log.e("EthoraChat", "Error syncing messages on reconnect", e)
                                     }
                                 }
                             }
@@ -310,7 +394,97 @@ fun Chat(
                 }
             }
         }
-        
+
+        // Delegate rewire — unconditional. When `xmppClient` came from
+        // EthoraChatBootstrap it was constructed with an empty delegate, so
+        // onComposingReceived / onMessageEdited / etc. are no-ops. Even when
+        // Chat constructed the client itself, re-applying is idempotent and
+        // covers the case where `currentUser` / `config` change across
+        // recompositions and we want the delegate closure to capture the
+        // current `hadSuccessfulConnection` reference.
+        LaunchedEffect(xmppClient) {
+            val target = xmppClient ?: return@LaunchedEffect
+            target.setDelegate(object : XMPPClientDelegate {
+                override fun onXMPPClientConnected(client: XMPPClient) {
+                    hadSuccessfulConnection = true
+                    val state = com.ethora.chat.core.store.ChatConnectionState(
+                        status = ChatConnectionStatus.ONLINE,
+                        reason = null,
+                        isRecovering = false
+                    )
+                    ConnectionStore.setState(ChatConnectionStatus.ONLINE)
+                    ChatEventDispatcher.emit(ChatEvent.ConnectionChanged(state))
+                    if (MessageLoader.isSynced()) {
+                        CoroutineScope(Dispatchers.IO).launch {
+                            try {
+                                delay(300)
+                                MessageLoader.syncMessagesSince(
+                                    xmppClient = client,
+                                    batchSize = 5,
+                                    messagesPerRoom = 10
+                                )
+                            } catch (e: Exception) {
+                                android.util.Log.e("EthoraChat", "reconnect delta sync failed", e)
+                            }
+                        }
+                    }
+                }
+
+                override fun onXMPPClientDisconnected(client: XMPPClient) {
+                    val state = com.ethora.chat.core.store.ChatConnectionState(
+                        status = ChatConnectionStatus.OFFLINE,
+                        reason = "Disconnected",
+                        isRecovering = hadSuccessfulConnection
+                    )
+                    ConnectionStore.setState(
+                        status = ChatConnectionStatus.OFFLINE,
+                        reason = "Disconnected",
+                        isRecovering = hadSuccessfulConnection
+                    )
+                    ChatEventDispatcher.emit(ChatEvent.ConnectionChanged(state))
+                }
+
+                override fun onStatusChanged(client: XMPPClient, status: ConnectionStatus) {
+                    val mapped = when (status) {
+                        ConnectionStatus.ONLINE -> ChatConnectionStatus.ONLINE
+                        ConnectionStatus.CONNECTING -> if (hadSuccessfulConnection) ChatConnectionStatus.DEGRADED else ChatConnectionStatus.CONNECTING
+                        ConnectionStatus.OFFLINE -> ChatConnectionStatus.OFFLINE
+                        ConnectionStatus.DISCONNECTING -> ChatConnectionStatus.DEGRADED
+                        ConnectionStatus.ERROR -> ChatConnectionStatus.ERROR
+                    }
+                    val isRecovering = mapped == ChatConnectionStatus.DEGRADED
+                    val state = com.ethora.chat.core.store.ChatConnectionState(
+                        status = mapped,
+                        reason = status.name,
+                        isRecovering = isRecovering
+                    )
+                    ConnectionStore.setState(
+                        status = mapped,
+                        reason = status.name,
+                        isRecovering = isRecovering
+                    )
+                    ChatEventDispatcher.emit(ChatEvent.ConnectionChanged(state))
+                }
+
+                override fun onMessageReceived(client: XMPPClient, message: com.ethora.chat.core.models.Message) {}
+                override fun onStanzaReceived(client: XMPPClient, stanza: com.ethora.chat.core.xmpp.XMPPStanza) {}
+                override fun onComposingReceived(
+                    client: XMPPClient, roomJid: String, isComposing: Boolean, composingList: List<String>
+                ) {
+                    com.ethora.chat.core.store.RoomStore.setComposing(roomJid, isComposing, composingList)
+                }
+                override fun onMessageEdited(client: XMPPClient, roomJid: String, messageId: String, newText: String) {
+                    com.ethora.chat.core.store.MessageStore.editMessage(roomJid, messageId, newText)
+                }
+                override fun onReactionReceived(
+                    client: XMPPClient, roomJid: String, messageId: String, from: String,
+                    reactions: List<String>, data: Map<String, String>
+                ) {}
+            })
+            LogoutService.setXMPPClient(target)
+            android.util.Log.d("EthoraChat", "✅ Delegate wired on XMPPClient")
+        }
+
         // Connect XMPP client
         LaunchedEffect(xmppClient) {
             if (xmppClient != null) {
@@ -355,6 +529,86 @@ fun Chat(
         
         // Subscribe to rooms so we recompose when they load (fix: LaunchedEffect was not re-running when rooms were set async)
         val rooms by RoomStore.rooms.collectAsState(initial = emptyList())
+
+        LaunchedEffect(xmppClient, normalizedSingleRoomJid, rooms.size) {
+            val client = xmppClient ?: return@LaunchedEffect
+            val singleRoomJid = normalizedSingleRoomJid ?: return@LaunchedEffect
+            try {
+                LogStore.info("EthoraChat", "Single-room bootstrap start room=$singleRoomJid", category = "single-room")
+                if (!client.ensureConnected(timeoutMs = 5_000)) {
+                    LogStore.warning("EthoraChat", "Single-room bootstrap skipped, XMPP not connected room=$singleRoomJid", category = "single-room")
+                    return@LaunchedEffect
+                }
+
+                val joined = client.ensureRoomPresence(
+                    roomJID = singleRoomJid,
+                    timeoutMs = 1_200,
+                    waitForJoin = true,
+                    source = "single_room_bootstrap"
+                )
+                if (!joined) {
+                    client.ensureRoomPresence(
+                        roomJID = singleRoomJid,
+                        timeoutMs = 900,
+                        waitForJoin = false,
+                        source = "single_room_bootstrap_background"
+                    )
+                }
+
+                val refreshedRooms = withContext(Dispatchers.IO) {
+                    runCatching { RoomsAPIHelper.getRooms() }.getOrNull()
+                }
+                if (!refreshedRooms.isNullOrEmpty()) {
+                    RoomStore.setRooms(refreshedRooms)
+                }
+
+                val resolvedRoom = findRoomByJid(RoomStore.rooms.value, singleRoomJid)
+                    ?: RoomStore.getRoomByJid(singleRoomJid)
+                resolvedRoom?.let { room ->
+                    RoomStore.setCurrentRoom(room)
+                    if ((com.ethora.chat.core.store.MessageStore.getMessagesForRoom(room.jid)).isEmpty()) {
+                        RoomStore.setRoomLoading(room.jid, true)
+                        LogStore.info(
+                            "EthoraChat",
+                            "Single-room history query start room=${room.jid} max=30",
+                            category = "history"
+                        )
+                        // Plan A6: bounded loader with hard-cap, mirrors web ACTIVE_ROOM_LOADER_HARD_CAP_MS=3000.
+                        val hardCap = launch {
+                            delay(3_000)
+                            RoomStore.setRoomLoading(room.jid, false)
+                            LogStore.warning(
+                                "EthoraChat",
+                                "Single-room history loader hard-cap fired room=${room.jid}",
+                                category = "history"
+                            )
+                        }
+                        try {
+                            val history = client.getHistory(room.jid, max = 30, beforeMessageId = null)
+                            if (history.isNotEmpty()) {
+                                com.ethora.chat.core.store.MessageStore.addMessages(room.jid, history)
+                                LogStore.success("EthoraChat", "Single-room history loaded room=${room.jid} count=${history.size}", category = "history")
+                            } else {
+                                LogStore.info("EthoraChat", "Single-room history empty room=${room.jid}", category = "history")
+                            }
+                        } catch (e: Exception) {
+                            LogStore.error(
+                                "EthoraChat",
+                                "Single-room history query error room=${room.jid} error=${e.message}",
+                                category = "history"
+                            )
+                            throw e
+                        } finally {
+                            hardCap.cancel()
+                            RoomStore.setRoomLoading(room.jid, false)
+                        }
+                    }
+                }
+                LogStore.success("EthoraChat", "Single-room bootstrap complete room=$singleRoomJid", category = "single-room")
+            } catch (e: Exception) {
+                LogStore.error("EthoraChat", "Single-room bootstrap failed room=$singleRoomJid error=${e.message}", category = "single-room")
+            }
+        }
         
         // Load initial messages once XMPP is fully connected (avoids "Cannot get history: not fully connected")
         LaunchedEffect(xmppClient, rooms.size) {
@@ -396,6 +650,7 @@ fun Chat(
                 messageLoaderQueue?.stop()
                 messagePriorityQueue?.stop()
                 xmppClient?.disconnect()
+                LogoutService.setXMPPClient(null)
                 ConnectionStore.setReconnectAction(null)
                 ConnectionStore.setState(
                     status = ChatConnectionStatus.OFFLINE,
@@ -405,20 +660,52 @@ fun Chat(
         }
         
         LaunchedEffect(xmppClient) {
-            val client = xmppClient
-            if (client != null && MessageLoader.isSynced()) {
-                // Only run incremental sync if initial sync is complete
-                // This handles offline recovery
-                try {
+            val client = xmppClient ?: return@LaunchedEffect
+
+            // Wait until the socket finishes auth + bind. Prior to this, the
+            // delegate's onXMPPClientConnected WOULD have been the trigger, but
+            // that handler never fires when Chat inherits an already-connected
+            // shared client from EthoraChatBootstrap — so we drive the load
+            // from here instead, which works for both "Chat created the client"
+            // and "Chat inherited a bootstrap client" cases.
+            if (!client.isFullyConnected()) {
+                client.ensureConnected(10_000)
+            }
+            if (!client.isFullyConnected()) {
+                android.util.Log.w("EthoraChat", "XMPP not online yet; post-connect tasks deferred")
+                return@LaunchedEffect
+            }
+
+            // 1. Private-store chatjson → per-room lastViewedTimestamp sync.
+            try {
+                com.ethora.chat.core.store.InitBeforeLoadFlow.run(client)
+            } catch (e: Exception) {
+                android.util.Log.e("EthoraChat", "initBeforeLoad flow error", e)
+            }
+
+            // 2. Initial history preload for every room, EXCEPT if bootstrap
+            //    already ran it (MessageLoader.isSynced()), in which case we
+            //    downgrade to the lightweight delta catchup — same policy web
+            //    follows with its historyPreloadScheduler vs updateMessagesTillLast.
+            try {
+                if (!MessageLoader.isSynced()) {
+                    android.util.Log.d("EthoraChat", "Running loadInitialMessagesForAllRooms")
+                    MessageLoader.loadInitialMessagesForAllRooms(
+                        xmppClient = client,
+                        activeRoomJid = RoomStore.currentRoom.value?.jid,
+                        batchSize = 5,
+                        messagesPerRoom = 30
+                    )
+                } else {
+                    android.util.Log.d("EthoraChat", "Already synced → delta catchup only")
                     IncrementalHistoryLoader.updateMessagesTillLast(
                         xmppClient = client,
-                        batchSize = 5,
-                        maxFetchAttempts = 4,
-                        messagesPerFetch = 5
+                        batchSize = 2,
+                        messagesPerFetch = 20
                     )
-                } catch (e: Exception) {
-                    android.util.Log.e("EthoraChat", "Error in incremental history sync", e)
                 }
+            } catch (e: Exception) {
+                android.util.Log.e("EthoraChat", "Error in history preload/catchup", e)
             }
         }
         
@@ -472,10 +759,9 @@ fun Chat(
 
         // Show room list or single room based on config
         if (config.disableRooms == true) {
-            val requestedSingleRoomJid = roomJID ?: config.defaultRooms?.firstOrNull()?.jid
-            val normalizedSingleRoomJid = remember(requestedSingleRoomJid, config.xmppSettings?.conference) {
-                requestedSingleRoomJid?.let { normalizeRoomJid(it, config.xmppSettings?.conference) }
-            }
+            val roomLoadingStates by RoomStore.roomLoadingStates.collectAsState(initial = emptyMap())
+            val roomsLoading by RoomStore.isLoading.collectAsState()
+            val connectionState by ConnectionStore.state.collectAsState()
 
             // If roomJID/defaultRooms not provided, pick the first room returned by /chats/my.
             // Also re-select if current selection disappears after a refresh.
@@ -494,7 +780,25 @@ fun Chat(
             }
 
             val roomToRender = targetRoom ?: run {
-                if (requestedSingleRoomJid == null) RoomStore.currentRoom.value else null
+                if (requestedSingleRoomJid == null) RoomStore.currentRoom.value else RoomStore.getRoomByJid(normalizedSingleRoomJid ?: "")
+            }
+
+            LaunchedEffect(roomToRender?.jid) {
+                if (roomToRender != null) {
+                    RoomStore.setCurrentRoom(roomToRender)
+                }
+            }
+
+            val roomPhase = when {
+                roomToRender != null && roomLoadingStates[roomToRender.jid] == true -> RoomConnectionPhase.LOADING_HISTORY
+                roomToRender != null -> RoomConnectionPhase.READY
+                requestedSingleRoomJid == null && roomsLoading -> RoomConnectionPhase.LOADING_ROOMS
+                normalizedSingleRoomJid != null && roomsLoading -> RoomConnectionPhase.LOADING_ROOMS
+                connectionState.status == ChatConnectionStatus.CONNECTING ||
+                    connectionState.status == ChatConnectionStatus.DEGRADED -> RoomConnectionPhase.CONNECTING_XMPP
+                normalizedSingleRoomJid != null && connectionState.status == ChatConnectionStatus.ERROR -> RoomConnectionPhase.FAILED
+                normalizedSingleRoomJid != null && rooms.isNotEmpty() && connectionState.status == ChatConnectionStatus.ONLINE && roomToRender == null -> RoomConnectionPhase.FAILED
+                else -> RoomConnectionPhase.RESOLVING_ROOM
             }
 
             if (roomToRender != null) {
@@ -507,10 +811,23 @@ fun Chat(
             } else {
                 Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     val hasRequestedRoom = normalizedSingleRoomJid != null
-                    val loading = RoomStore.isLoading.value
                     when {
                         !hasRequestedRoom -> Text("No room configured")
-                        loading -> Text("Loading room...")
+                        roomPhase != RoomConnectionPhase.FAILED -> {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                CircularProgressIndicator()
+                                Text(
+                                    text = when (roomPhase) {
+                                        RoomConnectionPhase.CONNECTING_XMPP -> "Connecting to room..."
+                                        RoomConnectionPhase.LOADING_HISTORY -> "Loading messages..."
+                                        else -> "Loading room..."
+                                    }
+                                )
+                            }
+                        }
                         else -> Text("Room unavailable or access denied")
                     }
                 }
@@ -539,18 +856,13 @@ fun Chat(
     }
 }
 
-private fun normalizeRoomJid(inputJid: String, conferenceDomain: String?): String {
-    if (inputJid.contains("@")) return inputJid
-    if (conferenceDomain.isNullOrBlank()) return inputJid
-    return "$inputJid@$conferenceDomain"
-}
-
-private fun toBareRoomName(jid: String): String = jid.substringBefore("@")
-
-private fun findRoomByJid(rooms: List<Room>, targetJid: String): Room? {
-    return rooms.firstOrNull { room ->
-        room.jid == targetJid || toBareRoomName(room.jid) == toBareRoomName(targetJid)
-    }
+private enum class RoomConnectionPhase {
+    RESOLVING_ROOM,
+    LOADING_ROOMS,
+    CONNECTING_XMPP,
+    LOADING_HISTORY,
+    READY,
+    FAILED
 }
 
 private fun resolveRoomTitle(

@@ -34,6 +34,7 @@ object LogoutService {
     
     // Logout callback (optional, set by external app)
     private var onLogoutCallback: (() -> Unit)? = null
+    private val xmppLock = Any()
     
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     
@@ -43,7 +44,21 @@ object LogoutService {
      * Internal use only - but needs to be public for Chat component
      */
     fun setXMPPClient(client: XMPPClient?) {
-        xmppClient = client
+        val previous = synchronized(xmppLock) {
+            val prev = xmppClient
+            xmppClient = client
+            prev
+        }
+        if (previous != null && previous !== client) {
+            scope.launch(Dispatchers.IO) {
+                runCatching {
+                    Log.d(TAG, "🔌 Closing previous XMPP client before switching reference")
+                    previous.disconnect()
+                }.onFailure { e ->
+                    Log.w(TAG, "⚠️ Failed to close previous XMPP client", e)
+                }
+            }
+        }
         Log.d(TAG, "✅ XMPP client reference set")
     }
     
@@ -76,7 +91,12 @@ object LogoutService {
             try {
                 // 1. Disconnect XMPP client
                 withContext(Dispatchers.IO) {
-                    xmppClient?.let { client ->
+                    val clientToDisconnect = synchronized(xmppLock) {
+                        val client = xmppClient
+                        xmppClient = null
+                        client
+                    }
+                    clientToDisconnect?.let { client ->
                         Log.d(TAG, "🔌 Disconnecting XMPP client...")
                         client.disconnect()
                         Log.d(TAG, "✅ XMPP client disconnected")
@@ -138,9 +158,6 @@ object LogoutService {
                 
                 // 5. Stop token refresh
                 TokenManager.stopAutoRefresh()
-                
-                // 6. Reset XMPP client reference
-                xmppClient = null
                 
                 Log.d(TAG, "✅ Logout completed successfully")
                 

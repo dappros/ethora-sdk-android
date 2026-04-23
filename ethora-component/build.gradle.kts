@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
@@ -28,13 +30,15 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
         isCoreLibraryDesugaringEnabled = true
     }
 
-    kotlinOptions {
-        jvmTarget = libs.versions.jvmTarget.get()
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.fromTarget(libs.versions.jvmTarget.get()))
+        }
     }
 
     buildFeatures {
@@ -119,6 +123,8 @@ dependencies {
     implementation(libs.hilt.navigation.compose)
 
     implementation(libs.coil.compose)
+    // Coil 3 network fetcher — required for remote http(s) image URLs.
+    implementation(libs.coil.network.okhttp)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
 
@@ -130,21 +136,30 @@ dependencies {
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)
     testImplementation(libs.mockito.core)
-    testImplementation(libs.mockito.kotlin)
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
 }
 
-afterEvaluate {
-    val cmdProps = gradle.startParameter.projectProperties
-    val resolvedGroup = cmdProps["group"] ?: "com.github.dappros"
-    val resolvedVersion = cmdProps["version"] ?: libs.versions.versionName.get()
-    println("[JitPack] Publishing ethora-sdk-android → $resolvedGroup:ethora-sdk-android:$resolvedVersion")
-    publishing {
-        publications {
-            create<MavenPublication>("release") {
-                from(components["release"])
-                groupId = resolvedGroup
-                artifactId = "ethora-sdk-android"
-                version = resolvedVersion
+// JitPack publishing is opt-in: run with -Ppublish=true (or set PUBLISH_SDK=true in env)
+// to configure the Maven publication. Regular builds (e.g. the sample app) skip this
+// entirely so there is no "[JitPack] Publishing ..." banner and no coupling to
+// JitPack metadata during day-to-day development.
+val shouldConfigurePublishing = (project.findProperty("publish")?.toString() == "true") ||
+    (System.getenv("PUBLISH_SDK") == "true")
+
+if (shouldConfigurePublishing) {
+    afterEvaluate {
+        val cmdProps = gradle.startParameter.projectProperties
+        val resolvedGroup = cmdProps["group"] ?: "com.github.dappros"
+        val resolvedVersion = cmdProps["version"] ?: libs.versions.versionName.get()
+        println("[JitPack] Publishing ethora-sdk-android → $resolvedGroup:ethora-sdk-android:$resolvedVersion")
+        publishing {
+            publications {
+                create<MavenPublication>("release") {
+                    from(components["release"])
+                    groupId = resolvedGroup
+                    artifactId = "ethora-sdk-android"
+                    version = resolvedVersion
+                }
             }
         }
     }

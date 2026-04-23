@@ -14,7 +14,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.Dispatchers
@@ -77,7 +77,15 @@ fun FilePreviewDialog(
                     var isLoading by remember { mutableStateOf(true) }
                     var hasError by remember { mutableStateOf(false) }
                     
-                    Column(modifier = Modifier.fillMaxSize()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            // Dialog uses decorFitsSystemWindows = false, so we pad
+                            // TopAppBar + content below the status bar and above the
+                            // navigation bar — otherwise the close/download buttons
+                            // and any bottom controls sit under the device UI.
+                            .windowInsetsPadding(WindowInsets.systemBars)
+                    ) {
                         // Header
                         TopAppBar(
                             title = { Text("Video preview") },
@@ -164,7 +172,15 @@ fun FilePreviewDialog(
                     }
                 }
                 mimeType.startsWith("audio/") || mimeType.contains("application/octet-stream") -> {
-                    Column(modifier = Modifier.fillMaxSize()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            // Dialog uses decorFitsSystemWindows = false, so we pad
+                            // TopAppBar + content below the status bar and above the
+                            // navigation bar — otherwise the close/download buttons
+                            // and any bottom controls sit under the device UI.
+                            .windowInsetsPadding(WindowInsets.systemBars)
+                    ) {
                         TopAppBar(
                             title = { Text("Audio preview") },
                             navigationIcon = {
@@ -212,7 +228,15 @@ fun FilePreviewDialog(
                     var isLoading by remember { mutableStateOf(true) }
                     var hasError by remember { mutableStateOf(false) }
                     
-                    Column(modifier = Modifier.fillMaxSize()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            // Dialog uses decorFitsSystemWindows = false, so we pad
+                            // TopAppBar + content below the status bar and above the
+                            // navigation bar — otherwise the close/download buttons
+                            // and any bottom controls sit under the device UI.
+                            .windowInsetsPadding(WindowInsets.systemBars)
+                    ) {
                         // Header
                         TopAppBar(
                             title = { Text("PDF preview") },
@@ -305,7 +329,15 @@ fun FilePreviewDialog(
                 }
                 else -> {
                     // Unsupported file type
-                    Column(modifier = Modifier.fillMaxSize()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            // Dialog uses decorFitsSystemWindows = false, so we pad
+                            // TopAppBar + content below the status bar and above the
+                            // navigation bar — otherwise the close/download buttons
+                            // and any bottom controls sit under the device UI.
+                            .windowInsetsPadding(WindowInsets.systemBars)
+                    ) {
                         // Header
                         TopAppBar(
                             title = { Text("File preview") },

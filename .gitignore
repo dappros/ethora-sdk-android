@@ -1,6 +1,11 @@
 /web
 /swift
 
+# sample-chat-app
+# /sample-chat-app
+
+claude.md
+
 # Built application files
 *.apk
 *.aar
@@ -36,6 +41,14 @@ proguard/
 
 # Log Files
 *.log
+latest-logs.txt
+*-logs.txt
+
+# Editor / OS cruft
+*.bak
+*.bak[0-9]
+*.bak\ [0-9]
+.DS_Store
 
 # Android Studio Navigation editor temp files
 .navigation/
@@ -98,6 +111,3 @@ lint-results*.xml
 
 .idea/
 .gradle-home/
-
-sample-chat-app
-/sample-chat-app
