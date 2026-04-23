@@ -211,11 +211,44 @@ class ChatRoomViewModel(
             android.util.Log.d("ChatRoomViewModel", "  User: ${currentUser.firstName} ${currentUser.lastName}, xmppUsername: ${currentUser.xmppUsername}")
             android.util.Log.d("ChatRoomViewModel", "  XMPP Client: ${xmppClient != null}, isFullyConnected: ${xmppClient?.isFullyConnected()}")
             
+            // Generate the message ID up-front so the optimistic message can
+            // be rendered before the XMPP round-trip. Matches the React SDK
+            // (hooks/useSendMessage.tsx), which dispatches addRoomMessage
+            // with pending=true BEFORE awaiting client.sendMessage(). The
+            // previous Android flow awaited sendMessage() first and only
+            // then rendered the bubble — making the UI feel ~500ms slower
+            // than the web client for every send.
+            val messageId = "send-text-message-${java.util.UUID.randomUUID()}"
+            val optimisticMessage = Message(
+                id = messageId,
+                body = finalText,
+                user = currentUser,
+                date = java.util.Date(),
+                roomJid = room.jid,
+                pending = true,
+                xmppId = messageId,
+                xmppFrom = "${room.jid}/${currentUser.id}",
+                isReply = finalParentMessageId != null,
+                mainMessage = finalParentMessageId
+            )
+            MessageStore.addMessage(room.jid, optimisticMessage)
+            schedulePendingFallback(messageId)
+            ChatEventDispatcher.emit(
+                ChatEvent.MessageSent(
+                    roomJid = room.jid,
+                    messageId = messageId,
+                    messageType = MessageType.TEXT,
+                    user = currentUser,
+                    text = finalText
+                )
+            )
+
             xmppClient?.let { client ->
                 if (!client.isFullyConnected()) {
                     android.util.Log.d("ChatRoomViewModel", "  XMPP not ready yet, waiting up to 15s for connection...")
                     if (!client.ensureConnected(15_000)) {
                         android.util.Log.e("ChatRoomViewModel", "Cannot send message: XMPP not connected after 15s")
+                        MessageStore.removeMessage(room.jid, messageId)
                         ChatEventDispatcher.emit(
                             ChatEvent.MessageFailed(
                                 roomJid = room.jid,
@@ -228,8 +261,8 @@ class ChatRoomViewModel(
                     }
                 }
             }
-            
-            val messageId = xmppClient?.sendMessage(
+
+            val sentId = xmppClient?.sendMessage(
                 roomJID = room.jid,
                 messageBody = finalText,
                 firstName = currentUser.firstName,
@@ -237,38 +270,13 @@ class ChatRoomViewModel(
                 photo = currentUser.profileImage,
                 walletAddress = currentUser.walletAddress,
                 isReply = finalParentMessageId != null,
-                mainMessage = finalParentMessageId
+                mainMessage = finalParentMessageId,
+                customId = messageId
             )
-            
-            if (messageId != null) {
-                // Create optimistic message with pending state
-                // Set both id and xmppId to messageId for proper matching when server echo arrives
-                val optimisticMessage = Message(
-                    id = messageId,
-                    body = finalText,
-                    user = currentUser,
-                    date = java.util.Date(),
-                    roomJid = room.jid,
-                    pending = true,
-                    xmppId = messageId, // Set xmppId for bidirectional matching
-                    xmppFrom = "${room.jid}/${currentUser.id}",
-                    isReply = finalParentMessageId != null,
-                    mainMessage = finalParentMessageId
-                )
-                MessageStore.addMessage(room.jid, optimisticMessage)
-                android.util.Log.d("ChatRoomViewModel", "Created optimistic message with pending=true, ID: $messageId, xmppId: $messageId")
-                schedulePendingFallback(messageId)
-                ChatEventDispatcher.emit(
-                    ChatEvent.MessageSent(
-                        roomJid = room.jid,
-                        messageId = messageId,
-                        messageType = MessageType.TEXT,
-                        user = currentUser,
-                        text = finalText
-                    )
-                )
-            } else {
+
+            if (sentId == null) {
                 android.util.Log.e("ChatRoomViewModel", "Failed to send message - sendMessage returned null")
+                MessageStore.removeMessage(room.jid, messageId)
                 ChatEventDispatcher.emit(
                     ChatEvent.MessageFailed(
                         roomJid = room.jid,

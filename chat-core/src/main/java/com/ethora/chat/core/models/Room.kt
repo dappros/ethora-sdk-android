@@ -1,5 +1,7 @@
 package com.ethora.chat.core.models
 
+import com.google.gson.annotations.SerializedName
+
 /**
  * Room member
  */
@@ -17,11 +19,19 @@ data class RoomMember(
 )
 
 /**
- * Room type
+ * Room type. Backend JSON uses lowercase ("public", "group", "private") —
+ * @SerializedName lets Gson deserialize those into the enum. Without this
+ * annotation, parsing ApiRoom silently leaves `type` null (Gson is
+ * case-sensitive on enum constant names) and rooms fail to render.
  */
 enum class RoomType {
+    @SerializedName("public")
     PUBLIC,
+
+    @SerializedName("group")
     GROUP,
+
+    @SerializedName("private")
     PRIVATE
 }
 
