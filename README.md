@@ -51,9 +51,11 @@ Important: the published artifact is `ethora-component`, but it packages code fr
 
 ## Requirements
 
-- Android `minSdk 24`
-- `compileSdk 34`
+- Android `minSdk 26`
+- `compileSdk 37`, `targetSdk 37`
 - Java/Kotlin target `17`
+- Kotlin `2.3.0`, AGP `8.7.0`, Gradle `9.4.1`
+- Host must apply `id("org.jetbrains.kotlin.plugin.compose")` (required since Kotlin 2.0 — `composeOptions.kotlinCompilerExtensionVersion` is no longer used)
 - Jetpack Compose app (or host screen using Compose)
 - Network permissions in host manifest
 
@@ -288,6 +290,7 @@ reconnectChat()
 - `disableProfilesInteractions`
 - `eventHandlers`, `onChatEvent`, `onBeforeSend`
 - `customComponents`
+- `initBeforeLoad` — when `true`, the SDK runs the web-parity bootstrap (user fetch → rooms fetch → XMPP connect → private-store sync → per-room history preload) so `useUnread()` reports real counts before the `Chat` composable mounts. Drive it via `EthoraChatProvider` (wrap your app root) or `EthoraChatBootstrap.initializeAsync(context, config)` from `Application.onCreate`.
 
 ### Fields present but not guaranteed as active behavior
 
@@ -299,7 +302,7 @@ These exist in model/API for parity, but Android behavior may be partial or no-o
 - `customRooms`, `roomListStyles`, `chatRoomStyles`
 - `headerLogo`, `headerMenu`, `headerChatMenu`
 - `refreshTokens`, `translates`
-- `disableUserCount`, `clearStoreBeforeInit`, `disableSentLogic`, `initBeforeLoad`, `newArch`, `qrUrl`
+- `disableUserCount`, `clearStoreBeforeInit`, `disableSentLogic`, `newArch`, `qrUrl`
 - `secondarySendButton`, `enableRoomsRetry`, `chatHeaderAdditional`
 - `botMessageAutoScroll`, `messageTextFilter`, `whitelistSystemMessage`, `customSystemMessage`
 - `disableTypingIndicator`, `customTypingIndicator`

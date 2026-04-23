@@ -4,6 +4,20 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.04.23]
+
+- **New:** `initBeforeLoad` config flag now wired — when set, SDK runs full web-parity bootstrap (user → rooms → XMPP → private-store sync → per-room history preload) before `Chat` mounts, so `useUnread()` reflects real server counts on first render
+- **New:** `EthoraChatBootstrap.initialize(context, config)` / `.initializeAsync(...)` — imperative bootstrap entry point for calling from `Application.onCreate` ([`779abbd`](https://github.com/dappros/ethora-sdk-android/commit/779abbd))
+- **New:** `EthoraChatProvider` composable — wrap your app root to run bootstrap automatically and share the XMPP socket with the downstream `Chat` composable
+- **Improved:** `XMPPClient` / `XMPPWebSocketConnection` / `IncrementalHistoryLoader` / `MessageStore` / `RoomStore` reliability rewrite; extracted `TimestampUtils` and `SingleRoomSupport`
+- **Improved:** Coil upgraded to 3.4 — package rename `io.coil-kt` → `io.coil-kt.coil3`; added `coil-network-okhttp` artifact (required for remote http(s) image URLs)
+- **Improved:** JitPack publishing is now opt-in via `-Ppublish=true` (or `PUBLISH_SDK=true` env) so day-to-day sample-app builds skip the publication banner
+- **Build:** Gradle 9.4.1, Kotlin 2.3.0, AGP 8.7.0 ([`c60f19f`](https://github.com/dappros/ethora-sdk-android/commit/c60f19f))
+- **Build:** `minSdk` raised to `26`, `compileSdk` / `targetSdk` to `37`
+- **Build:** Compose Compiler now configured via the `kotlin-compose` plugin (Kotlin 2.0+ no longer uses `composeOptions.kotlinCompilerExtensionVersion`)
+- **Sample:** `sample-chat-app/` re-included in the repo via `settings.gradle.kts` `projectDir` redirect — run `./gradlew :sample-chat-app:installDebug` from the SDK root
+- **Host migration required:** host app must use Kotlin ≥ 2.3.0, AGP ≥ 8.7.0, Gradle 9.4.1, apply `id("org.jetbrains.kotlin.plugin.compose")`, raise `minSdk` to 26 and `compileSdk` / `targetSdk` to 37 — see README "Requirements"
+
 ## [26.04.21]
 
 Major feature release:
