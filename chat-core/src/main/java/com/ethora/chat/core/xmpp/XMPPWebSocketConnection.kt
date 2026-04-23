@@ -1063,10 +1063,17 @@ class XMPPWebSocketConnection(
         val escapedRoomJid = escapeXml(fixedRoomJid)
         val escapedMainMessage = mainMessage?.let { escapeXml(it) } ?: ""
         
-        // Build data element (matches web version exactly)
-        // Web version uses devServer URL as xmlns (unusual but that's what they do)
-        // xmlns uses devServer URL (from config)
-        val dataElement = """<data xmlns="$wsUrl" senderFirstName="$escapedFirstName" senderLastName="$escapedLastName" fullName="$escapedFullName" photoURL="$escapedPhotoURL" senderJID="$escapedSenderJID" senderWalletAddress="$escapedWalletAddress" roomJid="$escapedRoomJid" isSystemMessage="false" tokenAmount="0" quickReplies="" notDisplayedValue="" showInChannel="${showInChannel}" isReply="${isReply}" mainMessage="$escapedMainMessage" push="true"/>"""
+        // Build data element. Previously emitted `xmlns="$wsUrl"` to match
+        // the web client, but that used the transport WebSocket URL as
+        // an XML namespace — wrong by XMPP convention (a `<data>` child
+        // of <message> should either have no xmlns or a real schema URI).
+        // The receiving side (this same SDK plus web/iOS parsers) only
+        // extracts attributes via string-matching and never validates the
+        // xmlns, and sibling code paths (typing indicators, media
+        // messages, read receipts) already send <data> without any xmlns.
+        // Dropping the attribute here aligns with those paths and removes
+        // a noisy inconsistency without changing any observable behaviour.
+        val dataElement = """<data senderFirstName="$escapedFirstName" senderLastName="$escapedLastName" fullName="$escapedFullName" photoURL="$escapedPhotoURL" senderJID="$escapedSenderJID" senderWalletAddress="$escapedWalletAddress" roomJid="$escapedRoomJid" isSystemMessage="false" tokenAmount="0" quickReplies="" notDisplayedValue="" showInChannel="${showInChannel}" isReply="${isReply}" mainMessage="$escapedMainMessage" push="true"/>"""
         
         val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$dataElement<body>$escapedBody</body></message>"""
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMessage() to $fixedRoomJid")
