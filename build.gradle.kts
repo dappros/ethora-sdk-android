@@ -13,7 +13,14 @@ buildscript {
 }
 
 plugins {
-    id("maven-publish")
+    // `maven-publish` no longer applied at the root. The former root
+    // publication (see the removed block below) collided with
+    // :ethora-component's own publication on the same coordinate
+    // `com.github.dappros:ethora-sdk-android:<version>`, and JitPack
+    // shipped whichever of the two the build processed last — so the
+    // real AAR from :ethora-component was getting silently overwritten
+    // by a pom-only proxy that just listed ethora-component as a
+    // dependency.
     id("com.android.application") version "8.5.2" apply false
     id("com.android.library") version "8.5.2" apply false
     id("org.jetbrains.kotlin.android") version "1.9.22" apply false
@@ -40,27 +47,11 @@ subprojects {
     layout.buildDirectory.set(file("/tmp/android_build/${rootProject.name}/${project.name}"))
 }
 
- publishing {
-    publications {
-        create<MavenPublication>("root") {
-            val resolvedGroupId = project.group.toString()
-            val resolvedVersion = project.version.toString()
-
-            groupId = resolvedGroupId
-            artifactId = "ethora-sdk-android"
-            version = resolvedVersion
-            pom.packaging = "pom"
-            pom.withXml {
-                val dependenciesNode = asNode().appendNode("dependencies")
-                val dependencyNode = dependenciesNode.appendNode("dependency")
-                dependencyNode.appendNode("groupId", resolvedGroupId)
-                dependencyNode.appendNode("artifactId", "ethora-component")
-                dependencyNode.appendNode("version", resolvedVersion)
-            }
-        }
-    }
-}
-
-tasks.named("publishToMavenLocal") {
-    dependsOn(":ethora-component:publishReleasePublicationToMavenLocal")
-}
+// (Root publishing {} block intentionally removed — see plugins{} comment.)
+//
+// Existing consumers of `com.github.dappros:ethora-sdk-android:<version>`
+// continue to work: :ethora-component's publication keeps that exact
+// artifactId and now ships the real AAR directly rather than a pom-only
+// proxy. Contents are identical — chat-core + chat-ui sources are
+// merged into ethora-component via its sourceSets, so a transitive
+// dependency on "ethora-component" was never actually needed.
