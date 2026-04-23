@@ -38,10 +38,13 @@ object LogStore {
             type = type
         )
         
-        // Keep last 500 logs
+        // Keep last 2000 logs — older cap of 500 caused the earliest (and
+        // most useful for connect-time diagnosis) entries to get evicted
+        // within a few minutes of normal chat activity (typing indicators
+        // alone emit ~10 stanzas/sec).
         val currentLogs = _logs.value.toMutableList()
         currentLogs.add(0, entry) // Add to top
-        if (currentLogs.size > 500) {
+        if (currentLogs.size > 2000) {
             currentLogs.removeAt(currentLogs.size - 1)
         }
         _logs.value = currentLogs

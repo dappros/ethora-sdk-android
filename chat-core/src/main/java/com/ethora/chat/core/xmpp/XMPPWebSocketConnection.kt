@@ -279,15 +279,58 @@ class XMPPWebSocketConnection(
                     }
                 }
                 AuthState.BINDING -> {
-                    // Check for bind result
-                    if (xml.contains("type=\"result\"") || xml.contains("type='result'")) {
-                        if (xml.contains("bind") || xml.contains("urn:ietf:params:xml:ns:xmpp-bind")) {
+                    // Detect bind-result with broader matching than the
+                    // previous (type=\"result\" AND (bind OR ns)) gate, which
+                    // was silently missing the real-server response shape —
+                    // ConnectionStore stayed at CONNECTING forever even though
+                    // the socket was actually authenticated and sending
+                    // MUC stanzas. A bind-result always carries a <jid>
+                    // element inside a <bind> — anchor on that.
+                    val hasJidElement = xml.contains("<jid>") || xml.contains("<jid ")
+                    val isResultIq = xml.contains("type=\"result\"") || xml.contains("type='result'")
+                    val mentionsBind = xml.contains("bind") || xml.contains("urn:ietf:params:xml:ns:xmpp-bind")
+                    val isBindResult = (isResultIq && mentionsBind) || (hasJidElement && mentionsBind)
+                    val isBindError = xml.contains("<error") && mentionsBind
+
+                    com.ethora.chat.core.store.LogStore.info(
+                        TAG,
+                        "🔎 BIND state — resultIq=$isResultIq hasJid=$hasJidElement " +
+                            "mentionsBind=$mentionsBind isBindResult=$isBindResult " +
+                            "isBindError=$isBindError xml=${xml.take(400)}"
+                    )
+
+                    when {
+                        isBindResult -> {
                             Log.d(TAG, "✅ Resource bind successful!")
+                            com.ethora.chat.core.store.LogStore.success(
+                                TAG,
+                                "✅ Resource bind successful — transitioning to AUTHENTICATED"
+                            )
                             authState = AuthState.AUTHENTICATED
                             isAuthenticated = true
                             clientWrapper?.let { client ->
                                 delegate?.onXMPPClientConnected(client)
                             }
+                        }
+                        isBindError -> {
+                            Log.e(TAG, "❌ Resource bind error: $xml")
+                            com.ethora.chat.core.store.LogStore.error(
+                                TAG,
+                                "❌ Resource bind error: ${xml.take(500)}"
+                            )
+                            authState = AuthState.NOT_STARTED
+                            clientWrapper?.let { client ->
+                                delegate?.onStatusChanged(client, ConnectionStatus.ERROR)
+                            }
+                        }
+                        else -> {
+                            // Probably an unrelated push (presence, etc.) arriving
+                            // before bind-result. Keep state, wait for the real reply.
+                            com.ethora.chat.core.store.LogStore.info(
+                                TAG,
+                                "… BIND state: non-bind stanza received, still waiting. " +
+                                    "xml=${xml.take(200)}"
+                            )
                         }
                     }
                 }
