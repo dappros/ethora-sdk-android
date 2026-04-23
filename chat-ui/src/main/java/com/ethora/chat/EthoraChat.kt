@@ -195,14 +195,27 @@ fun Chat(
     ChatTheme(colors = config.colors) {
         var hadSuccessfulConnection by remember(currentUser?.id) { mutableStateOf(false) }
 
-        // Initialize XMPP client if user is available
-        // Key by essential XMPP credentials to avoid recreation on minor user updates
-        val xmppClient = remember(currentUser?.xmppUsername, currentUser?.xmppPassword, config.xmppSettings) {
+        // Initialize XMPP client if user is available.
+        //
+        // Key by username + password only. Previously `config.xmppSettings`
+        // was also in the key, which relied on data-class equality to
+        // dedupe across recompositions — fine in principle, but
+        // defensively narrowing here avoids any future churn from
+        // structurally-different-but-equal settings objects.
+        //
+        // More importantly, the actual allocation is delegated to
+        // [XMPPClientRegistry] (a process-wide cache). If the host app
+        // disposes the Chat subtree and re-enters it (common with
+        // BottomNav `when (selectedTab) { ... }` dispatch), the registry
+        // returns the same cached XMPPClient instance rather than
+        // spawning a fresh one that would race against the old socket
+        // and get kicked by ejabberd with stream:error not-authorized.
+        val xmppClient = remember(currentUser?.xmppUsername, currentUser?.xmppPassword) {
             currentUser?.let { user ->
                 user.xmppUsername?.let { username ->
                     user.xmppPassword?.let { password ->
-                        android.util.Log.d("EthoraChat", "🏗️ Creating new XMPPClient for $username")
-                        val client = XMPPClient(
+                        android.util.Log.d("EthoraChat", "🏗️ Requesting XMPPClient from registry for $username")
+                        val client = com.ethora.chat.internal.XMPPClientRegistry.getOrCreate(
                             username = username,
                             password = password,
                             settings = config.xmppSettings,
