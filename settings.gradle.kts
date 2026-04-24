@@ -19,6 +19,7 @@ rootProject.name = "ethora-chat-android"
 
 include(":ethora-component")
 
+<<<<<<< tf-reconcile-v1.0.22
 // Note: `:sample-chat-app` was previously included here as a nested
 // module, but the sample was extracted to its own repository
 // (dappros/ethora-sample-android) on 2026-04-21 and the
@@ -28,3 +29,9 @@ include(":ethora-component")
 // (com.github.dappros:ethora-sdk-android) or via a composite build
 // (`includeBuild` pointing at this repo from the sample's
 // settings.gradle.kts).
+=======
+// The sample app is NOT included in this settings file — this build is the
+// SDK only (chat-core + chat-ui source sets collected under :ethora-component).
+// The sample has its own self-contained Gradle build under `sample-chat-app/`
+// with its own `settings.gradle.kts` and wrapper; build it from there.
+>>>>>>> main

@@ -6,6 +6,7 @@
 
 claude.md
 
+<<<<<<< tf-reconcile-v1.0.22
 # macOS Finder metadata
 .DS_Store
 **/.DS_Store
@@ -14,6 +15,8 @@ claude.md
 latest-logs.txt
 *.logs.txt
 
+=======
+>>>>>>> main
 # Built application files
 *.apk
 *.aar
@@ -49,6 +52,14 @@ proguard/
 
 # Log Files
 *.log
+latest-logs.txt
+*-logs.txt
+
+# Editor / OS cruft
+*.bak
+*.bak[0-9]
+*.bak\ [0-9]
+.DS_Store
 
 # Android Studio Navigation editor temp files
 .navigation/
