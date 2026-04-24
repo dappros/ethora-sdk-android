@@ -275,25 +275,29 @@ class ChatRoomViewModel(
             android.util.Log.d("ChatRoomViewModel", "  User: ${currentUser.firstName} ${currentUser.lastName}, xmppUsername: ${currentUser.xmppUsername}")
             android.util.Log.d("ChatRoomViewModel", "  XMPP Client: ${xmppClient != null}, isFullyConnected: ${xmppClient?.isFullyConnected()}")
             
-            xmppClient?.let { client ->
-                if (!client.isFullyConnected()) {
-                    android.util.Log.d("ChatRoomViewModel", "  XMPP not ready yet, waiting up to 15s for connection...")
-                    if (!client.ensureConnected(15_000)) {
-                        android.util.Log.e("ChatRoomViewModel", "Cannot send message: XMPP not connected after 15s")
-                        ChatEventDispatcher.emit(
-                            ChatEvent.MessageFailed(
-                                roomJid = room.jid,
-                                messageType = MessageType.TEXT,
-                                text = finalText,
-                                error = IllegalStateException("XMPP not connected")
-                            )
-                        )
-                        return@launch
-                    }
-                }
-            }
-            
-            val messageId = xmppClient?.sendMessage(
+            // Create the optimistic row before the network send. Waiting for
+            // sendMessage() here can block on room presence/socket state and
+            // makes the input feel laggy even though the tap handler fired.
+            val messageId = "send-text-message:${UUID.randomUUID()}"
+            val lastKnownTs = MessageStore.lastKnownTimestamp(room.jid)
+            val optimisticTs = maxOf(System.currentTimeMillis(), lastKnownTs + 1)
+            val optimisticMessage = Message(
+                id = messageId,
+                body = finalText,
+                user = currentUser,
+                date = java.util.Date(optimisticTs),
+                timestamp = optimisticTs,
+                roomJid = room.jid,
+                pending = true,
+                xmppId = messageId,
+                xmppFrom = "${room.jid}/${currentUser.id}",
+                isReply = finalParentMessageId != null,
+                mainMessage = finalParentMessageId
+            )
+            MessageStore.addMessage(room.jid, optimisticMessage)
+            android.util.Log.d("ChatRoomViewModel", "Created optimistic message before send, ID: $messageId")
+
+            val sentMessageId = xmppClient?.sendMessage(
                 roomJID = room.jid,
                 messageBody = finalText,
                 firstName = currentUser.firstName,
@@ -301,35 +305,11 @@ class ChatRoomViewModel(
                 photo = currentUser.profileImage,
                 walletAddress = currentUser.walletAddress,
                 isReply = finalParentMessageId != null,
-                mainMessage = finalParentMessageId
+                mainMessage = finalParentMessageId,
+                customId = messageId
             )
-            
-            if (messageId != null) {
-                // Force the optimistic message's timestamp strictly AFTER the
-                // most recent known message. Without this, server messages
-                // whose archive stanza-id resolves to a ts slightly ahead of
-                // our wall clock (clock drift / µs-precision) land AFTER the
-                // optimistic in the sort → user sees their freshly-sent
-                // message appearing in the MIDDLE of the list. Matches web's
-                // useSendMessage, which sets messageTimestampMs = Date.now()
-                // and benefits from the same server clock behaviour.
-                val lastKnownTs = MessageStore.lastKnownTimestamp(room.jid)
-                val optimisticTs = maxOf(System.currentTimeMillis(), lastKnownTs + 1)
-                val optimisticMessage = Message(
-                    id = messageId,
-                    body = finalText,
-                    user = currentUser,
-                    date = java.util.Date(optimisticTs),
-                    timestamp = optimisticTs,
-                    roomJid = room.jid,
-                    pending = true,
-                    xmppId = messageId, // Set xmppId for bidirectional matching
-                    xmppFrom = "${room.jid}/${currentUser.id}",
-                    isReply = finalParentMessageId != null,
-                    mainMessage = finalParentMessageId
-                )
-                MessageStore.addMessage(room.jid, optimisticMessage)
-                android.util.Log.d("ChatRoomViewModel", "Created optimistic message with pending=true, ID: $messageId, xmppId: $messageId")
+
+            if (sentMessageId != null) {
                 // Web parity (useSendMessage.tsx L316-317): fast-ack immediately,
                 // then start the 5-second catchup poll.
                 launch { triggerFastAckFetch() }

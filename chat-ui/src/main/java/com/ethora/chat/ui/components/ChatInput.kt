@@ -384,11 +384,12 @@ fun ChatInput(
                             sendStop()
                             if (selectedFile != null && onSendMedia != null && editText == null) {
                                 val (file, mimeType) = selectedFile!!
-                                onSendMedia(file, mimeType)
                                 selectedFile = null
+                                onSendMedia(file, mimeType)
                             } else if (text.isNotBlank()) {
-                                onSendMessage(text.trim(), replyingToMessage?.id)
+                                val textToSend = text.trim()
                                 text = ""
+                                onSendMessage(textToSend, replyingToMessage?.id)
                             }
                         },
                         modifier = Modifier
