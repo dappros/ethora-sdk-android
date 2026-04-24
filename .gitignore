@@ -1,12 +1,11 @@
 /web
 /swift
 
-# sample-chat-app
-# /sample-chat-app
+sample-chat-app
+/sample-chat-app
 
 claude.md
 
-<<<<<<< tf-reconcile-v1.0.22
 # macOS Finder metadata
 .DS_Store
 **/.DS_Store
@@ -15,8 +14,6 @@ claude.md
 latest-logs.txt
 *.logs.txt
 
-=======
->>>>>>> main
 # Built application files
 *.apk
 *.aar
