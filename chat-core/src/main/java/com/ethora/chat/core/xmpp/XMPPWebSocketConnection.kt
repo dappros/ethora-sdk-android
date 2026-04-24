@@ -354,15 +354,59 @@ class XMPPWebSocketConnection(
                     }
                 }
                 AuthState.BINDING -> {
-                    // Check for bind result
-                    if (xml.contains("type=\"result\"") || xml.contains("type='result'")) {
-                        if (xml.contains("bind") || xml.contains("urn:ietf:params:xml:ns:xmpp-bind")) {
+                    // Detect bind-result with broader matching than the
+                    // previous (type="result" AND (bind OR ns)) gate,
+                    // which silently missed some real-server response
+                    // shapes and left ConnectionStore stuck at CONNECTING
+                    // even though the socket was authenticated enough
+                    // to transmit MUC stanzas. A bind-result always
+                    // carries a <jid> element inside a <bind>, so that's
+                    // a stronger anchor than the type attribute.
+                    val hasJidElement = xml.contains("<jid>") || xml.contains("<jid ")
+                    val isResultIq = xml.contains("type=\"result\"") || xml.contains("type='result'")
+                    val mentionsBind = xml.contains("bind") || xml.contains("urn:ietf:params:xml:ns:xmpp-bind")
+                    val isBindResult = (isResultIq && mentionsBind) || (hasJidElement && mentionsBind)
+                    val isBindError = xml.contains("<error") && mentionsBind
+
+                    com.ethora.chat.core.store.LogStore.info(
+                        TAG,
+                        "🔎 BIND state — resultIq=$isResultIq hasJid=$hasJidElement " +
+                            "mentionsBind=$mentionsBind isBindResult=$isBindResult " +
+                            "isBindError=$isBindError xml=${xml.take(400)}"
+                    )
+
+                    when {
+                        isBindResult -> {
                             Log.d(TAG, "✅ Resource bind successful!")
+                            com.ethora.chat.core.store.LogStore.success(
+                                TAG,
+                                "✅ Resource bind successful — transitioning to AUTHENTICATED"
+                            )
                             authState = AuthState.AUTHENTICATED
                             isAuthenticated = true
                             clientWrapper?.let { client ->
                                 delegate?.onXMPPClientConnected(client)
                             }
+                        }
+                        isBindError -> {
+                            Log.e(TAG, "❌ Resource bind error: $xml")
+                            com.ethora.chat.core.store.LogStore.error(
+                                TAG,
+                                "❌ Resource bind error: ${xml.take(500)}"
+                            )
+                            authState = AuthState.NOT_STARTED
+                            clientWrapper?.let { client ->
+                                delegate?.onStatusChanged(client, ConnectionStatus.ERROR)
+                            }
+                        }
+                        else -> {
+                            // Probably an unrelated push (presence, etc.) arriving
+                            // before bind-result. Keep state, wait for the real reply.
+                            com.ethora.chat.core.store.LogStore.info(
+                                TAG,
+                                "… BIND state: non-bind stanza received, still waiting. " +
+                                    "xml=${xml.take(200)}"
+                            )
                         }
                     }
                 }
@@ -1137,10 +1181,13 @@ class XMPPWebSocketConnection(
         val escapedRoomJid = escapeXml(fixedRoomJid)
         val escapedMainMessage = mainMessage?.let { escapeXml(it) } ?: ""
         
-        // Build data element (matches web version exactly)
-        // Web version uses devServer URL as xmlns (unusual but that's what they do)
-        // xmlns uses devServer URL (from config)
-        val dataElement = """<data xmlns="$wsUrl" senderFirstName="$escapedFirstName" senderLastName="$escapedLastName" fullName="$escapedFullName" photoURL="$escapedPhotoURL" senderJID="$escapedSenderJID" senderWalletAddress="$escapedWalletAddress" roomJid="$escapedRoomJid" isSystemMessage="false" tokenAmount="0" quickReplies="" notDisplayedValue="" showInChannel="${showInChannel}" isReply="${isReply}" mainMessage="$escapedMainMessage" push="true"/>"""
+        // Build data element. The React SDK emits <data> with NO xmlns
+        // attribute; a prior iteration of this file accidentally wrote
+        // `xmlns="$wsUrl"`, which put the element into the WebSocket
+        // URL namespace — valid XML but semantically wrong, and some
+        // XMPP extensions ignore elements under unexpected namespaces.
+        // Matches sdk-reactjs/.../xmppClient.ts: sendTextMessageStanza.
+        val dataElement = """<data senderFirstName="$escapedFirstName" senderLastName="$escapedLastName" fullName="$escapedFullName" photoURL="$escapedPhotoURL" senderJID="$escapedSenderJID" senderWalletAddress="$escapedWalletAddress" roomJid="$escapedRoomJid" isSystemMessage="false" tokenAmount="0" quickReplies="" notDisplayedValue="" showInChannel="${showInChannel}" isReply="${isReply}" mainMessage="$escapedMainMessage" push="true"/>"""
         
         val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$dataElement<body>$escapedBody</body></message>"""
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMessage() to $fixedRoomJid")
