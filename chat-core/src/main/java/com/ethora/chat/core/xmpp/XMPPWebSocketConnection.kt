@@ -190,35 +190,63 @@ class XMPPWebSocketConnection(
             webSocket = client.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     Log.d(TAG, "✅ WebSocket opened")
+                    com.ethora.chat.core.store.LogStore.success(
+                        TAG,
+                        "✅ WebSocket opened to $wsUrl",
+                        category = "xmpp-transport"
+                    )
                     isConnected = true
                     scope.launch {
                         sendStreamOpen()
                     }
                 }
-                
+
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     Log.d(TAG, "📨 Received WebSocket message: ${text.take(200)}")
+                    com.ethora.chat.core.store.LogStore.receive(
+                        TAG,
+                        "⬅️ frame (${text.length} chars): ${text.take(400)}",
+                        category = "xmpp-frame",
+                        rawMessage = text
+                    )
                     scope.launch {
                         handleIncomingStanza(text)
                     }
                 }
-                
+
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                     Log.d(TAG, "📨 Received WebSocket binary message")
+                    val text = bytes.utf8()
+                    com.ethora.chat.core.store.LogStore.receive(
+                        TAG,
+                        "⬅️ binary frame (${bytes.size} bytes): ${text.take(400)}",
+                        category = "xmpp-frame",
+                        rawMessage = text
+                    )
                     scope.launch {
-                        handleIncomingStanza(bytes.utf8())
+                        handleIncomingStanza(text)
                     }
                 }
-                
+
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                     Log.d(TAG, "🔌 WebSocket closing: $code - $reason")
+                    com.ethora.chat.core.store.LogStore.warning(
+                        TAG,
+                        "🔌 WebSocket closing: code=$code reason=$reason",
+                        category = "xmpp-transport"
+                    )
                     isConnected = false
                     isAuthenticated = false
                     authState = AuthState.NOT_STARTED
                 }
-                
+
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     Log.d(TAG, "🔌 WebSocket closed: $code - $reason")
+                    com.ethora.chat.core.store.LogStore.warning(
+                        TAG,
+                        "🔌 WebSocket closed: code=$code reason=$reason disconnectRequested=$disconnectRequested",
+                        category = "xmpp-transport"
+                    )
                     this@XMPPWebSocketConnection.webSocket = null
                     isConnected = false
                     isAuthenticated = false
@@ -229,9 +257,15 @@ class XMPPWebSocketConnection(
                         }
                     }
                 }
-                
+
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.e(TAG, "❌ WebSocket failure", t)
+                    com.ethora.chat.core.store.LogStore.error(
+                        TAG,
+                        "❌ WebSocket failure: ${t.javaClass.simpleName}: ${t.message} " +
+                            "(httpCode=${response?.code}, httpMessage=${response?.message})",
+                        category = "xmpp-transport"
+                    )
                     this@XMPPWebSocketConnection.webSocket = null
                     isConnected = false
                     isAuthenticated = false
