@@ -31,11 +31,15 @@ object LogoutService {
     
     // XMPP client reference (set by chat component)
     private var xmppClient: XMPPClient? = null
-    
+
     // Logout callback (optional, set by external app)
     private var onLogoutCallback: (() -> Unit)? = null
+
+    // SDK-internal cleanup hook (set by EthoraChatBootstrap). Not for host apps.
+    @Volatile
+    private var internalShutdownHook: (suspend () -> Unit)? = null
     private val xmppLock = Any()
-    
+
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     
     /**
@@ -65,12 +69,17 @@ object LogoutService {
     /**
      * Set logout callback
      * External apps can set this to be notified when logout completes
-     * 
+     *
      * @param callback Function to call when logout is complete
      */
     fun setOnLogoutCallback(callback: (() -> Unit)?) {
         onLogoutCallback = callback
         Log.d(TAG, "✅ Logout callback set")
+    }
+
+    /** SDK-internal. Host apps should use [setOnLogoutCallback] instead. */
+    fun setInternalShutdownHook(hook: (suspend () -> Unit)?) {
+        internalShutdownHook = hook
     }
     
     /**
@@ -116,6 +125,9 @@ object LogoutService {
                     
                     // Clear message store
                     MessageStore.clear()
+
+                    // Clear unsent media queue separately from cached messages.
+                    PendingMediaSendQueue.clear(deleteLocalFiles = true)
                     
                     // Clear scroll positions
                     ScrollPositionStore.clearAll()
@@ -155,13 +167,20 @@ object LogoutService {
                 
                 // 4. Clear ApiClient user token (Fixes relogin 400 error)
                 com.ethora.chat.core.networking.ApiClient.setUserToken(null)
-                
+
                 // 5. Stop token refresh
                 TokenManager.stopAutoRefresh()
-                
+
+                // Run internal cleanup before the external callback so a
+                // remount of EthoraChatProvider starts from a clean slate.
+                try {
+                    internalShutdownHook?.invoke()
+                } catch (e: Exception) {
+                    Log.w(TAG, "⚠️ Internal shutdown hook threw", e)
+                }
+
                 Log.d(TAG, "✅ Logout completed successfully")
-                
-                // 6. Call external callback if set
+
                 onLogoutCallback?.invoke()
                 
             } catch (e: Exception) {

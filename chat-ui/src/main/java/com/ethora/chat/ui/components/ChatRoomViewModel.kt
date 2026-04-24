@@ -11,9 +11,15 @@ import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.networking.AuthAPIHelper
 import com.ethora.chat.core.store.ChatEventDispatcher
+import com.ethora.chat.core.store.ChatConnectionStatus
+import com.ethora.chat.core.store.ConnectionStore
 import com.ethora.chat.core.store.MessageStore
 import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.store.ChatStore
+import com.ethora.chat.core.store.PendingMediaSend
+import com.ethora.chat.core.store.PendingMediaSendQueue
+import com.ethora.chat.core.store.PendingMediaSendStatus
+import com.ethora.chat.core.store.PendingMediaUploadPayload
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.xmpp.XMPPClient
@@ -23,6 +29,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import android.graphics.BitmapFactory
@@ -93,6 +100,21 @@ class ChatRoomViewModel(
                 .collect { composingList ->
                     _composingUsers.value = composingList
                     android.util.Log.d("ChatRoomViewModel", "Composing users updated: $composingList")
+                }
+        }
+
+        viewModelScope.launch {
+            restoreQueuedMediaMessages()
+            processPendingMediaQueue()
+        }
+
+        viewModelScope.launch {
+            ConnectionStore.state
+                .map { it.status }
+                .distinctUntilChanged()
+                .filter { it == ChatConnectionStatus.ONLINE }
+                .collect {
+                    processPendingMediaQueue()
                 }
         }
         
@@ -557,7 +579,8 @@ class ChatRoomViewModel(
     }
     
     /**
-     * Send media with retry mechanism and error handling
+     * Queue media for durable upload + XMPP send. The optimistic message stays
+     * visible while the queue retries across reconnects and app foregrounds.
      */
     fun sendMedia(file: File, mimeType: String, retryCount: Int = 0) {
         viewModelScope.launch {
@@ -578,16 +601,13 @@ class ChatRoomViewModel(
                 val effectiveMimeType = effectiveInput.mimeType ?: mimeType
 
                 val currentUser = UserStore.currentUser.value
-                // Fix token check: check both store token and user token
-                val token = UserStore.token.value ?: currentUser?.token
-                
-                if (currentUser == null || token == null) {
+                if (currentUser == null) {
                     android.util.Log.e("ChatRoomViewModel", "Cannot send media: user or token is null")
                     ChatEventDispatcher.emit(
                         ChatEvent.MessageFailed(
                             roomJid = room.jid,
                             messageType = MessageType.MEDIA,
-                            error = IllegalStateException("User or token is null"),
+                            error = IllegalStateException("User is null"),
                             metadata = mapOf("fileName" to file.name, "mimeType" to effectiveMimeType)
                         )
                     )
@@ -664,142 +684,20 @@ class ChatRoomViewModel(
                 MessageStore.addMessage(room.jid, optimisticMessage)
                 android.util.Log.d("ChatRoomViewModel", "Created optimistic media message with pending=true, ID: $messageId")
                 schedulePendingFallback(messageId)
-                
-                // Upload file with retry
-                android.util.Log.d("ChatRoomViewModel", "Uploading file: ${uploadFile.name} (${uploadMimeType}), attempt ${retryCount + 1}")
-                var uploadResult: com.ethora.chat.core.networking.FileUploadResult? = null
-                
-                val baseUrl = ChatStore.getEffectiveBaseUrl()
-                try {
-                    uploadResult = AuthAPIHelper.uploadFile(uploadFile, uploadMimeType, token, baseUrl)
-                } catch (e: Exception) {
-                    android.util.Log.e("ChatRoomViewModel", "File upload exception", e)
-                }
-                
-                if (uploadResult == null) {
-                    if (retryCount < 2) {
-                        android.util.Log.w("ChatRoomViewModel", "File upload failed, retrying... attempt ${retryCount + 2}")
-                        kotlinx.coroutines.delay(1200)
-                        sendMedia(file, effectiveMimeType, retryCount + 1)
-                        MessageStore.removeMessage(room.jid, messageId)
-                        return@launch
-                    }
-                    android.util.Log.e("ChatRoomViewModel", "File upload failed after retries")
-                    MessageStore.removeMessage(room.jid, messageId)
-                    ChatEventDispatcher.emit(
-                        ChatEvent.MediaUploadResult(
-                            roomJid = room.jid,
-                            fileName = uploadFile.name,
-                            mimeType = uploadMimeType,
-                            success = false,
-                            error = IllegalStateException("Upload failed after retries")
-                        )
-                    )
-                    return@launch
-                }
 
-                ChatEventDispatcher.emit(
-                    ChatEvent.MediaUploadResult(
+                PendingMediaSendQueue.enqueue(
+                    PendingMediaSend(
                         roomJid = room.jid,
-                        fileName = uploadResult.filename,
-                        mimeType = uploadResult.mimetype,
-                        success = true
+                        messageId = messageId,
+                        localFilePath = uploadFile.absolutePath,
+                        fileName = uploadFile.name,
+                        mimeType = uploadMimeType,
+                        createdAt = optimisticTs
                     )
                 )
-                
-                android.util.Log.d("ChatRoomViewModel", "File uploaded: ${uploadResult.location}")
-                
-                // Prepare media data for XMPP
-                val xmppHost = ChatStore.getEffectiveXmppSettings().host
-                val senderJID = currentUser.xmppUsername?.let { "$it@$xmppHost" } ?: ""
-                val mediaData = mapOf<String, Any>(
-                    "senderJID" to senderJID,
-                    "senderFirstName" to (currentUser.firstName ?: ""),
-                    "senderLastName" to (currentUser.lastName ?: ""),
-                    "senderWalletAddress" to (currentUser.walletAddress ?: ""),
-                    "isSystemMessage" to "false",
-                    "tokenAmount" to "0",
-                    "receiverMessageId" to "0",
-                    "mucname" to (room.name ?: ""),
-                    "photoURL" to (currentUser.profileImage ?: ""),
-                    "isMediafile" to "true",
-                    "createdAt" to uploadResult.createdAt,
-                    "expiresAt" to (uploadResult.expiresAt ?: ""),
-                    "fileName" to uploadResult.filename,
-                    "isVisible" to (uploadResult.isVisible?.toString() ?: "true"),
-                    "location" to uploadResult.location,
-                    "locationPreview" to (uploadResult.locationPreview ?: ""),
-                    "mimetype" to uploadResult.mimetype,
-                    "originalName" to uploadResult.originalName,
-                    "ownerKey" to (uploadResult.ownerKey ?: ""),
-                    "size" to uploadResult.size,
-                    "duration" to (uploadResult.duration ?: ""),
-                    "updatedAt" to (uploadResult.updatedAt ?: ""),
-                    "userId" to (uploadResult.userId ?: currentUser.id),
-                    "waveForm" to (uploadResult.waveForm ?: ""),
-                    "attachmentId" to (uploadResult.attachmentId ?: ""),
-                    "isReply" to "false",
-                    "showInChannel" to "true",
-                    "mainMessage" to "",
-                    "roomJid" to room.jid,
-                    "push" to "true"
-                )
-                
-                // Send media message via XMPP
-                val success = try {
-                    xmppClient?.sendMediaMessage(room.jid, mediaData, messageId) ?: false
-                } catch (e: Exception) {
-                    android.util.Log.e("ChatRoomViewModel", "Error sending media message via XMPP", e)
-                    false
-                }
-                
-                if (success) {
-                    android.util.Log.d("ChatRoomViewModel", "Media message sent successfully via XMPP")
-                    // Update optimistic message with upload data, but keep pending=true
-                    // Server echo will clear pending state via pending reconciliation
-                    // The server echo will match this message by location/fileName and clear pending
-                    val updatedMessage = optimisticMessage.copy(
-                        location = uploadResult.location,
-                        locationPreview = uploadResult.locationPreview,
-                        fileName = uploadResult.filename,
-                        mimetype = uploadResult.mimetype,
-                        size = uploadResult.size.toString(),
-                        // Keep pending=true - server echo will clear it via updatePendingMessage
-                        pending = true
-                    )
-                    MessageStore.updateMessage(room.jid, updatedMessage)
-                    // Web parity: fast-ack immediately after successful XMPP send
-                    // so pending flips as soon as server echo hits MAM.
-                    launch { triggerFastAckFetch() }
-                    android.util.Log.d("ChatRoomViewModel", "Updated optimistic message with upload data (pending=true, waiting for server echo to match by location: ${uploadResult.location})")
-                    ChatEventDispatcher.emit(
-                        ChatEvent.MessageSent(
-                            roomJid = room.jid,
-                            messageId = messageId,
-                            messageType = MessageType.MEDIA,
-                            user = currentUser,
-                            metadata = mapOf(
-                                "location" to uploadResult.location,
-                                "mimetype" to uploadResult.mimetype
-                            )
-                        )
-                    )
-                } else {
-                    android.util.Log.e("ChatRoomViewModel", "Failed to send media message via XMPP. xmppClient=${xmppClient != null}, isFullyConnected=${xmppClient?.isFullyConnected()} (check XMPPClient/XMPPWebSocket logs for cause)")
-                    // Remove failed message
-                    MessageStore.removeMessage(room.jid, messageId)
-                    ChatEventDispatcher.emit(
-                        ChatEvent.MessageFailed(
-                            roomJid = room.jid,
-                            messageType = MessageType.MEDIA,
-                            error = IllegalStateException("Failed to send media message via XMPP"),
-                            metadata = mapOf("fileName" to uploadFile.name, "mimeType" to uploadMimeType)
-                        )
-                    )
-                }
+                processPendingMediaQueue()
             } catch (e: Exception) {
                 android.util.Log.e("ChatRoomViewModel", "Error sending media", e)
-                // Message will remain in pending state, will be cleaned up later
                 ChatEventDispatcher.emit(
                     ChatEvent.MessageFailed(
                         roomJid = room.jid,
@@ -810,6 +708,228 @@ class ChatRoomViewModel(
                 )
             }
         }
+    }
+
+    fun processPendingMediaQueue() {
+        viewModelScope.launch {
+            processDuePendingMediaItems()
+        }
+    }
+
+    private suspend fun processDuePendingMediaItems() {
+        val currentUser = UserStore.currentUser.value ?: return
+        val token = UserStore.token.value ?: currentUser.token ?: return
+        val client = xmppClient ?: return
+        val dueItems = PendingMediaSendQueue.dueItems()
+            .filter { it.roomJid == room.jid }
+
+        dueItems.forEach { item ->
+            if (!mediaQueueInFlight.add(item.id)) return@forEach
+            try {
+                var working = PendingMediaSendQueue.update(item.id) {
+                    it.copy(status = PendingMediaSendStatus.UPLOADING)
+                } ?: return@forEach
+
+                val uploadPayload = working.uploaded ?: run {
+                    val file = File(working.localFilePath)
+                    if (!file.exists() || !file.canRead()) {
+                        markPendingMediaFailed(
+                            working,
+                            IllegalStateException("Queued file is missing or unreadable")
+                        )
+                        return@forEach
+                    }
+
+                    val uploadResult = withContext(Dispatchers.IO) {
+                        AuthAPIHelper.uploadFile(
+                            file = file,
+                            mimeType = working.mimeType,
+                            token = token,
+                            baseUrl = ChatStore.getEffectiveBaseUrl()
+                        )
+                    }
+                    if (uploadResult == null) {
+                        markPendingMediaFailed(working, IllegalStateException("Upload failed"))
+                        ChatEventDispatcher.emit(
+                            ChatEvent.MediaUploadResult(
+                                roomJid = working.roomJid,
+                                fileName = working.fileName,
+                                mimeType = working.mimeType,
+                                success = false,
+                                error = IllegalStateException("Upload failed")
+                            )
+                        )
+                        return@forEach
+                    }
+
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MediaUploadResult(
+                            roomJid = working.roomJid,
+                            fileName = uploadResult.filename,
+                            mimeType = uploadResult.mimetype,
+                            success = true
+                        )
+                    )
+                    PendingMediaUploadPayload.from(uploadResult)
+                }
+
+                working = PendingMediaSendQueue.update(working.id) {
+                    it.copy(
+                        uploaded = uploadPayload,
+                        status = PendingMediaSendStatus.READY_TO_SEND,
+                        nextRetryAt = 0L
+                    )
+                } ?: return@forEach
+
+                val uploadResult = uploadPayload.toFileUploadResult()
+                updateOptimisticMediaMessage(working, uploadResult)
+
+                if (!client.isFullyConnected() && !client.ensureConnected(15_000)) {
+                    markPendingMediaFailed(working, IllegalStateException("XMPP not connected"))
+                    return@forEach
+                }
+
+                val mediaData = buildMediaData(uploadResult, currentUser)
+                val sent = try {
+                    client.sendMediaMessage(working.roomJid, mediaData, working.messageId)
+                } catch (e: Exception) {
+                    android.util.Log.e("ChatRoomViewModel", "Error sending queued media message via XMPP", e)
+                    false
+                }
+
+                if (sent) {
+                    PendingMediaSendQueue.remove(working.id, deleteLocalFile = true)
+                    viewModelScope.launch { triggerFastAckFetch() }
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MessageSent(
+                            roomJid = working.roomJid,
+                            messageId = working.messageId,
+                            messageType = MessageType.MEDIA,
+                            user = currentUser,
+                            metadata = mapOf(
+                                "location" to uploadResult.location,
+                                "mimetype" to uploadResult.mimetype
+                            )
+                        )
+                    )
+                } else {
+                    markPendingMediaFailed(working, IllegalStateException("Failed to send media message via XMPP"))
+                }
+            } finally {
+                mediaQueueInFlight.remove(item.id)
+            }
+        }
+    }
+
+    private fun markPendingMediaFailed(item: PendingMediaSend, error: Throwable) {
+        val failed = PendingMediaSendQueue.update(item.id) { it.failedForRetry() }
+        ChatEventDispatcher.emit(
+            ChatEvent.MessageFailed(
+                roomJid = item.roomJid,
+                messageType = MessageType.MEDIA,
+                error = error,
+                metadata = mapOf("fileName" to item.fileName, "mimeType" to item.mimeType)
+            )
+        )
+        failed?.let { failedItem ->
+            viewModelScope.launch {
+                val delayMs = (failedItem.nextRetryAt - System.currentTimeMillis()).coerceAtLeast(0L)
+                kotlinx.coroutines.delay(delayMs)
+                processPendingMediaQueue()
+            }
+        }
+    }
+
+    private fun updateOptimisticMediaMessage(
+        item: PendingMediaSend,
+        uploadResult: com.ethora.chat.core.networking.FileUploadResult
+    ) {
+        val existing = MessageStore.getMessagesForRoom(item.roomJid)
+            .firstOrNull { it.id == item.messageId }
+        val updated = existing?.copy(
+            location = uploadResult.location,
+            locationPreview = uploadResult.locationPreview,
+            fileName = uploadResult.filename,
+            mimetype = uploadResult.mimetype,
+            originalName = uploadResult.originalName,
+            size = uploadResult.size,
+            pending = true
+        ) ?: return
+        MessageStore.updateMessage(item.roomJid, updated)
+    }
+
+    private fun buildMediaData(
+        uploadResult: com.ethora.chat.core.networking.FileUploadResult,
+        currentUser: com.ethora.chat.core.models.User
+    ): Map<String, Any> {
+        val xmppHost = ChatStore.getEffectiveXmppSettings().host
+        val senderJID = currentUser.xmppUsername?.let { "$it@$xmppHost" } ?: ""
+        return mapOf(
+            "senderJID" to senderJID,
+            "senderFirstName" to (currentUser.firstName ?: ""),
+            "senderLastName" to (currentUser.lastName ?: ""),
+            "senderWalletAddress" to (currentUser.walletAddress ?: ""),
+            "isSystemMessage" to "false",
+            "tokenAmount" to "0",
+            "receiverMessageId" to "0",
+            "mucname" to (room.name ?: ""),
+            "photoURL" to (currentUser.profileImage ?: ""),
+            "isMediafile" to "true",
+            "createdAt" to uploadResult.createdAt,
+            "expiresAt" to (uploadResult.expiresAt ?: ""),
+            "fileName" to uploadResult.filename,
+            "isVisible" to (uploadResult.isVisible?.toString() ?: "true"),
+            "location" to uploadResult.location,
+            "locationPreview" to (uploadResult.locationPreview ?: ""),
+            "mimetype" to uploadResult.mimetype,
+            "originalName" to uploadResult.originalName,
+            "ownerKey" to (uploadResult.ownerKey ?: ""),
+            "size" to uploadResult.size,
+            "duration" to (uploadResult.duration ?: ""),
+            "updatedAt" to (uploadResult.updatedAt ?: ""),
+            "userId" to (uploadResult.userId ?: currentUser.id),
+            "waveForm" to (uploadResult.waveForm ?: ""),
+            "attachmentId" to (uploadResult.attachmentId ?: ""),
+            "isReply" to "false",
+            "showInChannel" to "true",
+            "mainMessage" to "",
+            "roomJid" to room.jid,
+            "push" to "true"
+        )
+    }
+
+    private fun restoreQueuedMediaMessages() {
+        val currentUser = UserStore.currentUser.value ?: return
+        PendingMediaSendQueue.items.value
+            .filter { it.roomJid == room.jid }
+            .forEach { item ->
+                val exists = MessageStore.getMessagesForRoom(room.jid)
+                    .any { it.id == item.messageId }
+                if (exists) return@forEach
+                val upload = item.uploaded
+                val localUri = "file://${item.localFilePath}"
+                val message = Message(
+                    id = item.messageId,
+                    body = "media",
+                    user = currentUser,
+                    date = Date(item.createdAt),
+                    timestamp = item.createdAt,
+                    roomJid = item.roomJid,
+                    pending = true,
+                    isDeleted = false,
+                    xmppId = item.messageId,
+                    xmppFrom = "${item.roomJid}/${currentUser.id}",
+                    isSystemMessage = "false",
+                    isMediafile = "true",
+                    fileName = upload?.filename ?: item.fileName,
+                    location = upload?.location ?: localUri,
+                    locationPreview = upload?.locationPreview ?: if (item.mimeType.startsWith("image/")) localUri else "",
+                    mimetype = upload?.mimetype ?: item.mimeType,
+                    originalName = upload?.originalName ?: item.fileName,
+                    size = upload?.size ?: File(item.localFilePath).length().toString()
+                )
+                MessageStore.addMessage(room.jid, message)
+            }
     }
 
     private suspend fun prepareMediaForUpload(file: File, mimeType: String): Pair<File, String> {
@@ -915,6 +1035,9 @@ class ChatRoomViewModel(
         // Room-keyed "last fast-ack" timestamps — shared across ViewModel
         // instances so switching chats doesn't reset the 600 ms throttle.
         private val fastAckLastByRoom = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        private val mediaQueueInFlight = Collections.newSetFromMap(
+            ConcurrentHashMap<String, Boolean>()
+        )
     }
     
     /**
@@ -937,6 +1060,29 @@ class ChatRoomViewModel(
                 android.util.Log.e("ChatRoomViewModel", "Error editing message", e)
             }
         }
+    }
+
+    /**
+     * Resend a still-pending text message. Drops the stale optimistic row
+     * and runs [sendMessage] again with the same body + reply target, so
+     * the user gets a fresh xmpp send + echo window. No-op for media or
+     * non-pending messages.
+     */
+    fun resendMessage(messageId: String) {
+        val existing = MessageStore.getMessagesForRoom(room.jid)
+            .firstOrNull { it.id == messageId } ?: return
+        if (existing.pending != true) return
+        val isMedia = existing.isMediafile == "true" ||
+            !existing.location.isNullOrBlank() ||
+            !existing.fileName.isNullOrBlank()
+        if (isMedia) {
+            android.util.Log.w("ChatRoomViewModel", "Resend for media messages is not supported yet ($messageId)")
+            return
+        }
+        val body = existing.body
+        val parent = existing.mainMessage
+        MessageStore.removeMessage(room.jid, messageId)
+        sendMessage(body, parent)
     }
 
     /**

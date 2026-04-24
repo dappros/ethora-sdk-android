@@ -33,11 +33,12 @@ object InitBeforeLoadFlow {
             Log.w(TAG, "XMPP not online — skipping initBeforeLoad")
             return
         }
+        // Throw → don't mark completed (retry). null/empty → mark completed.
         val serverStore = try {
             xmppClient.getChatsPrivateStore()
         } catch (e: Exception) {
-            Log.w(TAG, "getChatsPrivateStore failed", e)
-            null
+            Log.w(TAG, "getChatsPrivateStore threw — will retry on next run()", e)
+            return
         }
         if (serverStore.isNullOrEmpty()) {
             Log.d(TAG, "Private store empty — nothing to merge")
@@ -47,6 +48,11 @@ object InitBeforeLoadFlow {
         mergeIntoRoomStore(serverStore)
         lastCompletedForClient = clientId
         Log.d(TAG, "initBeforeLoad merged ${serverStore.size} room timestamps")
+    }
+
+    /** Clear the once-per-client guard (called from logout). */
+    fun reset() {
+        lastCompletedForClient = 0
     }
 
     /**

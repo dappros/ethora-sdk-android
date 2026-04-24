@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Delete
 import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.store.PendingMediaSendStatus
 import java.util.regex.Pattern
 
 /**
@@ -54,6 +55,7 @@ fun MessageBubble(
     onMediaClick: ((Message) -> Unit)? = null,
     onLongPress: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onAvatarClick: ((User) -> Unit)? = null,
+    pendingMediaStatus: PendingMediaSendStatus? = null,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -237,9 +239,16 @@ fun MessageBubble(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Show "sending..." if pending and it's user's message
-                    if (isUser && message.pending == true) {
+                    if (isUser && (message.pending == true || pendingMediaStatus != null)) {
                         Text(
-                            text = "sending...",
+                            text = when (pendingMediaStatus) {
+                                PendingMediaSendStatus.FAILED_WAITING_RETRY -> "failed, will retry"
+                                PendingMediaSendStatus.READY_TO_SEND -> "retrying..."
+                                PendingMediaSendStatus.UPLOADING -> "sending..."
+                                PendingMediaSendStatus.QUEUED -> "sending..."
+                                PendingMediaSendStatus.SENT,
+                                null -> "sending..."
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                         )

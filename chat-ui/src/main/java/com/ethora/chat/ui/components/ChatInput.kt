@@ -2,6 +2,8 @@ package com.ethora.chat.ui.components
 
 import android.net.Uri
 import android.graphics.Bitmap
+import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,6 +23,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.ethora.chat.core.store.PendingMediaSendQueue
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -94,14 +97,18 @@ fun ChatInput(
     }
     
     fun setSelectedFromUri(uri: Uri, fallbackMime: String = "application/octet-stream") {
-        val file = File(context.cacheDir, "temp_${System.currentTimeMillis()}")
         try {
+            val mimeType = context.contentResolver.getType(uri) ?: fallbackMime
+            val displayName = getDisplayName(context, uri)
+                ?: "upload_${System.currentTimeMillis()}${extensionForMime(mimeType)}"
+            val safeName = PendingMediaSendQueue.sanitizeFileName(displayName)
+            val pendingDir = PendingMediaSendQueue.pendingUploadsDir(context).apply { mkdirs() }
+            val file = uniqueFile(pendingDir, safeName)
             context.contentResolver.openInputStream(uri)?.use { input ->
                 file.outputStream().use { output ->
                     input.copyTo(output)
                 }
-            }
-            val mimeType = context.contentResolver.getType(uri) ?: fallbackMime
+            } ?: throw IllegalStateException("Unable to open selected file")
             val maxSizeBytes = 50 * 1024 * 1024L // 50MB
             val fileSize = file.length()
             if (fileSize > maxSizeBytes) {
@@ -134,7 +141,8 @@ fun ChatInput(
     ) { bitmap: Bitmap? ->
         bitmap?.let {
             try {
-                val photoFile = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
+                val pendingDir = PendingMediaSendQueue.pendingUploadsDir(context).apply { mkdirs() }
+                val photoFile = uniqueFile(pendingDir, "camera_${System.currentTimeMillis()}.jpg")
                 FileOutputStream(photoFile).use { stream ->
                     it.compress(Bitmap.CompressFormat.JPEG, 90, stream)
                 }
@@ -496,6 +504,38 @@ fun ChatInput(
             }
         }
     }
+}
+
+private fun getDisplayName(context: android.content.Context, uri: Uri): String? {
+    return runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (index >= 0) cursor.getString(index) else null
+                } else {
+                    null
+                }
+            }
+    }.getOrNull()
+}
+
+private fun extensionForMime(mimeType: String): String {
+    val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
+    return extension?.takeIf { it.isNotBlank() }?.let { ".$it" } ?: ""
+}
+
+private fun uniqueFile(directory: File, fileName: String): File {
+    val dotIndex = fileName.lastIndexOf('.')
+    val base = if (dotIndex > 0) fileName.substring(0, dotIndex) else fileName
+    val extension = if (dotIndex > 0) fileName.substring(dotIndex) else ""
+    var candidate = File(directory, fileName)
+    var index = 1
+    while (candidate.exists()) {
+        candidate = File(directory, "${base}_$index$extension")
+        index++
+    }
+    return candidate
 }
 
 private fun formatFileSize(bytes: Long): String {

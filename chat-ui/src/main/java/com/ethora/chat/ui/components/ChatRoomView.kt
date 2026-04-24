@@ -22,6 +22,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -40,9 +41,12 @@ import com.ethora.chat.core.models.MessageProps
 import com.ethora.chat.core.models.SendInputProps
 import com.ethora.chat.core.store.ChatConnectionStatus
 import com.ethora.chat.core.store.ConnectionStore
+import com.ethora.chat.core.store.PendingMediaSendQueue
 import com.ethora.chat.core.store.ScrollPositionStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.xmpp.XMPPClient
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 
 private fun normalizeLocalPart(value: String?): String {
     return value
@@ -88,6 +92,7 @@ fun ChatRoomView(
     modifier: Modifier = Modifier
 ) {
     val viewModel = remember(room.jid, xmppClient) { ChatRoomViewModel(room, xmppClient) }
+    val lifecycleOwner = LocalLifecycleOwner.current
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val currentUser by UserStore.currentUser.collectAsState()
@@ -95,6 +100,7 @@ fun ChatRoomView(
     val composingUsers by viewModel.composingUsers.collectAsState()
     val scrollRestoreAnchor by viewModel.scrollRestoreAnchor.collectAsState()
     val connectionState by ConnectionStore.state.collectAsState()
+    val pendingMediaItems by PendingMediaSendQueue.items.collectAsState()
     
     // Update lastViewedTimestamp when room is opened; send presence to receive real-time messages
     LaunchedEffect(room.jid, xmppClient) {
@@ -184,6 +190,16 @@ fun ChatRoomView(
     var unreadCount by remember { mutableStateOf(0) }
     var lastMessageCount by remember { mutableStateOf(messages.size) }
     var pendingOwnMessageAutoScroll by remember { mutableStateOf(false) }
+
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START || event == Lifecycle.Event.ON_RESUME) {
+                viewModel.processPendingMediaQueue()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // True when the viewport ends within ~3 items of the list's tail. Used to
     // decide "new incoming → auto-scroll" AND to know whether the user has
@@ -508,12 +524,21 @@ fun ChatRoomView(
                             }
                         ) { index ->
                             val message = messages.getOrNull(index)
-                            
+
                             if (message == null) {
                                 android.util.Log.e("ChatRoomView", "Message is null at index $index")
                                 return@items
                             }
-                            
+
+                            // "New messages" delimiter — synthetic Message injected by
+                            // MessageStore.normalizeDelimiterPosition. Renders a centered
+                            // pill (web parity with MessageContainer.tsx:91-95) and
+                            // short-circuits date-separator + grouping + bubble logic.
+                            if (message.id == "delimiter-new") {
+                                NewMessageDivider(colors = config?.colors)
+                                return@items
+                            }
+
                             // Calculate if we should show date separator
                             // In oldest-first list, messages[index-1] is OLDER than messages[index]
                             // We show separator if day changes between current and PREVIOUS (older) item
@@ -622,6 +647,9 @@ fun ChatRoomView(
                                             // is visual noise. `isLastInGroup` is already computed
                                             // above from chronological neighbours + time window.
                                             showTimestamp = isLastInGroup,
+                                            pendingMediaStatus = pendingMediaItems
+                                                .firstOrNull { it.messageId == message.id }
+                                                ?.status,
                                             onMediaClick = { msg -> previewMessage = msg },
                                             onLongPress = { tapX, tapY, left, top, right, bottom ->
                                                 contextMenuMessage = message
@@ -847,6 +875,10 @@ fun ChatRoomView(
                         },
                         onDelete = {
                             deleteConfirmMessageId = msg.id
+                            dismissMenu()
+                        },
+                        onResend = {
+                            viewModel.resendMessage(msg.id)
                             dismissMenu()
                         }
                     )

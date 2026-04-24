@@ -56,15 +56,23 @@ class ChatPersistenceManager(private val context: Context) {
     }
     
     /**
-     * Load rooms
+     * Load rooms. Substitutes `lastViewedTimestamp = now` when the persisted
+     * value is 0/null — a stale "open room, app killed" marker that would
+     * otherwise count all restored history as unread on cold boot.
      */
     suspend fun loadRooms(): List<Room> {
         return try {
             val json = context.dataStore.data.first()[ROOMS_KEY] ?: return emptyList()
             val type = object : TypeToken<List<Room>>() {}.type
             val rooms = gson.fromJson<List<Room>>(json, type) ?: emptyList()
-            android.util.Log.d("ChatPersistenceManager", "📂 Loaded ${rooms.size} rooms from persistence")
-            rooms
+            val now = System.currentTimeMillis()
+            val sanitized = rooms.map { room ->
+                if ((room.lastViewedTimestamp ?: 0L) <= 0L) {
+                    room.copy(lastViewedTimestamp = now)
+                } else room
+            }
+            android.util.Log.d("ChatPersistenceManager", "📂 Loaded ${sanitized.size} rooms from persistence")
+            sanitized
         } catch (e: Exception) {
             android.util.Log.e("ChatPersistenceManager", "❌ Error loading rooms", e)
             emptyList()

@@ -146,11 +146,22 @@ class XMPPClient(
         val isWsConnected = if (useWebSocket) webSocketConnection?.isFullyConnected() == true else false
         val isTcpConnected = if (!useWebSocket) connection?.isConnected == true else false
         
-        return if (useWebSocket) {
+        val connected = if (useWebSocket) {
             isOnline && isWsConnected
         } else {
             isOnline && isTcpConnected
         }
+        if (connected) {
+            resetReconnectAttempts("fully connected")
+        }
+        return connected
+    }
+
+    fun resetReconnectAttempts(reason: String) {
+        if (reconnectAttempts != 0) {
+            Log.d(TAG, "Reset reconnectAttempts=0 ($reason)")
+        }
+        reconnectAttempts = 0
     }
 
     /**
@@ -781,24 +792,21 @@ class XMPPClient(
         val ws = webSocketConnection ?: return emptyList()
         val queryId = "get-history:${System.currentTimeMillis()}:${roomJID.hashCode()}"
         val collected = mutableListOf<Message>()
-        val latch = Mutex()
-        var queryComplete = false
+        val collectedLock = Any()
 
+        // Process synchronously on the WS parser thread. The previous
+        // scope.launch+withLock version raced the completion IQ and dropped
+        // the last few messages of each MAM page.
         val collector: (XMPPStanza) -> Unit = { stanza ->
-            scope.launch {
-                latch.withLock {
-                    if (queryComplete) return@withLock
-                    val parsed = parseMAMResult(stanza, roomJID)
-                        .filter { it.roomJid == roomJID }
-                    if (parsed.isNotEmpty()) {
-                        collected.addAll(parsed)
-                        // Incremental write-through so the UI updates as results arrive;
-                        // MessageStore dedups and sorts by timestamp.
-                        com.ethora.chat.core.store.MessageStore.addMessages(roomJID, parsed)
-                    }
-                }
+            val parsed = parseMAMResult(stanza, roomJID)
+                .filter { it.roomJid == roomJID }
+            if (parsed.isNotEmpty()) {
+                synchronized(collectedLock) { collected.addAll(parsed) }
+                // Incremental write-through so the UI updates as results arrive.
+                com.ethora.chat.core.store.MessageStore.addMessages(roomJID, parsed)
             }
         }
+        var queryComplete = false
 
         ws.registerMAMCollector(queryId, collector)
         try {
@@ -822,8 +830,8 @@ class XMPPClient(
             // (MessageStore's sort) then orders ascending by timestamp. Ascending
             // = oldest first, so the caller can use .first() as the pagination
             // anchor for an older page.
-            return latch.withLock {
-                collected.sortedBy { it.timestamp ?: it.date.time }
+            return synchronized(collectedLock) {
+                collected.toList().sortedBy { it.timestamp ?: it.date.time }
             }
         } finally {
             ws.unregisterMAMCollector(queryId)

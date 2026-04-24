@@ -1,17 +1,36 @@
 package com.ethora.chat.ui.components
 
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.webkit.WebChromeClient
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.net.URL
+import kotlin.math.roundToInt
 
-/**
- * PDF viewer using WebView with PDF.js (like web version)
- */
 @Composable
 fun PDFViewer(
     pdfUrl: String,
@@ -19,49 +38,100 @@ fun PDFViewer(
     onError: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    AndroidView(
-        factory = { context ->
-            WebView(context).apply {
-                settings.javaScriptEnabled = true
-                settings.builtInZoomControls = true
-                settings.displayZoomControls = true
-                settings.setSupportZoom(true)
-                settings.loadWithOverviewMode = true
-                settings.useWideViewPort = true
-                settings.domStorageEnabled = true
-                settings.allowFileAccess = true
-                settings.allowContentAccess = true
-                
-                webViewClient = object : WebViewClient() {
-                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                        super.onPageStarted(view, url, favicon)
-                        onLoadingChange?.invoke(true)
-                    }
-                    
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        onLoadingChange?.invoke(false)
-                    }
-                    
-                    override fun onReceivedError(
-                        view: WebView?,
-                        request: android.webkit.WebResourceRequest?,
-                        error: android.webkit.WebResourceError?
-                    ) {
-                        super.onReceivedError(view, request, error)
-                        onLoadingChange?.invoke(false)
-                        onError?.invoke()
-                    }
-                }
-                
-                webChromeClient = WebChromeClient()
-                
-                // Use PDF.js viewer (same as web version)
-                val pdfJsViewer = "https://mozilla.github.io/pdf.js/web/viewer.html"
-                val viewerUrl = "$pdfJsViewer?file=${android.net.Uri.encode(pdfUrl)}"
-                loadUrl(viewerUrl)
+    val context = LocalContext.current
+    var pages by remember(pdfUrl) { mutableStateOf<List<Bitmap>>(emptyList()) }
+    var errorMessage by remember(pdfUrl) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(pdfUrl) {
+        onLoadingChange?.invoke(true)
+        errorMessage = null
+        pages = emptyList()
+        try {
+            pages = withContext(Dispatchers.IO) {
+                val pdfFile = resolvePdfFile(context, pdfUrl)
+                renderPdfPages(pdfFile)
             }
-        },
-        modifier = modifier.fillMaxSize()
-    )
+        } catch (e: Exception) {
+            android.util.Log.e("PDFViewer", "Failed to render PDF", e)
+            errorMessage = "Failed to load PDF"
+            onError?.invoke()
+        } finally {
+            onLoadingChange?.invoke(false)
+        }
+    }
+
+    when {
+        errorMessage != null -> {
+            Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    text = errorMessage ?: "Failed to load PDF",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+        pages.isNotEmpty() -> {
+            LazyColumn(
+                modifier = modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                items(pages) { bitmap ->
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "PDF page",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(8.dp),
+                        contentScale = ContentScale.FillWidth
+                    )
+                }
+            }
+        }
+        else -> {
+            Box(modifier = modifier.fillMaxSize())
+        }
+    }
+}
+
+private fun resolvePdfFile(context: android.content.Context, pdfUrl: String): File {
+    if (pdfUrl.startsWith("file://")) {
+        return File(pdfUrl.removePrefix("file://"))
+    }
+    if (pdfUrl.startsWith("/")) {
+        return File(pdfUrl)
+    }
+
+    val cacheDir = File(context.cacheDir, "pdf_preview").apply { mkdirs() }
+    val cacheFile = File(cacheDir, "${pdfUrl.hashCode().toUInt()}.pdf")
+    if (cacheFile.exists() && cacheFile.length() > 0) return cacheFile
+
+    URL(pdfUrl).openConnection().apply {
+        connectTimeout = 15_000
+        readTimeout = 30_000
+    }.getInputStream().use { input ->
+        FileOutputStream(cacheFile).use { output ->
+            input.copyTo(output)
+        }
+    }
+    return cacheFile
+}
+
+private fun renderPdfPages(file: File): List<Bitmap> {
+    require(file.exists() && file.length() > 0) { "PDF file is empty or missing" }
+    val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+    descriptor.use { pfd ->
+        PdfRenderer(pfd).use { renderer ->
+            return (0 until renderer.pageCount).map { pageIndex ->
+                renderer.openPage(pageIndex).use { page ->
+                    val targetWidth = 1400
+                    val scale = targetWidth.toFloat() / page.width.toFloat()
+                    val targetHeight = (page.height * scale).roundToInt().coerceAtLeast(1)
+                    val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+                    bitmap.eraseColor(android.graphics.Color.WHITE)
+                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    bitmap
+                }
+            }
+        }
+    }
 }

@@ -8,6 +8,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
@@ -36,6 +37,7 @@ import com.ethora.chat.core.store.ConnectionStore
 import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.store.MessageLoaderQueue
 import com.ethora.chat.core.store.MessagePriorityQueue
+import com.ethora.chat.core.store.PendingMediaSendQueue
 import com.ethora.chat.core.store.IncrementalHistoryLoader
 import com.ethora.chat.core.store.LogStore
 import com.ethora.chat.core.store.RoomStore
@@ -50,6 +52,8 @@ import com.ethora.chat.core.xmpp.ConnectionStatus
 import com.ethora.chat.ui.components.ChatRoomView
 import com.ethora.chat.ui.components.RoomListView
 import com.ethora.chat.ui.styling.ChatTheme
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -74,9 +78,11 @@ fun Chat(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val localStorage = remember { LocalStorage(context) }
 
     ChatStore.setConfig(config)
+    PendingMediaSendQueue.initialize(context)
 
     // Set base URL and app token immediately (mirrors React: setBaseURL in LoginWrapper useEffect)
     // Must run before any API call - config values replace defaults project-wide
@@ -120,7 +126,11 @@ fun Chat(
                 android.util.Log.d("EthoraChat", "✅ Loaded persisted user (${u.xmppUsername ?: u.id})")
                 return@LaunchedEffect
             }
-            // 2) No persisted user – try stored JWT token
+            // Defer to EthoraChatBootstrap when it's enabled — it runs the
+            // same login path under a mutex + cooldown.
+            if (config.initBeforeLoad == true) {
+                return@LaunchedEffect
+            }
             val storedJWTToken = localStorage.getJWTToken()
             if (storedJWTToken != null) {
                 android.util.Log.d("EthoraChat", "🔐 Attempting JWT login with stored token...")
@@ -163,8 +173,8 @@ fun Chat(
                     UserStore.setUser(loginUser)
                 }
             }
-            // JWT login from config
-            jwtLogin?.enabled == true -> {
+            // JWT login — only when bootstrap isn't handling it (dedup).
+            jwtLogin?.enabled == true && config.initBeforeLoad != true -> {
                 val token = jwtLogin.token
                 if (token != null) {
                     val loginResponse = withContext(Dispatchers.IO) {
@@ -520,6 +530,30 @@ fun Chat(
                 ConnectionStore.setReconnectAction(null)
             }
         }
+
+        DisposableEffect(lifecycleOwner, xmppClient) {
+            val observer = LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_START || event == Lifecycle.Event.ON_RESUME) {
+                    xmppClient?.let { client ->
+                        client.resetReconnectAttempts("app foreground")
+                        if (!client.isFullyConnected() && !client.checkConnecting()) {
+                            CoroutineScope(Dispatchers.IO).launch {
+                                ConnectionStore.setState(
+                                    status = ChatConnectionStatus.CONNECTING,
+                                    reason = "App foreground reconnect",
+                                    isRecovering = hadSuccessfulConnection
+                                )
+                                client.initializeClient()
+                            }
+                        }
+                    }
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+            }
+        }
         
         // Message loader queue (for background loading after initial load)
         // Matches web: useMessageLoaderQueue hook
@@ -672,6 +706,12 @@ fun Chat(
         LaunchedEffect(xmppClient) {
             val client = xmppClient ?: return@LaunchedEffect
 
+            // Fallback for hosts that mount Chat without EthoraChatProvider.
+            // When bootstrap already ran these stages, skip.
+            if (EthoraChatBootstrap.isInitialized.value) {
+                return@LaunchedEffect
+            }
+
             // Wait until the socket finishes auth + bind. Prior to this, the
             // delegate's onXMPPClientConnected WOULD have been the trigger, but
             // that handler never fires when Chat inherits an already-connected
@@ -693,7 +733,7 @@ fun Chat(
                 android.util.Log.e("EthoraChat", "initBeforeLoad flow error", e)
             }
 
-            // 2. Initial history preload for every room, EXCEPT if bootstrap
+            // 2. Initial history preload for every room, EXCEPT if something
             //    already ran it (MessageLoader.isSynced()), in which case we
             //    downgrade to the lightweight delta catchup — same policy web
             //    follows with its historyPreloadScheduler vs updateMessagesTillLast.
@@ -719,33 +759,35 @@ fun Chat(
             }
         }
         
-        // Push: subscribe device to backend when FCM token and user are available
+        // Push subscribe paths gated behind SDK_PUSH_SUBSCRIBE_ENABLED
+        // (see const at end of file). FCM token + pending-JID deep-link stay live.
         val fcmToken by PushNotificationManager.fcmToken.collectAsState()
-        LaunchedEffect(fcmToken, currentUser?.walletAddress) {
-            val token = fcmToken
-            if (token != null && currentUser != null) {
-                android.util.Log.d("EthoraChat", "🔔 Push: subscribing to backend (token=${token.take(10)}...)")
-                withContext(Dispatchers.IO) {
-                    PushNotificationManager.subscribeToBackend(token)
+        if (SDK_PUSH_SUBSCRIBE_ENABLED) {
+            LaunchedEffect(fcmToken, currentUser?.walletAddress) {
+                val token = fcmToken
+                if (token != null && currentUser != null) {
+                    android.util.Log.d("EthoraChat", "🔔 Push: subscribing to backend (token=${token.take(10)}...)")
+                    withContext(Dispatchers.IO) {
+                        PushNotificationManager.subscribeToBackend(token)
+                    }
                 }
             }
-        }
-        
-        // Push: subscribe to all rooms via MUC-SUB after XMPP connected and rooms loaded
-        LaunchedEffect(xmppClient, rooms.size, fcmToken) {
-            val client = xmppClient
-            val roomsList = RoomStore.rooms.value
-            if (client != null && roomsList.isNotEmpty()) {
-                if (client.ensureConnected(timeoutMs = 5000)) {
-                    android.util.Log.d("EthoraChat", "🔔 Push: subscribing to ${roomsList.size} rooms via MUC-SUB")
-                    withContext(Dispatchers.IO) {
-                        PushNotificationManager.subscribeToRooms(
-                            client,
-                            roomsList.map { it.jid }
-                        )
+
+            LaunchedEffect(xmppClient, rooms.size, fcmToken) {
+                val client = xmppClient
+                val roomsList = RoomStore.rooms.value
+                if (client != null && roomsList.isNotEmpty()) {
+                    if (client.ensureConnected(timeoutMs = 5000)) {
+                        android.util.Log.d("EthoraChat", "🔔 Push: subscribing to ${roomsList.size} rooms via MUC-SUB")
+                        withContext(Dispatchers.IO) {
+                            PushNotificationManager.subscribeToRooms(
+                                client,
+                                roomsList.map { it.jid }
+                            )
+                        }
+                    } else {
+                        android.util.Log.w("EthoraChat", "🔔 Push: XMPP not ready within 5s, skipping MUC-SUB for now")
                     }
-                } else {
-                    android.util.Log.w("EthoraChat", "🔔 Push: XMPP not ready within 5s, skipping MUC-SUB for now")
                 }
             }
         }
@@ -874,6 +916,10 @@ private enum class RoomConnectionPhase {
     READY,
     FAILED
 }
+
+// Push subscription (backend POST + MUC-SUB per room) is off for now.
+// Flip to true to re-enable.
+private const val SDK_PUSH_SUBSCRIBE_ENABLED: Boolean = false
 
 private fun resolveRoomTitle(
     normalizedRoomJid: String,

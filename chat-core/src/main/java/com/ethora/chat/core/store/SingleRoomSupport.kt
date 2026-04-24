@@ -35,6 +35,11 @@ fun buildPlaceholderRoom(
     )
 }
 
+/**
+ * Merge an API-sourced / placeholder [room] over [existing]. Keeps local
+ * unread/pending sticky so /chats/my refresh doesn't wipe them. Only safe
+ * for API-sourced writes — `RoomStore.updateRoom` bypasses this.
+ */
 fun mergeSingleRoomPlaceholder(room: Room, existing: Room?): Room {
     if (existing == null) return room
     return room.copy(

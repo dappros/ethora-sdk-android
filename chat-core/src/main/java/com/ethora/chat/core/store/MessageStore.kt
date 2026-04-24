@@ -48,6 +48,72 @@ object MessageStore {
 
     private fun List<Message>.sortedForUi(): List<Message> = sortedWith(messageOrder)
 
+    // "New messages" delimiter — synthetic Message with id "delimiter-new",
+    // inserted at the first unread anchor, stripped when the room is active
+    // or lastViewed<=0. Runtime-only; persistence paths strip it.
+    private fun normalizeDelimiterPosition(
+        messages: List<Message>,
+        lastViewed: Long,
+        skipDelimiter: Boolean,
+        roomJid: String
+    ): List<Message> {
+        val stripped = messages.filterNot { it.id == "delimiter-new" }
+        if (skipDelimiter || lastViewed <= 0L || stripped.isEmpty()) return stripped
+        val firstUnreadIndex = stripped.indexOfFirst { msg ->
+            if (msg.pending == true) return@indexOfFirst false
+            val ts = messageTimestampValue(msg)
+            ts > lastViewed
+        }
+        if (firstUnreadIndex < 0) return stripped
+        val delimiter = Message(
+            id = "delimiter-new",
+            user = com.ethora.chat.core.models.User(id = "system", name = "system"),
+            date = java.util.Date(lastViewed),
+            body = "New Messages",
+            roomJid = roomJid,
+            timestamp = lastViewed,
+            isSystemMessage = "true"
+        )
+        return stripped.toMutableList().apply { add(firstUnreadIndex, delimiter) }
+    }
+
+    private fun skipDelimiterFor(roomJid: String): Boolean =
+        roomJid == RoomStore.currentRoom.value?.jid
+
+    /** Re-insert / strip the delimiter for [roomJid] based on current
+     *  lastViewed + active state. No-op when the id sequence is unchanged. */
+    fun renormalizeRoomDelimiter(roomJid: String?) {
+        if (roomJid.isNullOrBlank()) return
+        val current = _messages.value[roomJid] ?: return
+        if (current.isEmpty()) return
+        val room = RoomStore.getRoomByJid(roomJid) ?: return
+        val lastViewed = room.lastViewedTimestamp ?: 0L
+        val normalized = normalizeDelimiterPosition(
+            messages = current,
+            lastViewed = lastViewed,
+            skipDelimiter = skipDelimiterFor(roomJid),
+            roomJid = roomJid
+        )
+        val sameIds = normalized.size == current.size &&
+            normalized.zip(current).all { (a, b) -> a.id == b.id }
+        if (sameIds) return
+        _messages.value = _messages.value.toMutableMap().apply {
+            this[roomJid] = normalized
+        }
+    }
+
+    /** Apply delimiter normalisation to a freshly-sorted list. */
+    private fun withDelimiter(roomJid: String, sorted: List<Message>): List<Message> {
+        val room = RoomStore.getRoomByJid(roomJid) ?: return sorted
+        val lastViewed = room.lastViewedTimestamp ?: 0L
+        return normalizeDelimiterPosition(
+            messages = sorted,
+            lastViewed = lastViewed,
+            skipDelimiter = skipDelimiterFor(roomJid),
+            roomJid = roomJid
+        )
+    }
+
     /**
      * Most recent known server-side timestamp across a room. Optimistic
      * messages set their own `timestamp` to `max(now, last + 1)` using this
@@ -76,9 +142,8 @@ object MessageStore {
         android.util.Log.d("MessageStore", "✅ MessageStore initialized with MessageCache")
     }
     
-    // Per-room persistence cap — bumped from 50 to 200 so offline users don't lose the
-    // scrollback they had before; web keeps a larger cache too.
-    private const val PERSIST_LIMIT_PER_ROOM = 200
+    // Per-room persistence cap.
+    private const val PERSIST_LIMIT_PER_ROOM = 100
 
     /**
      * Load messages from persistence for a room
@@ -101,10 +166,9 @@ object MessageStore {
         }
     }
     
-    /**
-     * Persist message to Room Database (background, non-blocking)
-     */
+    /** Persist message (background). Strips the runtime-only delimiter. */
     private fun persistMessage(roomJid: String, message: Message) {
+        if (message.id == "delimiter-new") return
         val cache = messageCache ?: return
         persistenceScope.launch {
             persistenceMutex.withLock {
@@ -118,19 +182,18 @@ object MessageStore {
             }
         }
     }
-    
-    /**
-     * Persist multiple messages to Room Database (background, non-blocking)
-     */
+
+    /** Persist messages (background). Strips the runtime-only delimiter. */
     private fun persistMessages(roomJid: String, messages: List<Message>) {
         val cache = messageCache ?: return
         persistenceScope.launch {
             persistenceMutex.withLock {
                 try {
-                    val messagesToSave = if (messages.size > PERSIST_LIMIT_PER_ROOM) {
-                        messages.takeLast(PERSIST_LIMIT_PER_ROOM)
+                    val filtered = messages.filterNot { it.id == "delimiter-new" }
+                    val messagesToSave = if (filtered.size > PERSIST_LIMIT_PER_ROOM) {
+                        filtered.takeLast(PERSIST_LIMIT_PER_ROOM)
                     } else {
-                        messages
+                        filtered
                     }
                     cache.saveMessages(messagesToSave)
                 } catch (e: Exception) {
@@ -153,10 +216,11 @@ object MessageStore {
      */
     fun setMessagesForRoom(roomJid: String, messages: List<Message>) {
         val currentMessages = _messages.value.toMutableMap()
-        currentMessages[roomJid] = messages
+        val normalized = withDelimiter(roomJid, messages.filterNot { it.id == "delimiter-new" })
+        currentMessages[roomJid] = normalized
         _messages.value = currentMessages
-        if (messages.isNotEmpty()) {
-            updateRoomLastMessage(roomJid, messages)
+        if (normalized.isNotEmpty()) {
+            updateRoomLastMessage(roomJid, normalized)
         }
     }
 
@@ -205,11 +269,11 @@ object MessageStore {
                 )
                 roomMessages[existingIndex] = updatedMessage
                 android.util.Log.d("MessageStore", "✅ Updated pending message ${existingMessage.id} (matched by ID/xmppId)")
-                
-                val sorted = roomMessages.sortedForUi()
+
+                val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
                 currentMessages[roomJid] = sorted
                 _messages.value = currentMessages
-                
+
                 persistMessage(roomJid, updatedMessage)
                 updateRoomLastMessage(roomJid, sorted)
                 com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
@@ -220,15 +284,15 @@ object MessageStore {
                 return false
             }
         }
-        
+
         // No match, add as new message
         roomMessages.add(message)
         android.util.Log.d("MessageStore", "✅ Added new message ${message.id}")
-        
-        val sorted = roomMessages.sortedForUi()
+
+        val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
         currentMessages[roomJid] = sorted
         _messages.value = currentMessages
-        
+
         persistMessage(roomJid, message)
         updateRoomLastMessage(roomJid, sorted)
         com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
@@ -260,7 +324,7 @@ object MessageStore {
             if (index >= 0) {
                 val updated = roomMessages[index].copy(pending = false)
                 roomMessages[index] = updated
-                val sorted = roomMessages.sortedForUi()
+                val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
                 currentMessages[roomJid] = sorted
                 _messages.value = currentMessages
                 persistMessage(roomJid, updated)
@@ -384,8 +448,8 @@ object MessageStore {
             )
             roomMessages[pendingIndex] = updatedMessage
             android.util.Log.d("MessageStore", "✅ Matched pending message ${pendingMessage.id} with received message ${receivedMessage.id} (${if (isFromCurrentUser) "current user" else "content match"})")
-            
-            val sorted = roomMessages.sortedForUi()
+
+            val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
             
@@ -455,8 +519,8 @@ object MessageStore {
         if (messagesToAdd.isEmpty() && pendingResolved.isEmpty()) return
 
         roomMessages.addAll(messagesToAdd)
-        // Sort ascending by timestamp; newest ends up at the end (reverseLayout=false renders at bottom).
-        val sorted = roomMessages.sortedForUi()
+        // Sort ascending; newest ends up at the tail (reverseLayout=false).
+        val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
         currentMessages[roomJid] = sorted
         _messages.value = currentMessages
 
@@ -555,7 +619,7 @@ object MessageStore {
         val index = roomMessages.indexOfFirst { it.id == message.id }
         if (index >= 0) {
             roomMessages[index] = message
-            val sorted = roomMessages.sortedForUi()
+            val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
             persistMessage(roomJid, message)
@@ -634,7 +698,7 @@ object MessageStore {
             val originalMessage = roomMessages[index]
             val updatedMessage = originalMessage.copy(body = newText)
             roomMessages[index] = updatedMessage
-            val sorted = roomMessages.sortedForUi()
+            val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
             android.util.Log.d("MessageStore", "✏️ Edited message $messageId in $roomJid")
@@ -677,7 +741,7 @@ object MessageStore {
             
             val updatedMessage = originalMessage.copy(reaction = existingReactions)
             roomMessages[index] = updatedMessage
-            val sorted = roomMessages.sortedForUi()
+            val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
             android.util.Log.d("MessageStore", "😀 Updated reaction for message $messageId in $roomJid: from=$fromId, reactions=$reactions")

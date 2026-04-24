@@ -143,20 +143,33 @@ object RoomStore {
     }
 
     /**
-     * Update room
+     * Authoritative update — trusts the incoming [room] as-is (including
+     * intentional zero counters). Does NOT run through
+     * `mergeSingleRoomPlaceholder`; that helper is only for API-sourced
+     * rooms and would revert zero unread/pending back to stale values.
+     * `presenceReady` is sticky.
      */
     fun updateRoom(room: Room) {
         val currentRooms = _rooms.value.toMutableList()
         val index = currentRooms.indexOfFirst { it.id == room.id || it.jid == room.jid }
         if (index >= 0) {
-            currentRooms[index] = mergeSingleRoomPlaceholder(room, currentRooms[index])
+            val existing = currentRooms[index]
+            val next = if (room.presenceReady || !existing.presenceReady) {
+                room
+            } else {
+                room.copy(presenceReady = true)
+            }
+            currentRooms[index] = next
             _rooms.value = currentRooms
-            // Persist rooms (background)
             persistRooms()
+            if (_currentRoom.value?.id == room.id || _currentRoom.value?.jid == room.jid) {
+                _currentRoom.value = next
+                persistCurrentRoomJid()
+            }
+            return
         }
         if (_currentRoom.value?.id == room.id || _currentRoom.value?.jid == room.jid) {
             _currentRoom.value = room
-            // Persist current room JID (background)
             persistCurrentRoomJid()
         }
     }
@@ -185,20 +198,31 @@ object RoomStore {
      */
     fun setCurrentRoom(room: Room?) {
         val prev = _currentRoom.value
+
+        // While a room is open ChatRoomView keeps lastViewedTimestamp=0.
+        // Bump to "now" before recomputing so a list-switch doesn't flash a
+        // full badge on the outgoing room.
+        if (prev != null && prev.jid != room?.jid && (prev.lastViewedTimestamp ?: 0L) <= 0L) {
+            val now = System.currentTimeMillis()
+            updateRoom(prev.copy(lastViewedTimestamp = now))
+        }
+
         _currentRoom.value = room
         persistCurrentRoomJid()
 
-        // Force the new active room's badge to 0 synchronously.
         if (room != null) {
             val messagesForRoom = com.ethora.chat.core.store.MessageStore.getMessagesForRoom(room.jid)
             updateUnreadCount(room.jid, messagesForRoom)
         }
-        // And re-evaluate the previous active room now that it's backgrounded —
-        // messages that arrived while it was active but marked unread=0 by the
-        // shortcut might need to be counted from now on.
         if (prev != null && prev.jid != room?.jid) {
             val messagesForPrev = com.ethora.chat.core.store.MessageStore.getMessagesForRoom(prev.jid)
             updateUnreadCount(prev.jid, messagesForPrev)
+        }
+
+        // Strip delimiter on new active, (maybe) insert on backgrounded prev.
+        room?.jid?.let { com.ethora.chat.core.store.MessageStore.renormalizeRoomDelimiter(it) }
+        if (prev != null && prev.jid != room?.jid) {
+            com.ethora.chat.core.store.MessageStore.renormalizeRoomDelimiter(prev.jid)
         }
     }
 
@@ -327,6 +351,7 @@ object RoomStore {
                 unreadCapped = false
             )
             updateRoom(updatedRoom)
+            com.ethora.chat.core.store.MessageStore.renormalizeRoomDelimiter(roomJid)
             android.util.Log.d("RoomStore", "📅 lastViewedTimestamp=$timestamp + unread zeroed room=$roomJid")
         }
     }

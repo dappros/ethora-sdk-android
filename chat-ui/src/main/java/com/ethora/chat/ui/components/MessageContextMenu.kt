@@ -45,11 +45,17 @@ fun MessageContextMenu(
     onCopy: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onResend: (() -> Unit)? = null,
     containerWidthPx: Float = 0f,
     containerHeightPx: Float = 0f,
     modifier: Modifier = Modifier
 ) {
     if (!visible || message.isDeleted == true) return
+
+    // Resend is offered only for own pending messages that haven't had a
+    // server echo yet. When the caller doesn't wire an onResend lambda we
+    // treat it as unavailable.
+    val canResend = isUser && message.pending == true && onResend != null
 
     val density = LocalDensity.current
     val configuration = LocalConfiguration.current
@@ -62,9 +68,9 @@ fun MessageContextMenu(
     val menuWidth = 240.dp
     val menuWidthPx = with(density) { menuWidth.toPx() }
     val menuHeightPx = with(density) { 200.dp.toPx() }
-    // For "above" placement: own message = 3 items (~125dp), other = 1 item "Copy" only (~48dp)
+    val ownItemCount = (if (isUser) 3 else 0) + (if (canResend) 1 else 0)
     val menuHeightAbovePx = with(density) {
-        if (isUser) 125.dp.toPx() else 48.dp.toPx()
+        (48.dp + (ownItemCount * 40).dp).toPx()
     }
     val gapPx = with(density) { 8.dp.toPx() }
 
@@ -129,6 +135,20 @@ fun MessageContextMenu(
 
                 // Edit and Delete only for own messages
                 if (isUser) {
+                    if (canResend) {
+                        Divider(
+                            modifier = Modifier.padding(vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                        )
+                        ContextMenuItem(
+                            text = "Resend",
+                            icon = Icons.Default.Refresh,
+                            onClick = {
+                                onResend?.invoke()
+                                onDismiss()
+                            }
+                        )
+                    }
                     Divider(
                         modifier = Modifier.padding(vertical = 4.dp),
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
