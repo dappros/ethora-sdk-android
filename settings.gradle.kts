@@ -19,13 +19,12 @@ rootProject.name = "ethora-chat-android"
 
 include(":ethora-component")
 
-// Include sample app as a single Android-application module under the
-// logical path `:sample-chat-app`. The actual project lives in the
-// `sample-chat-app/app/` directory (the sample keeps its own `app`
-// subfolder so it can also be opened/built standalone via its own
-// wrapper in `sample-chat-app/`). Redirecting the projectDir here lets
-// you run from the SDK root:
-//     ./gradlew :sample-chat-app:installDebug
-// without any restructuring of the sample source layout.
-include(":sample-chat-app")
-project(":sample-chat-app").projectDir = file("sample-chat-app/app")
+// Note: `:sample-chat-app` was previously included here as a nested
+// module, but the sample was extracted to its own repository
+// (dappros/ethora-sample-android) on 2026-04-21 and the
+// `sample-chat-app/` directory no longer exists in this repo.
+// Re-including it makes Gradle fail configuration before any task
+// can run. Host apps now consume the SDK either via JitPack
+// (com.github.dappros:ethora-sdk-android) or via a composite build
+// (`includeBuild` pointing at this repo from the sample's
+// settings.gradle.kts).
