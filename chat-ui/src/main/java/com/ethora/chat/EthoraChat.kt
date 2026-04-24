@@ -284,8 +284,18 @@ fun Chat(
             } else currentUser?.let { user ->
                 user.xmppUsername?.let { username ->
                     user.xmppPassword?.let { password ->
-                        android.util.Log.d("EthoraChat", "🏗️ Creating new XMPPClient for $username")
-                        val client = XMPPClient(
+                        android.util.Log.d("EthoraChat", "🏗️ Acquiring XMPPClient for $username via registry")
+                        // Route the fallback (non-bootstrap) path through the
+                        // process-wide XMPPClientRegistry. When the host app
+                        // doesn't call EthoraChatBootstrap.initialize(), the
+                        // Chat subtree can still be disposed/remounted by
+                        // BottomNav or other host-side composition churn,
+                        // and the `remember(...)` slot above would otherwise
+                        // allocate a fresh XMPPClient per mount — racing
+                        // multiple clients to SASL/bind the same JID and
+                        // getting kicked by ejabberd. The registry keeps a
+                        // single cached instance per username.
+                        val client = com.ethora.chat.internal.XMPPClientRegistry.getOrCreate(
                             username = username,
                             password = password,
                             settings = config.xmppSettings,
