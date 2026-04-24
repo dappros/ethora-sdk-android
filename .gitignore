@@ -6,6 +6,17 @@
 
 claude.md
 
+<<<<<<< tf-reconcile-v1.0.22
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
+
+# Ad-hoc debug log dumps (never commit — use LogStore copy-all instead)
+latest-logs.txt
+*.logs.txt
+
+=======
+>>>>>>> main
 # Built application files
 *.apk
 *.aar

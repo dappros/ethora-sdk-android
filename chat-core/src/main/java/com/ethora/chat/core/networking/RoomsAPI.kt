@@ -24,7 +24,7 @@ interface RoomsAPI {
     suspend fun createRoom(
         @Header("x-app-id") appId: String = AppConfig.defaultAppId,
         @Body body: CreateRoomRequest
-    ): Response<ApiRoom>
+    ): Response<CreateRoomResponse>
 
     @POST("chats/{chatName}/report-message")
     suspend fun reportMessage(
@@ -37,8 +37,20 @@ interface RoomsAPI {
     suspend fun createPrivateRoom(
         @Header("x-app-id") appId: String = AppConfig.defaultAppId,
         @Body body: CreatePrivateRoomRequest
-    ): Response<ApiRoom>
+    ): Response<CreateRoomResponse>
 }
+
+/**
+ * POST /chats and POST /chats/private responses are wrapped in a
+ * `{"result": {...}}` envelope by the Ethora backend. GET /chats/my
+ * is NOT wrapped (returns `{items: [...]}` directly) — so the
+ * wrapper is specific to the create endpoints. Matches the React
+ * SDK's postRoom in sdk-reactjs/lib/src/networking/api-requests/
+ * rooms.api.ts which reads `response.data.result`.
+ */
+data class CreateRoomResponse(
+    val result: ApiRoom?
+)
 
 /**
  * Rooms response
@@ -122,7 +134,10 @@ object RoomsAPIHelper {
             )
         )
         if (response.isSuccessful) {
-            return response.body()!!
+            val wrapper = response.body()
+                ?: throw Exception("Failed to create room: empty response body")
+            return wrapper.result
+                ?: throw Exception("Failed to create room: response missing 'result' field")
         } else {
             throw Exception("Failed to create room: ${response.code()} ${response.message()}")
         }
@@ -162,7 +177,10 @@ object RoomsAPIHelper {
             CreatePrivateRoomRequest(username = username)
         )
         if (response.isSuccessful) {
-            return response.body()!!
+            val wrapper = response.body()
+                ?: throw Exception("Failed to create private room: empty response body")
+            return wrapper.result
+                ?: throw Exception("Failed to create private room: response missing 'result' field")
         } else {
             throw Exception("Failed to create private room: ${response.code()} ${response.message()}")
         }
