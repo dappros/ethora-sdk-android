@@ -30,7 +30,7 @@ This package ships a complete chat experience (room list + room view + media + r
 - Real-time messaging over XMPP WebSocket.
 - History loading + incremental sync after reconnect.
 - Unread counters and host-facing connection status hook.
-- Media messages (image/video/audio/files), full-screen image viewer, PDF/web preview support.
+- Media messages (image/video/audio/files), persistent unsent-media retry queue, full-screen image viewer, and native cached PDF preview.
 - Message actions: edit, delete, reply, reactions.
 - Typing indicators.
 - URL auto-linking + URL preview cards.
@@ -397,6 +397,11 @@ Notes:
 
 - Rooms/user/tokens persisted via DataStore (`ChatPersistenceManager`).
 - Messages persisted in Room DB (`chat_database`, table `messages`) via `MessageStore` + `MessageCache`.
+- Unsent media/file messages are persisted separately from chat history via `PendingMediaSendQueue`.
+  - queued items keep their optimistic message visible
+  - upload/XMPP failures retry after reconnect or app foreground
+  - uploaded payloads are reused when only the XMPP send step failed
+  - app-private pending files are removed after send success or logout cleanup
 - Loader behavior:
   - cache-first rooms/messages for fast startup
   - API refresh for rooms
@@ -448,6 +453,17 @@ LogoutService.setOnLogoutCallback {
 
 - Ensure user token and refresh token are valid.
 - Ensure `customAppToken` is set for your backend app.
+
+### File/PDF send stays pending
+
+- The SDK now keeps unsent media visible and retries automatically on reconnect/app foreground.
+- Check `useConnectionState()` and XMPP logs if items remain in `failed, will retry`.
+- If a queued local file was deleted by host cleanup, the message will keep failing until the user resends the file.
+
+### PDF preview fails but download works
+
+- Current builds use native `PdfRenderer`; no hosted PDF.js page is required.
+- Confirm the file URL returns valid PDF bytes and is reachable from the device.
 
 ## Production Checklist
 

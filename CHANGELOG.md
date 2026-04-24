@@ -4,6 +4,19 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.04.24] — JitPack `v1.0.25`
+
+- **New:** Persistent media/file send queue (`PendingMediaSendQueue`) stored separately from cached chat messages; unsent image/video/audio/file/PDF messages stay visible and retry after reconnect or app foreground instead of disappearing.
+- **Improved:** Text send responsiveness — the input clears and the optimistic message is added before XMPP presence/socket work, reducing perceived send-button lag.
+- **Improved:** Media upload flow preserves selected file names/extensions in app-private `pending_uploads`, including `.pdf`, and reuses uploaded payloads when only the XMPP send step needs retry.
+- **Improved:** XMPP recovery resets `reconnectAttempts` after full connection and when the app returns to foreground, allowing recovery after background/foreground transitions.
+- **Improved:** Bootstrap and connection reliability: shared XMPP client registry, foreground retry hooks, reconnect delta sync, and safer bootstrap reuse across `EthoraChatProvider` / `Chat` remounts.
+- **Improved:** Message history and unread behavior: new-message delimiter support, last-viewed synchronization hardening, and cache/RoomStore reconciliation updates.
+- **Fixed:** File/PDF sends could be removed from the UI when upload or XMPP send failed.
+- **Fixed:** Received PDFs could download successfully but fail to open inside the in-app PDF viewer.
+- **Fixed:** Create-chat room deserialization and room type lower-case JSON handling.
+- **Fixed:** XMPP bind/result matching and WebSocket media/data stanza handling edge cases.
+
 ## [26.04.23]
 
 - **New:** `initBeforeLoad` config flag now wired — when set, SDK runs full web-parity bootstrap (user → rooms → XMPP → private-store sync → per-room history preload) before `Chat` mounts, so `useUnread()` reflects real server counts on first render
