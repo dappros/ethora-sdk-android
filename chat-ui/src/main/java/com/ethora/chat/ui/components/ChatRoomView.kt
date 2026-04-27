@@ -635,6 +635,20 @@ fun ChatRoomView(
                                             )
                                         )
                                     } else {
+                                        val pendingMediaItem = pendingMediaItems
+                                            .firstOrNull { it.messageId == message.id }
+                                        val pendingMediaStatus = pendingMediaItem?.status
+                                        val sendFailed = isUser && (
+                                            pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.FAILED_WAITING_RETRY ||
+                                                pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.PERMANENTLY_FAILED ||
+                                                ((message.pending == true || pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.QUEUED) &&
+                                                    connectionState.status != ChatConnectionStatus.ONLINE)
+                                        )
+                                        val openFailedActions = { tapX: Float, tapY: Float, left: Float, top: Float, right: Float, bottom: Float ->
+                                            contextMenuMessage = message
+                                            contextMenuTap = Pair(tapX, tapY)
+                                            contextMenuBounds = Pair(left, top) to Pair(right, bottom)
+                                        }
                                         MessageBubble(
                                             message = message,
                                             isUser = isUser,
@@ -647,10 +661,10 @@ fun ChatRoomView(
                                             // is visual noise. `isLastInGroup` is already computed
                                             // above from chronological neighbours + time window.
                                             showTimestamp = isLastInGroup,
-                                            pendingMediaStatus = pendingMediaItems
-                                                .firstOrNull { it.messageId == message.id }
-                                                ?.status,
+                                            pendingMediaStatus = pendingMediaStatus,
+                                            sendFailed = sendFailed,
                                             onMediaClick = { msg -> previewMessage = msg },
+                                            onFailedClick = openFailedActions,
                                             onLongPress = { tapX, tapY, left, top, right, bottom ->
                                                 contextMenuMessage = message
                                                 contextMenuTap = Pair(tapX, tapY)
@@ -893,9 +907,8 @@ fun ChatRoomView(
 
         // Input (disable media if config says so)
         val disableMedia = config?.disableMedia == true
-        val canSendMessage = connectionState.status == ChatConnectionStatus.ONLINE
+        val canSendMessage = true
         val handleSendMessage: (String, String?) -> Unit = sendHandler@{ text, parentId ->
-            if (!canSendMessage && editMessageId == null) return@sendHandler
             if (editMessageId != null) {
                 // Edit mode: edit existing message
                 viewModel.editMessage(editMessageId!!, text)
@@ -922,7 +935,6 @@ fun ChatRoomView(
             viewModel.sendStopTyping()
         }
         val handleSendMedia: ((java.io.File, String) -> Unit)? = if (disableMedia) null else mediaHandler@{ file, mimeType ->
-            if (!canSendMessage) return@mediaHandler
             viewModel.sendMedia(file, mimeType)
             // Same always-scroll-on-send rule for media.
             pendingOwnMessageAutoScroll = true
@@ -940,7 +952,6 @@ fun ChatRoomView(
                 SendInputProps(
                     onSendMessage = { text -> handleSendMessage(text, replyingToMessage?.id) },
                     onSendMedia = if (handleSendMedia == null) null else mediaBytes@{ bytes, mime ->
-                        if (!canSendMessage) return@mediaBytes
                         viewModel.sendMedia(bytes, mime)
                     },
                     placeholderText = "Type a message...",

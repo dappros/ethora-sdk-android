@@ -1056,7 +1056,13 @@ class ChatRoomViewModel(
             !existing.location.isNullOrBlank() ||
             !existing.fileName.isNullOrBlank()
         if (isMedia) {
-            android.util.Log.w("ChatRoomViewModel", "Resend for media messages is not supported yet ($messageId)")
+            val queued = PendingMediaSendQueue.retryNow(messageId)
+            if (queued == null) {
+                android.util.Log.w("ChatRoomViewModel", "Retry requested for media message without queued item ($messageId)")
+                return
+            }
+            MessageStore.updateMessage(room.jid, existing.copy(pending = true))
+            processPendingMediaQueue()
             return
         }
         val body = existing.body
@@ -1070,6 +1076,18 @@ class ChatRoomViewModel(
      * Optimistic update so UI updates immediately; server echo will confirm via parseAndHandleDeleteMessage.
      */
     fun deleteMessage(messageId: String) {
+        val existing = MessageStore.getMessagesForRoom(room.jid)
+            .firstOrNull { it.id == messageId }
+        val queuedMedia = PendingMediaSendQueue.getByMessageId(messageId)
+        if (queuedMedia != null) {
+            PendingMediaSendQueue.remove(queuedMedia.id, deleteLocalFile = true)
+            MessageStore.removeMessage(room.jid, messageId)
+            return
+        }
+        if (existing?.pending == true) {
+            MessageStore.removeMessage(room.jid, messageId)
+            return
+        }
         MessageStore.markMessageAsDeleted(room.jid, messageId)
         ChatEventDispatcher.emit(
             ChatEvent.MessageDeleted(

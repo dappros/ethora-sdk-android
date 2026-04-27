@@ -82,11 +82,19 @@ fun Chat(
     val localStorage = remember { LocalStorage(context) }
 
     ChatStore.setConfig(config)
+    ChatStore.validateServerConfig(config)?.let { error ->
+        ConnectionStore.setState(
+            status = ChatConnectionStatus.ERROR,
+            reason = error,
+            isRecovering = false
+        )
+        return
+    }
     PendingMediaSendQueue.initialize(context)
 
     // Set base URL and app token immediately (mirrors React: setBaseURL in LoginWrapper useEffect)
     // Must run before any API call - config values replace defaults project-wide
-    val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
+    val baseUrl = ChatStore.getEffectiveBaseUrl()
     ApiClient.setBaseUrl(baseUrl, config.customAppToken)
 
     // Auto-trigger initBeforeLoad bootstrap when the config asks for it.

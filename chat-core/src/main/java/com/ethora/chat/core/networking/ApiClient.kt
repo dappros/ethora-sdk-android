@@ -24,13 +24,13 @@ object ApiClient {
     private var retrofit: Retrofit? = null
     private var appToken: String = AppConfig.defaultAppToken
     private var userToken: String? = null
-    internal var storedBaseUrl: String = AppConfig.defaultBaseURL
+    internal var storedBaseUrl: String? = null
 
     // Single-flight refresh guard (OkHttp Authenticator can be called concurrently).
     private val refreshLock = Any()
 
     /** Public getter for use in inline function defaults (avoids internal visibility in inline) */
-    fun getStoredBaseUrl(): String = storedBaseUrl
+    fun getStoredBaseUrl(): String = storedBaseUrl ?: ChatStore.getEffectiveBaseUrl()
 
     /**
      * Set app token
@@ -51,6 +51,7 @@ object ApiClient {
      * Set base URL and app token
      */
     fun setBaseUrl(baseUrl: String, appToken: String? = null) {
+        if (baseUrl.isBlank()) throw IllegalArgumentException("ChatConfig.baseUrl is required")
         storedBaseUrl = baseUrl
         appToken?.let { setAppToken(it) }
         retrofit = null
@@ -96,10 +97,13 @@ object ApiClient {
                 if (explicitAuthHeader.isNullOrBlank()) {
                     // Prefer the latest token from UserStore if available.
                     val latestUserToken = UserStore.token.value ?: userToken
-                    if (!isAuthEndpoint(requestUrl) && !latestUserToken.isNullOrBlank()) {
-                        builder.header("Authorization", latestUserToken)
+                    val token = if (!isAuthEndpoint(requestUrl) && !latestUserToken.isNullOrBlank()) {
+                        latestUserToken
                     } else {
-                        builder.header("Authorization", appToken)
+                        appToken
+                    }
+                    if (token.isNotBlank()) {
+                        builder.header("Authorization", token)
                     }
                 }
                 

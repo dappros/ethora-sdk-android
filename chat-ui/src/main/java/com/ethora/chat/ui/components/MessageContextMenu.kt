@@ -141,7 +141,7 @@ fun MessageContextMenu(
                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
                         )
                         ContextMenuItem(
-                            text = "Resend",
+                            text = "Retry",
                             icon = Icons.Default.Refresh,
                             onClick = {
                                 onResend?.invoke()
@@ -149,18 +149,20 @@ fun MessageContextMenu(
                             }
                         )
                     }
-                    Divider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
-                    )
-                    ContextMenuItem(
-                        text = "Edit",
-                        icon = Icons.Default.Edit,
-                        onClick = {
-                            onEdit()
-                            onDismiss()
-                        }
-                    )
+                    if (!canResend) {
+                        Divider(
+                            modifier = Modifier.padding(vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                        )
+                        ContextMenuItem(
+                            text = "Edit",
+                            icon = Icons.Default.Edit,
+                            onClick = {
+                                onEdit()
+                                onDismiss()
+                            }
+                        )
+                    }
                     Divider(
                         modifier = Modifier.padding(vertical = 4.dp),
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
@@ -214,4 +216,3 @@ private fun ContextMenuItem(
         )
     }
 }
-

@@ -155,6 +155,50 @@ fun initEthoraSdk(context: Context) {
 }
 ```
 
+### Pre-loading data before the Chat tab opens
+
+If your host shell (Activity, Service, or Application) needs the unread count
+before the user has ever opened the chat tab — or if your chat screen is lazily
+instantiated and may not mount for a while — call
+`EthoraChatBootstrap.initializeAsync` right after `initEthoraSdk`:
+
+```kotlin
+import com.ethora.chat.EthoraChatBootstrap
+import com.ethora.chat.core.config.ChatConfig
+import com.ethora.chat.core.config.JWTLoginConfig
+import com.ethora.chat.core.config.XMPPSettings
+
+class MyApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        initEthoraSdk(this)
+
+        val config = ChatConfig(
+            appId = "YOUR_APP_ID",
+            baseUrl = "https://api.your-domain.com/v1",
+            customAppToken = "JWT <YOUR_APP_TOKEN>",
+            xmppSettings = XMPPSettings(
+                xmppServerUrl = "wss://xmpp.your-domain.com/ws",
+                host = "xmpp.your-domain.com",
+                conference = "conference.xmpp.your-domain.com"
+            ),
+            jwtLogin = JWTLoginConfig(token = "<USER_JWT>", enabled = true)
+        )
+        EthoraChatBootstrap.initializeAsync(applicationContext, config)
+    }
+}
+```
+
+Once the bootstrap finishes, `RoomStore.rooms` and all unread APIs reflect real
+server state — without the `Chat` composable ever mounting. The same config and
+XMPP socket are reused when the user eventually opens the chat tab, so no second
+connection is opened.
+
+**Config validation:** if `baseUrl` or `xmppSettings` is missing,
+`EthoraChatBootstrap.initialize` aborts immediately, sets
+`ChatConnectionStatus.ERROR` with a descriptive message, and never attempts an
+XMPP connection. It will not fall back to any built-in server.
+
 ## Quick Start
 
 ```kotlin
@@ -250,12 +294,46 @@ Room list is shown first, then chat room screen.
 
 ### Unread state
 
+Compose:
+
 ```kotlin
 import com.ethora.chat.useUnread
 
 val unread = useUnread(maxCount = 99)
 // unread.totalCount: Int
 // unread.displayCount: String (e.g. "99+")
+```
+
+Kotlin / Java UI outside Compose:
+
+```kotlin
+import com.ethora.chat.EthoraChatBootstrap
+import kotlinx.coroutines.flow.Flow
+
+val unreadFlow: Flow<Int> = EthoraChatBootstrap.unreadCount()
+
+val registration = EthoraChatBootstrap.addUnreadListener { count ->
+    // update native badge
+}
+
+registration.close()
+```
+
+Java (from Activity, Service, or any non-Compose context):
+
+```java
+// Register
+AutoCloseable reg = EthoraChatBootstrap.addUnreadListener(count -> updateChatBadge(count));
+
+// Unregister (e.g. in onDestroy or on logout)
+reg.close();
+```
+
+Observe whether the background bootstrap has finished:
+
+```kotlin
+// StateFlow<Boolean> — true once EthoraChatBootstrap.initialize() completes
+EthoraChatBootstrap.isInitialized
 ```
 
 ### Connection state + reconnect
@@ -275,6 +353,8 @@ reconnectChat()
 ## ChatConfig Reference
 
 `ChatConfig` contains many fields for cross-platform parity. Not every field is fully wired in this Android package version.
+
+`appId`, `baseUrl`, and `xmppSettings` are required. If any of these is absent or invalid, `EthoraChatBootstrap.initialize` aborts immediately, emits `ChatConnectionStatus.ERROR` with a descriptive reason string, and never opens an XMPP connection. The SDK does not fall back to any built-in or Ethora-hosted endpoint — a missing `baseUrl` is a hard failure, not a redirect.
 
 ### Core fields (actively used)
 
@@ -399,15 +479,17 @@ Notes:
 - Messages persisted in Room DB (`chat_database`, table `messages`) via `MessageStore` + `MessageCache`.
 - Unsent media/file messages are persisted separately from chat history via `PendingMediaSendQueue`.
   - queued items keep their optimistic message visible
-  - upload/XMPP failures retry after reconnect or app foreground
+  - upload/XMPP failures show an inline warning with Retry/Delete actions
+  - transient failures retry after reconnect/app foreground, then become permanently failed after the retry limit
   - uploaded payloads are reused when only the XMPP send step failed
-  - app-private pending files are removed after send success or logout cleanup
+  - app-private pending files are removed after send success, user discard, or logout cleanup
+- Text sends attempted while offline stay visible as failed pending bubbles so users can retry or delete them instead of losing the draft silently.
 - Loader behavior:
   - cache-first rooms/messages for fast startup
   - API refresh for rooms
   - initial XMPP history load per room
   - incremental sync after reconnect
-- DNS fallback map supported via `dnsFallbackOverrides` for emulator/network edge cases.
+- DNS fallback map supported via `dnsFallbackOverrides` for emulator/network edge cases. Only explicit host-provided overrides are used.
 
 ## Logout
 
@@ -456,9 +538,9 @@ LogoutService.setOnLogoutCallback {
 
 ### File/PDF send stays pending
 
-- The SDK now keeps unsent media visible and retries automatically on reconnect/app foreground.
-- Check `useConnectionState()` and XMPP logs if items remain in `failed, will retry`.
-- If a queued local file was deleted by host cleanup, the message will keep failing until the user resends the file.
+- The SDK keeps unsent media visible and offers Retry/Delete on failed bubbles.
+- Check `useConnectionState()` and XMPP logs if items remain failed.
+- If a queued local file was deleted by host cleanup, the message can be discarded by the user.
 
 ### PDF preview fails but download works
 
@@ -467,9 +549,8 @@ LogoutService.setOnLogoutCallback {
 
 ## Production Checklist
 
-- Replace demo/default endpoints and app tokens.
-- Always provide your own `customAppToken` and `appId`.
-- Do not rely on default token embedded in `AppConfig` for production.
+- Always provide your own `baseUrl`, `appId`, `xmppSettings`, and production token values.
+- The SDK does not redirect to built-in Ethora endpoints when configuration is missing.
 - Pin SDK dependency to a tag/commit you have tested.
 - Add host analytics via `onChatEvent`.
 - Add host moderation/compliance hooks via `onBeforeSend`.

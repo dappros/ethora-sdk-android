@@ -24,6 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.ethora.chat.core.store.PendingMediaSendQueue
+import com.ethora.chat.core.util.FileSizeFormatter
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -217,7 +218,7 @@ fun ChatInput(
                                 maxLines = 1
                             )
                             Text(
-                                text = formatFileSize(file.length()),
+                                text = FileSizeFormatter.format(file.length()),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                             )
@@ -377,7 +378,6 @@ fun ChatInput(
                 if (text.isNotBlank() || selectedFile != null || editText != null) {
                     FloatingActionButton(
                         onClick = {
-                            if (!canSendMessage) return@FloatingActionButton
                             // Always pause typing on send — bounds XMPP traffic and matches
                             // the user's actual state (they finished composing this message).
                             idleTypingJob?.cancel()
@@ -537,13 +537,4 @@ private fun uniqueFile(directory: File, fileName: String): File {
         index++
     }
     return candidate
-}
-
-private fun formatFileSize(bytes: Long): String {
-    return when {
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> String.format("%.2f KB", bytes / 1024.0)
-        bytes < 1024 * 1024 * 1024 -> String.format("%.2f MB", bytes / (1024.0 * 1024.0))
-        else -> String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0))
-    }
 }

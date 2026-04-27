@@ -15,6 +15,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.util.FileSizeFormatter
 
 /**
  * Media message component - displays images, videos, audio, or files based on mimetype
@@ -22,6 +23,7 @@ import com.ethora.chat.core.models.Message
 @Composable
 fun MediaMessage(
     message: Message,
+    isUser: Boolean,
     onMediaClick: (Message) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -64,6 +66,7 @@ fun MediaMessage(
                 mimeType = mimeType,
                 size = message.size,
                 previewUrl = previewUrl,
+                isUser = isUser,
                 onClick = { onMediaClick(message) },
                 modifier = modifier
             )
@@ -220,61 +223,65 @@ private fun FileMessage(
     mimeType: String,
     size: String?,
     previewUrl: String?,
+    isUser: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(
+    val contentColor = if (isUser) {
+        MaterialTheme.colorScheme.onPrimary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Row(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+            .clickable(onClick = onClick)
+            .widthIn(max = 300.dp)
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .widthIn(max = 300.dp)
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        // Show preview image if available, otherwise show file icon
+        if (previewUrl != null && previewUrl.isNotBlank()) {
+            AsyncImage(
+                model = previewUrl,
+                contentDescription = fileName,
+                modifier = Modifier
+                    .size(60.dp)
+                    .clip(RoundedCornerShape(8.dp)),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Icon(
+                imageVector = when {
+                    mimeType.contains("pdf") -> Icons.Default.PictureAsPdf
+                    else -> Icons.Default.InsertDriveFile
+                },
+                contentDescription = "File",
+                modifier = Modifier.size(48.dp),
+                tint = contentColor.copy(alpha = 0.9f)
+            )
+        }
+
+        Column(
+            modifier = Modifier.weight(1f)
         ) {
-            // Show preview image if available, otherwise show file icon
-            if (previewUrl != null && previewUrl.isNotBlank()) {
-                AsyncImage(
-                    model = previewUrl,
-                    contentDescription = fileName,
-                    modifier = Modifier.size(60.dp),
-                    contentScale = ContentScale.Crop
-                )
-            } else {
-                Icon(
-                    imageVector = when {
-                        mimeType.contains("pdf") -> Icons.Default.PictureAsPdf
-                        else -> Icons.Default.InsertDriveFile
-                    },
-                    contentDescription = "File",
-                    modifier = Modifier.size(48.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
-            
-            Column(
-                modifier = Modifier.weight(1f)
-            ) {
+            Text(
+                text = formatFileName(fileName, 20),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = FontWeight.Medium
+                ),
+                color = contentColor,
+                maxLines = 1
+            )
+            if (size != null) {
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = formatFileName(fileName, 20),
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        fontWeight = FontWeight.Medium
-                    ),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1
+                    text = FileSizeFormatter.format(size),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = contentColor.copy(alpha = 0.72f)
                 )
-                if (size != null) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = formatFileSize(size),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
-                }
             }
         }
     }
@@ -293,19 +300,5 @@ private fun formatFileName(name: String, maxLength: Int): String {
     } else {
         val shortenedBaseName = baseName.substring(0, maxLength - extension.length - 3)
         "$shortenedBaseName...$extension"
-    }
-}
-
-/**
- * Format file size
- */
-private fun formatFileSize(sizeInBytes: String): String {
-    val size = sizeInBytes.toLongOrNull() ?: return "Unknown size"
-    
-    return when {
-        size < 1024 -> "$size B"
-        size < 1024 * 1024 -> String.format("%.2f KB", size / 1024.0)
-        size < 1024 * 1024 * 1024 -> String.format("%.2f MB", size / (1024.0 * 1024.0))
-        else -> String.format("%.2f GB", size / (1024.0 * 1024.0 * 1024.0))
     }
 }

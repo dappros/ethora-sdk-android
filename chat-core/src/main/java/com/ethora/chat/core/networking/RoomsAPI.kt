@@ -1,6 +1,5 @@
 package com.ethora.chat.core.networking
 
-import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.models.ApiRoom
 import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.models.Room
@@ -14,15 +13,13 @@ import retrofit2.http.*
  */
 interface RoomsAPI {
     @GET("chats/my")
-    @Headers("x-app-id: ${AppConfig.defaultAppId}")
     suspend fun getRooms(
-        @Header("x-app-id") appId: String = AppConfig.defaultAppId
+        @Header("x-app-id") appId: String
     ): Response<RoomsResponse>
 
     @POST("chats")
-    @Headers("x-app-id: ${AppConfig.defaultAppId}")
     suspend fun createRoom(
-        @Header("x-app-id") appId: String = AppConfig.defaultAppId,
+        @Header("x-app-id") appId: String,
         @Body body: CreateRoomRequest
     ): Response<CreateRoomResponse>
 
@@ -33,9 +30,8 @@ interface RoomsAPI {
     ): Response<Unit>
 
     @POST("chats/private")
-    @Headers("x-app-id: ${AppConfig.defaultAppId}")
     suspend fun createPrivateRoom(
-        @Header("x-app-id") appId: String = AppConfig.defaultAppId,
+        @Header("x-app-id") appId: String,
         @Body body: CreatePrivateRoomRequest
     ): Response<CreateRoomResponse>
 }

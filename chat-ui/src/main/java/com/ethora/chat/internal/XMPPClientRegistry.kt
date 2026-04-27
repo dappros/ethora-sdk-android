@@ -24,7 +24,7 @@ import com.ethora.chat.core.xmpp.XMPPClient
  *
  * [EthoraChatBootstrap.sharedXmppClient] solves this for hosts that
  * call `EthoraChatBootstrap.initialize(...)` at app startup; the
- * registry is the fallback for hosts that don't, so transport churn
+ * registry covers hosts that don't, so transport churn
  * from compose lifecycle quirks doesn't depend on the host opting in
  * to bootstrap.
  *
@@ -45,9 +45,8 @@ internal object XMPPClientRegistry {
      * [dnsFallbackOverrides]. Switching users disconnects the previous
      * client before returning the new one.
      *
-     * Nullability mirrors the XMPPClient constructor: both [settings]
-     * and [dnsFallbackOverrides] are optional, defaulting to the
-     * XMPPClient's own fallbacks when absent.
+     * [settings] must come from host configuration. The SDK does not supply
+     * default XMPP endpoints when it is absent.
      */
     @Synchronized
     fun getOrCreate(

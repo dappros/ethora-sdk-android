@@ -54,8 +54,10 @@ fun MessageBubble(
     showTimestamp: Boolean = true,
     onMediaClick: ((Message) -> Unit)? = null,
     onLongPress: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
+    onFailedClick: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onAvatarClick: ((User) -> Unit)? = null,
     pendingMediaStatus: PendingMediaSendStatus? = null,
+    sendFailed: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -70,11 +72,26 @@ fun MessageBubble(
             .onGloballyPositioned { rowCoordinates = it }
             .pointerInput(message.id) {
                 detectTapGestures(
+                    onTap = { offset ->
+                        if (sendFailed && onFailedClick != null) {
+                            val rowCoords = rowCoordinates
+                            val coordsForBounds = surfaceCoordinates ?: bubbleCoordinates ?: rowCoords
+                            if (coordsForBounds != null) {
+                                val tapRoot = (rowCoords ?: coordsForBounds).localToRoot(Offset(offset.x, offset.y))
+                                val topLeft = coordsForBounds.localToRoot(Offset(0f, 0f))
+                                val bottomRight = coordsForBounds.localToRoot(Offset(coordsForBounds.size.width.toFloat(), coordsForBounds.size.height.toFloat()))
+                                onFailedClick.invoke(
+                                    tapRoot.x, tapRoot.y,
+                                    topLeft.x, topLeft.y, bottomRight.x, bottomRight.y
+                                )
+                            }
+                        }
+                    },
                     onLongPress = { offset ->
                         val rowCoords = rowCoordinates
                         val coordsForBounds = surfaceCoordinates ?: bubbleCoordinates ?: rowCoords
                         if (coordsForBounds != null) {
-                            val tapRoot = (rowCoords ?: coordsForBounds)!!.localToRoot(Offset(offset.x, offset.y))
+                            val tapRoot = (rowCoords ?: coordsForBounds).localToRoot(Offset(offset.x, offset.y))
                             val topLeft = coordsForBounds.localToRoot(Offset(0f, 0f))
                             val bottomRight = coordsForBounds.localToRoot(Offset(coordsForBounds.size.width.toFloat(), coordsForBounds.size.height.toFloat()))
                             onLongPress?.invoke(
@@ -192,6 +209,7 @@ fun MessageBubble(
                     // Show media component (only if not deleted)
                     MediaMessage(
                         message = message,
+                        isUser = isUser,
                         onMediaClick = { msg -> onMediaClick?.invoke(msg) },
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
                     )
@@ -239,18 +257,27 @@ fun MessageBubble(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Show "sending..." if pending and it's user's message
-                    if (isUser && (message.pending == true || pendingMediaStatus != null)) {
+                    if (isUser && (message.pending == true || pendingMediaStatus != null || sendFailed)) {
                         Text(
-                            text = when (pendingMediaStatus) {
-                                PendingMediaSendStatus.FAILED_WAITING_RETRY -> "failed, will retry"
-                                PendingMediaSendStatus.READY_TO_SEND -> "retrying..."
-                                PendingMediaSendStatus.UPLOADING -> "sending..."
-                                PendingMediaSendStatus.QUEUED -> "sending..."
-                                PendingMediaSendStatus.SENT,
-                                null -> "sending..."
+                            text = if (sendFailed) {
+                                "⚠ Sending failed. Tap to retry or delete."
+                            } else {
+                                when (pendingMediaStatus) {
+                                    PendingMediaSendStatus.FAILED_WAITING_RETRY -> "failed, will retry"
+                                    PendingMediaSendStatus.PERMANENTLY_FAILED -> "failed"
+                                    PendingMediaSendStatus.READY_TO_SEND -> "retrying..."
+                                    PendingMediaSendStatus.UPLOADING -> "sending..."
+                                    PendingMediaSendStatus.QUEUED -> "sending..."
+                                    PendingMediaSendStatus.SENT,
+                                    null -> "sending..."
+                                }
                             },
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            color = if (sendFailed) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            }
                         )
                     }
                     Text(

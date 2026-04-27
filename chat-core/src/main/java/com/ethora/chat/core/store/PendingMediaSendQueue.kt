@@ -19,6 +19,7 @@ enum class PendingMediaSendStatus {
     UPLOADING,
     READY_TO_SEND,
     FAILED_WAITING_RETRY,
+    PERMANENTLY_FAILED,
     SENT
 }
 
@@ -91,8 +92,19 @@ data class PendingMediaSend(
     val status: PendingMediaSendStatus = PendingMediaSendStatus.QUEUED,
     val uploaded: PendingMediaUploadPayload? = null
 ) {
+    companion object {
+        const val MAX_RETRY_ATTEMPTS = 3
+    }
+
     fun failedForRetry(now: Long = System.currentTimeMillis()): PendingMediaSend {
         val nextAttempt = attemptCount + 1
+        if (nextAttempt >= MAX_RETRY_ATTEMPTS) {
+            return copy(
+                attemptCount = nextAttempt,
+                nextRetryAt = 0L,
+                status = PendingMediaSendStatus.PERMANENTLY_FAILED
+            )
+        }
         val retryDelayMs = min(60_000L, 2_000L * nextAttempt)
         return copy(
             attemptCount = nextAttempt,
@@ -224,9 +236,25 @@ object PendingMediaSendQueue {
                 PendingMediaSendStatus.QUEUED,
                 PendingMediaSendStatus.READY_TO_SEND -> true
                 PendingMediaSendStatus.FAILED_WAITING_RETRY -> item.nextRetryAt <= now
+                PendingMediaSendStatus.PERMANENTLY_FAILED,
                 PendingMediaSendStatus.UPLOADING,
                 PendingMediaSendStatus.SENT -> false
             }
+        }
+    }
+
+    fun retryNow(messageId: String): PendingMediaSend? {
+        synchronized(lock) {
+            val current = _items.value.toMutableList()
+            val index = current.indexOfFirst { it.messageId == messageId || it.id == messageId }
+            if (index < 0) return null
+            val updated = current[index].copy(
+                status = PendingMediaSendStatus.QUEUED,
+                nextRetryAt = 0L
+            )
+            current[index] = updated
+            replaceAllLocked(current)
+            return updated
         }
     }
 

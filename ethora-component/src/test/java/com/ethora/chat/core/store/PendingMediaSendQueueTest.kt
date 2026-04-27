@@ -77,6 +77,26 @@ class PendingMediaSendQueueTest {
     }
 
     @Test
+    fun `markFailedForRetry permanently fails after max attempts`() {
+        val item = PendingMediaSend(
+            id = "queue-1",
+            roomJid = "room",
+            messageId = "msg",
+            localFilePath = "/file.pdf",
+            fileName = "file.pdf",
+            mimeType = "application/pdf",
+            createdAt = 1L,
+            attemptCount = PendingMediaSend.MAX_RETRY_ATTEMPTS - 1
+        )
+
+        val failed = item.failedForRetry(now = 10_000L)
+
+        assertEquals(PendingMediaSendStatus.PERMANENTLY_FAILED, failed.status)
+        assertEquals(PendingMediaSend.MAX_RETRY_ATTEMPTS, failed.attemptCount)
+        assertEquals(0L, failed.nextRetryAt)
+    }
+
+    @Test
     fun `sanitizeFileName preserves pdf extension and removes path characters`() {
         val sanitized = PendingMediaSendQueue.sanitizeFileName("../Quarterly Report.pdf")
 

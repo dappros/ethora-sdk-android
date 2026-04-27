@@ -18,10 +18,14 @@ import com.ethora.chat.core.xmpp.XMPPClient
 import com.ethora.chat.core.xmpp.XMPPClientDelegate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -76,6 +80,22 @@ object EthoraChatBootstrap {
     private var lastFailedAtMs: Long = 0L
 
     @Volatile private var logoutHookWired = false
+
+    fun unreadCount(): Flow<Int> {
+        return RoomStore.rooms
+            .map { rooms -> UnreadCounter.total(rooms) }
+            .distinctUntilChanged()
+    }
+
+    fun addUnreadListener(listener: UnreadListener): AutoCloseable {
+        listener.onUnreadCountChanged(UnreadCounter.total(RoomStore.rooms.value))
+        val job: Job = scope.launch {
+            unreadCount().collect { count ->
+                listener.onUnreadCountChanged(count)
+            }
+        }
+        return AutoCloseable { job.cancel() }
+    }
 
     /**
      * Fire-and-forget entry point — the supported way to kick off the background
@@ -153,6 +173,15 @@ object EthoraChatBootstrap {
     }
 
     private suspend fun runBootstrapLocked(context: Context, config: ChatConfig) {
+        ChatStore.setConfig(config)
+        ChatStore.validateServerConfig(config)?.let { error ->
+            com.ethora.chat.core.store.ConnectionStore.setState(
+                status = com.ethora.chat.core.store.ChatConnectionStatus.ERROR,
+                reason = error,
+                isRecovering = false
+            )
+            throw IllegalStateException(error)
+        }
         val key = bootstrapKey(config)
         if (lastBootstrapKey == key && _isInitialized.value) {
             android.util.Log.d(TAG, "Bootstrap already complete for key=${key.take(40)}…")
@@ -172,8 +201,7 @@ object EthoraChatBootstrap {
         try {
             // 1. Config + ApiClient base
             try {
-                ChatStore.setConfig(config)
-                val baseUrl = config.baseUrl ?: com.ethora.chat.core.config.AppConfig.defaultBaseURL
+                val baseUrl = ChatStore.getEffectiveBaseUrl()
                 ApiClient.setBaseUrl(baseUrl, config.customAppToken)
             } catch (e: Exception) {
                 android.util.Log.w(TAG, "ChatStore/ApiClient init failed", e)
@@ -375,4 +403,8 @@ object EthoraChatBootstrap {
         val xmppUser = config.userLogin?.user?.xmppUsername ?: ""
         return "$jwt|$xmppUser|${config.baseUrl ?: ""}|${config.xmppSettings?.host ?: ""}"
     }
+}
+
+fun interface UnreadListener {
+    fun onUnreadCountChanged(count: Int)
 }

@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import com.ethora.chat.core.store.RoomStore
 import androidx.compose.runtime.collectAsState
+import com.ethora.chat.core.models.Room
 
 data class UnreadState(
     /** True when ANY room has unread messages. Use for dot-style indicators. */
@@ -16,19 +17,27 @@ data class UnreadState(
     val displayCount: String
 )
 
+object UnreadCounter {
+    fun total(rooms: List<Room>): Int = rooms.sumOf { room ->
+        room.unreadMessages.coerceAtLeast(0)
+    }
+
+    fun state(rooms: List<Room>, maxCount: Int): UnreadState {
+        val totalCount = total(rooms)
+        val displayCount = if (totalCount > maxCount) "$maxCount+" else totalCount.toString()
+        return UnreadState(
+            hasUnread = totalCount > 0,
+            totalCount = totalCount,
+            displayCount = displayCount
+        )
+    }
+}
+
 @Composable
 fun useUnread(maxCount: Int = 10): UnreadState {
     val rooms by RoomStore.rooms.collectAsState(initial = emptyList())
 
     return remember(rooms, maxCount) {
-        val totalCount = rooms.sumOf { room ->
-            room.unreadMessages.coerceAtLeast(0)
-        }
-        val displayCount = if (totalCount > maxCount) "$maxCount+" else totalCount.toString()
-        UnreadState(
-            hasUnread = totalCount > 0,
-            totalCount = totalCount,
-            displayCount = displayCount
-        )
+        UnreadCounter.state(rooms, maxCount)
     }
 }

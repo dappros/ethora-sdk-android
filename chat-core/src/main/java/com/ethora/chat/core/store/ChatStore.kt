@@ -1,11 +1,11 @@
 package com.ethora.chat.core.store
 
-import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.config.ChatConfig
 import com.ethora.chat.core.config.XMPPSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.net.URI
 
 /**
  * Main chat store for managing global chat state.
@@ -31,26 +31,67 @@ object ChatStore {
      */
     fun getConfig(): ChatConfig? = _config.value
 
-    /**
-     * Effective base URL: config.baseUrl or AppConfig default.
-     * Use this everywhere instead of hardcoded AppConfig.defaultBaseURL.
-     */
-    fun getEffectiveBaseUrl(): String = _config.value?.baseUrl ?: AppConfig.defaultBaseURL
+    fun validateServerConfig(config: ChatConfig?): String? {
+        val baseUrl = config?.baseUrl?.trim()
+        if (baseUrl.isNullOrBlank()) return "ChatConfig.baseUrl is required"
+        if (!isHttpUrl(baseUrl)) return "ChatConfig.baseUrl must be a valid http(s) URL"
+
+        val appId = config.appId?.trim()
+        if (appId.isNullOrBlank()) return "ChatConfig.appId is required"
+
+        val xmpp = config.xmppSettings ?: return "ChatConfig.xmppSettings is required"
+        if (xmpp.xmppServerUrl.isBlank()) return "ChatConfig.xmppSettings.xmppServerUrl is required"
+        if (!xmpp.xmppServerUrl.startsWith("ws://") && !xmpp.xmppServerUrl.startsWith("wss://")) {
+            return "ChatConfig.xmppSettings.xmppServerUrl must start with ws:// or wss://"
+        }
+        if (xmpp.host.isBlank()) return "ChatConfig.xmppSettings.host is required"
+        if (xmpp.conference.isBlank()) return "ChatConfig.xmppSettings.conference is required"
+        return null
+    }
+
+    fun requireValidServerConfig(config: ChatConfig? = _config.value) {
+        validateServerConfig(config)?.let { throw IllegalStateException(it) }
+    }
+
+    fun getEffectiveBaseUrl(): String {
+        val config = _config.value
+        validateServerConfig(config)?.let { throw IllegalStateException(it) }
+        return config?.baseUrl!!.trim()
+    }
 
     /**
      * Effective app ID: config.appId or AppConfig default.
      */
-    fun getEffectiveAppId(): String = _config.value?.appId ?: AppConfig.defaultAppId
+    fun getEffectiveAppId(): String {
+        val config = _config.value
+        validateServerConfig(config)?.let { throw IllegalStateException(it) }
+        return config?.appId!!.trim()
+    }
 
     /**
      * Effective conference domain from xmppSettings.
      */
-    fun getEffectiveConference(): String = _config.value?.xmppSettings?.conference ?: AppConfig.defaultConferenceDomain
+    fun getEffectiveConference(): String {
+        val config = _config.value
+        validateServerConfig(config)?.let { throw IllegalStateException(it) }
+        return config?.xmppSettings!!.conference.trim()
+    }
 
     /**
      * Effective XMPP settings: config.xmppSettings or AppConfig default.
      */
-    fun getEffectiveXmppSettings(): XMPPSettings = _config.value?.xmppSettings ?: AppConfig.defaultXMPPSettings
+    fun getEffectiveXmppSettings(): XMPPSettings {
+        val config = _config.value
+        validateServerConfig(config)?.let { throw IllegalStateException(it) }
+        return config?.xmppSettings!!
+    }
+
+    private fun isHttpUrl(value: String): Boolean {
+        return runCatching {
+            val uri = URI(value)
+            (uri.scheme == "http" || uri.scheme == "https") && !uri.host.isNullOrBlank()
+        }.getOrDefault(false)
+    }
 
     /**
      * Set initialized state
