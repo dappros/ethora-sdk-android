@@ -757,19 +757,8 @@ class XMPPWebSocketConnection(
             val from = extractAttribute(xml, "from") ?: ""
             val body = extractElementText(xml, "body") ?: ""
             
-            // Extract media fields first to check if this is a media message
-            val dataStart = xml.indexOf("<data")
-            val dataXml = if (dataStart != -1) {
-                val dataEnd = xml.indexOf("/>", dataStart)
-                if (dataEnd != -1) {
-                    xml.substring(dataStart, dataEnd + 2)
-                } else {
-                    val dataEndTag = xml.indexOf("</data>", dataStart)
-                    if (dataEndTag != -1) {
-                        xml.substring(dataStart, dataEndTag + 7)
-                    } else ""
-                }
-            } else ""
+            // Extract media fields first to check if this is a media message.
+            val dataXml = extractDataElement(xml)
             
             val isMediafile = extractAttribute(dataXml, "isMediafile")
             val location = extractAttribute(dataXml, "location")
@@ -901,16 +890,6 @@ class XMPPWebSocketConnection(
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing real-time message", e)
         }
-    }
-    
-    private fun extractAttribute(xml: String, attr: String): String? {
-        val regex = "$attr=['\"]([^'\"]+)['\"]".toRegex()
-        return regex.find(xml)?.groupValues?.get(1)
-            ?.replace("&amp;", "&")
-            ?.replace("&lt;", "<")
-            ?.replace("&gt;", ">")
-            ?.replace("&quot;", "\"")
-            ?.replace("&apos;", "'")
     }
     
     private fun extractElementText(xml: String, element: String): String? {

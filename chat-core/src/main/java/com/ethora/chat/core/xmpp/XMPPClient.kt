@@ -1019,23 +1019,13 @@ class XMPPClient(
             val userJid = from.split("/").getOrNull(1) ?: from
             val username = userJid.split("@").firstOrNull() ?: "unknown"
             
-            // Extract user info from <data> element (if present)
-            // Format: <data xmlns="..." senderFirstName="..." senderLastName="..." photoURL="..." />
-            // Also check in the full forwarded XML, not just message XML
-            val dataStartInMessage = messageXml.indexOf("<data")
-            val dataEndInMessage = messageXml.indexOf("/>", dataStartInMessage)
-            val dataStartInForwarded = forwardedXml.indexOf("<data")
-            val dataEndInForwarded = forwardedXml.indexOf("/>", dataStartInForwarded)
-            
-            val dataXml = when {
-                dataStartInMessage != -1 && dataEndInMessage != -1 -> {
-                    messageXml.substring(dataStartInMessage, dataEndInMessage + 2)
-                }
-                dataStartInForwarded != -1 && dataEndInForwarded != -1 -> {
-                    forwardedXml.substring(dataStartInForwarded, dataEndInForwarded + 2)
-                }
-                else -> ""
-            }
+            // Extract <data> element. Some servers re-serialize the archived
+            // stanza as <data ...></data> rather than <data .../>, so we go
+            // through the shared helper which handles both forms — getting
+            // this wrong drops every media field and makes the bubble
+            // render as plain text.
+            val dataXml = extractDataElement(messageXml)
+                .ifEmpty { extractDataElement(forwardedXml) }
             
             Log.d(TAG, "  Data XML found: ${dataXml.isNotEmpty()}, length: ${dataXml.length}")
             
@@ -1123,34 +1113,6 @@ class XMPPClient(
         }
         
         return messages
-    }
-    
-    private fun extractAttribute(xml: String, attr: String): String? {
-        if (xml.isEmpty()) return null
-        
-        // Try double quotes first (default)
-        val doubleQuoteRegex = "$attr=\"([^\"]+)\"".toRegex()
-        val doubleQuoteMatch = doubleQuoteRegex.find(xml)
-        if (doubleQuoteMatch != null) {
-            return doubleQuoteMatch.groupValues.getOrNull(1)
-        }
-        
-        // Try single quotes
-        val singleQuoteRegex = "$attr='([^']+)'".toRegex()
-        val singleQuoteMatch = singleQuoteRegex.find(xml)
-        if (singleQuoteMatch != null) {
-            return singleQuoteMatch.groupValues.getOrNull(1)
-        }
-        
-        // Try without quotes (some XML might have unquoted attributes)
-        val noQuoteRegex = "$attr=([^\\s>]+)".toRegex()
-        val noQuoteMatch = noQuoteRegex.find(xml)
-        return noQuoteMatch?.groupValues?.getOrNull(1)
-    }
-    
-    private fun extractElementText(xml: String, element: String): String? {
-        val regex = "<$element[^>]*>([^<]+)</$element>".toRegex()
-        return regex.find(xml)?.groupValues?.get(1)
     }
 
     /**
