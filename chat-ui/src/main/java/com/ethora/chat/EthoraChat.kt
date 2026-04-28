@@ -50,6 +50,7 @@ import com.ethora.chat.core.push.PushNotificationManager
 import com.ethora.chat.core.xmpp.XMPPClientDelegate
 import com.ethora.chat.core.xmpp.ConnectionStatus
 import com.ethora.chat.ui.components.ChatRoomView
+import com.ethora.chat.ui.components.ConfigErrorScreen
 import com.ethora.chat.ui.components.RoomListView
 import com.ethora.chat.ui.styling.ChatTheme
 import androidx.lifecycle.Lifecycle
@@ -82,12 +83,15 @@ fun Chat(
     val localStorage = remember { LocalStorage(context) }
 
     ChatStore.setConfig(config)
-    ChatStore.validateServerConfig(config)?.let { error ->
+    val configError = ChatStore.validateServerConfig(config)
+    if (configError != null) {
+        android.util.Log.w("EthoraChat", "ChatConfig invalid → $configError")
         ConnectionStore.setState(
             status = ChatConnectionStatus.ERROR,
-            reason = error,
+            reason = configError,
             isRecovering = false
         )
+        ConfigErrorScreen(message = configError, modifier = modifier)
         return
     }
     PendingMediaSendQueue.initialize(context)

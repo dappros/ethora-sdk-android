@@ -36,9 +36,6 @@ object ChatStore {
         if (baseUrl.isNullOrBlank()) return "ChatConfig.baseUrl is required"
         if (!isHttpUrl(baseUrl)) return "ChatConfig.baseUrl must be a valid http(s) URL"
 
-        val appId = config.appId?.trim()
-        if (appId.isNullOrBlank()) return "ChatConfig.appId is required"
-
         val xmpp = config.xmppSettings ?: return "ChatConfig.xmppSettings is required"
         if (xmpp.xmppServerUrl.isBlank()) return "ChatConfig.xmppSettings.xmppServerUrl is required"
         if (!xmpp.xmppServerUrl.startsWith("ws://") && !xmpp.xmppServerUrl.startsWith("wss://")) {
@@ -60,13 +57,10 @@ object ChatStore {
     }
 
     /**
-     * Effective app ID: config.appId or AppConfig default.
+     * Effective app ID. Forwarded as the `x-app-id` header — server decides whether
+     * it cares. Returns "" when unset so hosts that don't need it can omit it.
      */
-    fun getEffectiveAppId(): String {
-        val config = _config.value
-        validateServerConfig(config)?.let { throw IllegalStateException(it) }
-        return config?.appId!!.trim()
-    }
+    fun getEffectiveAppId(): String = _config.value?.appId?.trim().orEmpty()
 
     /**
      * Effective conference domain from xmppSettings.

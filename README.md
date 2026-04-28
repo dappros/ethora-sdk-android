@@ -360,7 +360,9 @@ reconnectChat()
 
 `ChatConfig` contains many fields for cross-platform parity. Not every field is fully wired in this Android package version.
 
-`appId`, `baseUrl`, and `xmppSettings` are required. If any of these is absent or invalid, `EthoraChatBootstrap.initialize` aborts immediately, emits `ChatConnectionStatus.ERROR` with a descriptive reason string, and never opens an XMPP connection. The SDK does not fall back to any built-in or Ethora-hosted endpoint — a missing `baseUrl` is a hard failure, not a redirect.
+`baseUrl` and `xmppSettings` (with `xmppServerUrl`, `host`, `conference`) are required by the SDK itself — without them HTTP and XMPP cannot be wired. If any of these is absent or invalid, the `Chat` composable renders a `ConfigErrorScreen` with the validation reason and `EthoraChatBootstrap.initialize` aborts with `ChatConnectionStatus.ERROR`. The SDK does not fall back to any built-in or Ethora-hosted endpoint — a missing `baseUrl` is a hard failure, not a redirect.
+
+`appId` is forwarded as the `x-app-id` header to `/users/login`, `/users/client`, `/chats/my`, and `/push/subscription/{appId}`. Whether it is required depends on your server — set it if your backend enforces it, omit it otherwise.
 
 ### Core fields (actively used)
 
