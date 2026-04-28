@@ -4,7 +4,13 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
-## [28.04.26] — `v2.3`
+## [26.04.28] — JitPack `v1.0.28`
+
+- **Fixed:** File messages loaded from history (MAM) on login no longer render as plain-text bubbles. The MAM parser now extracts the `<data>` element when the archive serialises it as `<data ...></data>` (open/close form, in addition to the `<data .../>` self-closing form), so `isMediafile`, `location`, `mimetype`, `originalName`, `size`, `locationPreview` and `waveForm` survive the round-trip and `MessageBubble` renders the proper image / video / audio / file component instead of falling through to the text body.
+- **Fixed:** Signed CDN URLs in history-loaded file messages no longer break on the `&` query separator. The MAM attribute parser now decodes `&amp;` (and the other four standard XML entities) the same way the live parser already did, so thumbnails load after a relogin.
+- **Improved:** `XMPPClient` and `XMPPWebSocketConnection` share a single `XmppXmlUtils` helper for `<data>` extraction and attribute decoding, removing the duplicated-and-drifted logic that caused the two bugs above.
+
+## [26.04.28] — JitPack `v1.0.27`
 
 - **New:** `RetryConfig` on `ChatConfig` — `RetryConfig(autoRetry: Boolean = false, maxAttempts: Int = 3)`. **Default is `autoRetry = false`** — once a text or media send fails, the bubble stays in the "Sending failed. Tap to retry or delete." state until the user explicitly retries or deletes it. Pass `RetryConfig(autoRetry = true)` to restore the legacy silent-retry behaviour. Mid-session toggling lets the in-flight attempt finish, then stops scheduling further retries.
 - **New:** `Message.sendFailed: Boolean?` field — explicit, persistent flag set when an optimistic send hits an XMPP-null return or the pending-timeout window without a server echo. Survives reconnects so the bubble does not silently flip back to "delivered".
