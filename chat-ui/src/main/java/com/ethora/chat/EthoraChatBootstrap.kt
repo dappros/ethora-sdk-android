@@ -81,17 +81,31 @@ object EthoraChatBootstrap {
 
     @Volatile private var logoutHookWired = false
 
-    fun unreadCount(): Flow<Int> {
+    /**
+     * Boolean flow: `true` whenever any room in [RoomStore] has at least one
+     * unread message, `false` otherwise. Boolean (rather than a count) matches
+     * the typical host UX — a tab dot or icon-state indicator that just needs
+     * "is there anything to see" rather than a precise number.
+     *
+     * Emits `false` before [initialize] completes (no rooms yet → no unread).
+     */
+    fun hasUnread(): Flow<Boolean> {
         return RoomStore.rooms
-            .map { rooms -> UnreadCounter.total(rooms) }
+            .map { rooms -> UnreadCounter.total(rooms) > 0 }
             .distinctUntilChanged()
     }
 
+    /**
+     * Java/Kotlin-friendly listener registration. The listener is called once
+     * synchronously with the current value, then on every change. Close the
+     * returned [AutoCloseable] (typically in `onDestroy` or on logout) to
+     * unregister.
+     */
     fun addUnreadListener(listener: UnreadListener): AutoCloseable {
-        listener.onUnreadCountChanged(UnreadCounter.total(RoomStore.rooms.value))
+        listener.onUnreadChanged(UnreadCounter.total(RoomStore.rooms.value) > 0)
         val job: Job = scope.launch {
-            unreadCount().collect { count ->
-                listener.onUnreadCountChanged(count)
+            hasUnread().collect { has ->
+                listener.onUnreadChanged(has)
             }
         }
         return AutoCloseable { job.cancel() }
@@ -405,6 +419,12 @@ object EthoraChatBootstrap {
     }
 }
 
+/**
+ * Functional interface — Java callers can pass a lambda directly:
+ * ```java
+ * AutoCloseable reg = EthoraChatBootstrap.addUnreadListener(hasUnread -> updateBadge(hasUnread));
+ * ```
+ */
 fun interface UnreadListener {
-    fun onUnreadCountChanged(count: Int)
+    fun onUnreadChanged(hasUnread: Boolean)
 }

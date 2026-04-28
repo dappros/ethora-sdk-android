@@ -4,6 +4,25 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [28.04.26] — `v2.3`
+
+- **New:** `RetryConfig` on `ChatConfig` — `RetryConfig(autoRetry: Boolean = false, maxAttempts: Int = 3)`. **Default is `autoRetry = false`** — once a text or media send fails, the bubble stays in the "Sending failed. Tap to retry or delete." state until the user explicitly retries or deletes it. Pass `RetryConfig(autoRetry = true)` to restore the legacy silent-retry behaviour. Mid-session toggling lets the in-flight attempt finish, then stops scheduling further retries.
+- **New:** `Message.sendFailed: Boolean?` field — explicit, persistent flag set when an optimistic send hits an XMPP-null return or the pending-timeout window without a server echo. Survives reconnects so the bubble does not silently flip back to "delivered".
+- **New:** `EthoraChatBootstrap.hasUnread(): Flow<Boolean>` and `addUnreadListener(UnreadListener): AutoCloseable` — observe whether any room has unread messages from outside Compose (Activity, Service, Java callers). Boolean shape (rather than a count) matches the typical host UX — a tab dot or icon-state indicator that just needs "is there anything to see". `UnreadListener.onUnreadChanged(hasUnread: Boolean)` receives the current value synchronously on register, then on every change. Emits `false` before bootstrap completes; never throws. If you need the precise count, observe `RoomStore.rooms` and sum `unreadMessages`.
+- **New:** `EthoraChatBootstrap.isInitialized: StateFlow<Boolean>` — observe whether the background bootstrap finished, for hosts that want to render before the chat tab opens.
+- **New:** `FileSizeFormatter` (`chat-core/.../util/`) — single source of truth for byte-size rendering across chat input preview and bubble (1 KiB = 1024 B everywhere).
+- **New:** Combo send — when the user has both an attachment and text staged in `ChatInput`, one Send tap dispatches **two messages** (media first, then text). Both appear as optimistic bubbles immediately and confirm/fail independently.
+- **New:** Typing-indicator autoscroll — when another user starts typing while you're at-or-near the bottom, the list smoothly scrolls so the indicator is visible above the input. If you're scrolled up reading older messages, the scroll is left alone.
+- **Improved:** Context menu position — anchors to the message bubble it belongs to. Prefers **above** the bubble (falls back to below if the bubble is near the top of the screen). Horizontal alignment follows the sender side. Menu height is now calculated from the actual visible items rather than an over-padded constant, so the menu sits flush against the bubble instead of floating far above.
+- **Improved:** Failed messages get **Retry + Delete** in the context menu (Edit is hidden for any own message in `pending == true` or `sendFailed == true` state — editing a never-sent message would have no server effect). Manual user retry is always allowed, regardless of `RetryConfig.autoRetry`.
+- **Improved:** Deleted bubble styling — renders in a neutral dimmed gray (`surfaceVariant @ 60% alpha`, no shadow) regardless of sender, replacing the full primary-coloured bubble that used to read as a normal active message.
+- **Improved:** Deleting a never-sent message (`pending == true` OR `sendFailed == true`) removes the bubble locally without sending an XMPP delete — there's nothing on the server to delete.
+- **Improved:** `EthoraChatBootstrap.initialize` validates `baseUrl` / `xmppSettings` immediately at call time. Missing required server config throws and emits `ChatConnectionStatus.ERROR` with a descriptive reason; no XMPP attempt is made.
+- **Improved:** Test coverage added for `RetryConfig` wiring, `DnsFallback` host-only behaviour, `FileSizeFormatter`, `PendingMediaSendQueue` discipline, and `EthoraChatBootstrap.unreadCount` semantics.
+- **Fixed:** Failed text sends no longer "magically recover" after the 6 s pending-timeout — the timeout now sets `sendFailed = true` instead of silently clearing `pending = false`.
+- **Fixed:** Hardcoded fallback to a public Ethora dev server removed from `DnsFallback`. The SDK now only uses host-supplied `dnsFallbackOverrides`; missing entries throw `UnknownHostException`.
+- **Fixed:** Sample app — stale `PendingTextSendQueue.initialize(...)` call removed from `MainActivity.initChatStores()` (the class was merged into `PendingMediaSendQueue` and is now initialised by the SDK itself inside `EthoraChat`/`EthoraChatProvider`).
+
 ## [26.04.24] — JitPack `v1.0.25`
 
 - **New:** Persistent media/file send queue (`PendingMediaSendQueue`) stored separately from cached chat messages; unsent image/video/audio/file/PDF messages stay visible and retry after reconnect or app foreground instead of disappearing.

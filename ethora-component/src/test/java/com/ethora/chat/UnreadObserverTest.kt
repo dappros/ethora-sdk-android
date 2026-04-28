@@ -5,11 +5,13 @@ import com.ethora.chat.core.store.RoomStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class UnreadObserverTest {
     @Test
-    fun `bootstrap unreadCount exposes RoomStore unread count outside Compose`() = runBlocking {
+    fun `bootstrap hasUnread emits true when any room has unread messages`() = runBlocking {
         RoomStore.clear()
         RoomStore.setRooms(
             listOf(
@@ -19,18 +21,31 @@ class UnreadObserverTest {
             )
         )
 
-        assertEquals(5, EthoraChatBootstrap.unreadCount().first())
+        assertTrue(EthoraChatBootstrap.hasUnread().first())
     }
 
     @Test
-    fun `Java listener receives current unread count immediately`() {
+    fun `bootstrap hasUnread emits false when all rooms are zero`() = runBlocking {
+        RoomStore.clear()
+        RoomStore.setRooms(
+            listOf(
+                Room(id = "1", jid = "one@example.com", name = "One", title = "One", unreadMessages = 0),
+                Room(id = "2", jid = "two@example.com", name = "Two", title = "Two", unreadMessages = 0)
+            )
+        )
+
+        assertFalse(EthoraChatBootstrap.hasUnread().first())
+    }
+
+    @Test
+    fun `Java listener receives current has-unread immediately`() {
         RoomStore.clear()
         RoomStore.setRooms(listOf(Room(id = "1", jid = "one@example.com", name = "One", title = "One", unreadMessages = 7)))
-        var observed = -1
+        var observed = false
 
-        val registration = EthoraChatBootstrap.addUnreadListener { count -> observed = count }
+        val registration = EthoraChatBootstrap.addUnreadListener { hasUnread -> observed = hasUnread }
 
         registration.close()
-        assertEquals(7, observed)
+        assertTrue(observed)
     }
 }

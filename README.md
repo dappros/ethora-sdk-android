@@ -310,10 +310,11 @@ Kotlin / Java UI outside Compose:
 import com.ethora.chat.EthoraChatBootstrap
 import kotlinx.coroutines.flow.Flow
 
-val unreadFlow: Flow<Int> = EthoraChatBootstrap.unreadCount()
+// Boolean: true whenever any room has at least one unread message.
+val hasUnreadFlow: Flow<Boolean> = EthoraChatBootstrap.hasUnread()
 
-val registration = EthoraChatBootstrap.addUnreadListener { count ->
-    // update native badge
+val registration = EthoraChatBootstrap.addUnreadListener { hasUnread ->
+    // toggle native tab dot / icon state
 }
 
 registration.close()
@@ -322,12 +323,17 @@ registration.close()
 Java (from Activity, Service, or any non-Compose context):
 
 ```java
-// Register
-AutoCloseable reg = EthoraChatBootstrap.addUnreadListener(count -> updateChatBadge(count));
+// Register — listener receives boolean (true = at least one unread, false = none).
+AutoCloseable reg = EthoraChatBootstrap.addUnreadListener(hasUnread -> updateChatBadge(hasUnread));
 
 // Unregister (e.g. in onDestroy or on logout)
 reg.close();
 ```
+
+The boolean shape matches typical host integrations — a tab dot, an icon
+state-list, or a setVisibility — that only need "is there anything to see"
+rather than a precise number. If you do need the actual count from outside
+Compose, observe `RoomStore.rooms` directly and sum `unreadMessages`.
 
 Observe whether the background bootstrap has finished:
 
@@ -371,6 +377,7 @@ reconnectChat()
 - `eventHandlers`, `onChatEvent`, `onBeforeSend`
 - `customComponents`
 - `initBeforeLoad` — when `true`, the SDK runs the web-parity bootstrap (user fetch → rooms fetch → XMPP connect → private-store sync → per-room history preload) so `useUnread()` reports real counts before the `Chat` composable mounts. Drive it via `EthoraChatProvider` (wrap your app root) or `EthoraChatBootstrap.initializeAsync(context, config)` from `Application.onCreate`.
+- `retryConfig` — `RetryConfig(autoRetry: Boolean = false, maxAttempts: Int = 3)`. Controls whether failed text/media sends are silently retried in the background. **Default is `autoRetry = false`** — failed messages stay in the "Sending failed. Tap to retry or delete." state until the user acts. Manual user-initiated retry via the message context menu is always allowed regardless of this flag. Pass `RetryConfig(autoRetry = true)` to restore the legacy silent-retry behaviour.
 
 ### Fields present but not guaranteed as active behavior
 
@@ -480,16 +487,20 @@ Notes:
 - Unsent media/file messages are persisted separately from chat history via `PendingMediaSendQueue`.
   - queued items keep their optimistic message visible
   - upload/XMPP failures show an inline warning with Retry/Delete actions
-  - transient failures retry after reconnect/app foreground, then become permanently failed after the retry limit
   - uploaded payloads are reused when only the XMPP send step failed
   - app-private pending files are removed after send success, user discard, or logout cleanup
-- Text sends attempted while offline stay visible as failed pending bubbles so users can retry or delete them instead of losing the draft silently.
+- **Failed-send behaviour is governed by `RetryConfig`** (see [ChatConfig Reference](#chatconfig-reference)):
+  - `autoRetry = false` (default): a failed text or media send is marked permanently failed immediately. The bubble shows "⚠ Sending failed. Tap to retry or delete." and the failure persists across reconnects until the user explicitly retries or deletes. The `Message.sendFailed: Boolean?` flag carries this state.
+  - `autoRetry = true`: silent background retries up to `maxAttempts`, with exponential backoff for media. After the limit, the same persistent failed state takes over.
+  - Manual user retry via the message context menu is always available (Copy + Retry + Delete) regardless of `autoRetry`. Editing is intentionally hidden for unsent messages — they were never on the server.
+- Text sends attempted while offline stay visible as failed bubbles so users can retry or delete them instead of losing the draft silently. Deleting a never-sent message (pending or send-failed) removes it locally only, no XMPP delete is dispatched.
+- Combo send: when `ChatInput` has both an attachment and text staged, one Send tap dispatches **two messages** (media first, then text). Each appears as an optimistic bubble immediately and confirms or fails independently.
 - Loader behavior:
   - cache-first rooms/messages for fast startup
   - API refresh for rooms
   - initial XMPP history load per room
   - incremental sync after reconnect
-- DNS fallback map supported via `dnsFallbackOverrides` for emulator/network edge cases. Only explicit host-provided overrides are used.
+- DNS fallback map supported via `dnsFallbackOverrides` for emulator/network edge cases. Only explicit host-provided overrides are used — there is no built-in fallback to any Ethora-hosted server.
 
 ## Logout
 
