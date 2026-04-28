@@ -20,6 +20,11 @@ data class Message(
     val mimetype: String? = null,
     val location: String? = null,
     val pending: Boolean? = null,
+    /** True when an optimistic send did not reach the server within the
+     *  pending-timeout window or hit a network/XMPP failure. Used by the UI
+     *  to render the persistent "Sending failed. Tap to retry or delete."
+     *  state regardless of current connection status. */
+    val sendFailed: Boolean? = null,
     val timestamp: Long? = null,
     val showInChannel: String? = null,
     val activeMessage: Boolean? = null,

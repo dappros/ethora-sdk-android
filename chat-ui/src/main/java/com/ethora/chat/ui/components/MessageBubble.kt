@@ -154,11 +154,17 @@ fun MessageBubble(
                         )
                     )
                     .onGloballyPositioned { surfaceCoordinates = it },
-                color = if (isUser) 
-                    MaterialTheme.colorScheme.primary 
-                else 
+                // Deleted bubbles render in a neutral, dimmed gray regardless
+                // of sender — keeping the full primary colour for a deleted
+                // own-message read as a normal active bubble. Match Telegram /
+                // WhatsApp style.
+                color = if (message.isDeleted == true)
+                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                else if (isUser)
+                    MaterialTheme.colorScheme.primary
+                else
                     MaterialTheme.colorScheme.surfaceVariant,
-                shadowElevation = if (isUser) 3.dp else 1.dp,
+                shadowElevation = if (message.isDeleted == true) 0.dp else if (isUser) 3.dp else 1.dp,
                 tonalElevation = 0.dp
             ) {
                 // Check if message is deleted

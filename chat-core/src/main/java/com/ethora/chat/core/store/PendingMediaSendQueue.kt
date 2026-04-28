@@ -96,9 +96,21 @@ data class PendingMediaSend(
         const val MAX_RETRY_ATTEMPTS = 3
     }
 
-    fun failedForRetry(now: Long = System.currentTimeMillis()): PendingMediaSend {
+    /**
+     * @param autoRetry honors `RetryConfig.autoRetry`. When `false`, the item
+     *   goes straight to [PendingMediaSendStatus.PERMANENTLY_FAILED] so the UI
+     *   stays in the failed state until the user explicitly retries.
+     * @param maxAttempts honors `RetryConfig.maxAttempts`. Only consulted when
+     *   `autoRetry == true`. Falls back to [MAX_RETRY_ATTEMPTS] for callers
+     *   that don't pass an explicit value.
+     */
+    fun failedForRetry(
+        now: Long = System.currentTimeMillis(),
+        autoRetry: Boolean = true,
+        maxAttempts: Int = MAX_RETRY_ATTEMPTS
+    ): PendingMediaSend {
         val nextAttempt = attemptCount + 1
-        if (nextAttempt >= MAX_RETRY_ATTEMPTS) {
+        if (!autoRetry || nextAttempt >= maxAttempts) {
             return copy(
                 attemptCount = nextAttempt,
                 nextRetryAt = 0L,

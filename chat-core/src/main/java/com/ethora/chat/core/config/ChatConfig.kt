@@ -98,6 +98,9 @@ data class ChatConfig(
     // Notifications
     val messageNotifications: MessageNotificationConfig? = null,
 
+    // Retry behaviour for failed text/media sends. Defaults to autoRetry = false.
+    val retryConfig: RetryConfig = RetryConfig(),
+
     // Event Handlers
     val eventHandlers: ChatEventHandlers? = null,
 

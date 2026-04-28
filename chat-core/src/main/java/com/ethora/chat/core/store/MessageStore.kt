@@ -322,7 +322,13 @@ object MessageStore {
             }
             val index = roomMessages.indexOfFirst { it.id == messageId && it.pending == true }
             if (index >= 0) {
-                val updated = roomMessages[index].copy(pending = false)
+                // Pending didn't transition out within the timeout window — the
+                // server never echoed this message. Clear `pending` so the
+                // "sending..." indicator stops, but flag `sendFailed = true` so
+                // the bubble persists in the failed UX state until the user
+                // taps Retry or Delete. Previously the message was silently
+                // marked as "delivered" which lost the failure entirely.
+                val updated = roomMessages[index].copy(pending = false, sendFailed = true)
                 roomMessages[index] = updated
                 val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
                 currentMessages[roomJid] = sorted
@@ -330,7 +336,7 @@ object MessageStore {
                 persistMessage(roomJid, updated)
                 updateRoomLastMessage(roomJid, sorted)
                 com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
-                android.util.Log.w("MessageStore", "⏱️ Pending timeout cleared pending=$messageId in $roomJid")
+                android.util.Log.w("MessageStore", "⏱️ Pending timeout marked sendFailed=$messageId in $roomJid")
             }
             pendingTimeoutScheduled.remove(key)
         }

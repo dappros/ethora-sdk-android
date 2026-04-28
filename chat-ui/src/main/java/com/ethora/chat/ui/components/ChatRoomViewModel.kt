@@ -325,6 +325,13 @@ class ChatRoomViewModel(
                 )
             } else {
                 android.util.Log.e("ChatRoomViewModel", "Failed to send message - sendMessage returned null")
+                // Mark the optimistic row as send-failed so the bubble switches
+                // immediately to the "Sending failed. Tap to retry or delete."
+                // state without waiting for the 6 s pending-timeout.
+                MessageStore.updateMessage(
+                    room.jid,
+                    optimisticMessage.copy(pending = false, sendFailed = true)
+                )
                 ChatEventDispatcher.emit(
                     ChatEvent.MessageFailed(
                         roomJid = room.jid,
@@ -802,7 +809,18 @@ class ChatRoomViewModel(
     }
 
     private fun markPendingMediaFailed(item: PendingMediaSend, error: Throwable) {
-        val failed = PendingMediaSendQueue.update(item.id) { it.failedForRetry() }
+        // Honor RetryConfig: when autoRetry is false (default) the item goes
+        // straight to PERMANENTLY_FAILED and we never schedule a delayed retry.
+        // The in-flight send that just failed is allowed to complete naturally
+        // (we are inside its finally block); future scheduling is suppressed.
+        val retryCfg = ChatStore.getConfig()?.retryConfig
+            ?: com.ethora.chat.core.config.RetryConfig()
+        val failed = PendingMediaSendQueue.update(item.id) {
+            it.failedForRetry(
+                autoRetry = retryCfg.autoRetry,
+                maxAttempts = retryCfg.maxAttempts
+            )
+        }
         ChatEventDispatcher.emit(
             ChatEvent.MessageFailed(
                 roomJid = item.roomJid,
@@ -811,7 +829,11 @@ class ChatRoomViewModel(
                 metadata = mapOf("fileName" to item.fileName, "mimeType" to item.mimeType)
             )
         )
+        if (!retryCfg.autoRetry) return
         failed?.let { failedItem ->
+            // Only schedule a follow-up if the item is still in the retry
+            // window. PERMANENTLY_FAILED items are user-action only.
+            if (failedItem.status != PendingMediaSendStatus.FAILED_WAITING_RETRY) return
             viewModelScope.launch {
                 val delayMs = (failedItem.nextRetryAt - System.currentTimeMillis()).coerceAtLeast(0L)
                 kotlinx.coroutines.delay(delayMs)
@@ -1043,15 +1065,17 @@ class ChatRoomViewModel(
     }
 
     /**
-     * Resend a still-pending text message. Drops the stale optimistic row
-     * and runs [sendMessage] again with the same body + reply target, so
-     * the user gets a fresh xmpp send + echo window. No-op for media or
-     * non-pending messages.
+     * Resend a still-pending or send-failed text message. Drops the stale
+     * optimistic row and runs [sendMessage] again with the same body + reply
+     * target, so the user gets a fresh xmpp send + echo window. Also handles
+     * the media path via [PendingMediaSendQueue.retryNow].
      */
     fun resendMessage(messageId: String) {
         val existing = MessageStore.getMessagesForRoom(room.jid)
             .firstOrNull { it.id == messageId } ?: return
-        if (existing.pending != true) return
+        // Allow retry for both still-pending (e.g. user tapped before timeout)
+        // and explicitly send-failed messages.
+        if (existing.pending != true && existing.sendFailed != true) return
         val isMedia = existing.isMediafile == "true" ||
             !existing.location.isNullOrBlank() ||
             !existing.fileName.isNullOrBlank()
@@ -1061,7 +1085,7 @@ class ChatRoomViewModel(
                 android.util.Log.w("ChatRoomViewModel", "Retry requested for media message without queued item ($messageId)")
                 return
             }
-            MessageStore.updateMessage(room.jid, existing.copy(pending = true))
+            MessageStore.updateMessage(room.jid, existing.copy(pending = true, sendFailed = false))
             processPendingMediaQueue()
             return
         }
@@ -1073,7 +1097,11 @@ class ChatRoomViewModel(
 
     /**
      * Delete message.
-     * Optimistic update so UI updates immediately; server echo will confirm via parseAndHandleDeleteMessage.
+     *
+     * - Queued media (never sent): drop from queue + remove locally.
+     * - Pending or send-failed (never reached server): remove locally only —
+     *   no XMPP delete because the server has nothing to delete.
+     * - Otherwise: optimistic mark-as-deleted, then send the XMPP delete.
      */
     fun deleteMessage(messageId: String) {
         val existing = MessageStore.getMessagesForRoom(room.jid)
@@ -1084,7 +1112,7 @@ class ChatRoomViewModel(
             MessageStore.removeMessage(room.jid, messageId)
             return
         }
-        if (existing?.pending == true) {
+        if (existing?.pending == true || existing?.sendFailed == true) {
             MessageStore.removeMessage(room.jid, messageId)
             return
         }

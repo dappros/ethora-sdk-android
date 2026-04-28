@@ -52,10 +52,15 @@ fun MessageContextMenu(
 ) {
     if (!visible || message.isDeleted == true) return
 
-    // Resend is offered only for own pending messages that haven't had a
-    // server echo yet. When the caller doesn't wire an onResend lambda we
-    // treat it as unavailable.
-    val canResend = isUser && message.pending == true && onResend != null
+    // Resend is offered for any own message that hasn't been confirmed sent —
+    // either still in the optimistic `pending` window OR explicitly flagged as
+    // `sendFailed` (the auto-retry timer fired without a server echo, or the
+    // initial XMPP send returned null). User-initiated retry is always
+    // permitted regardless of `RetryConfig.autoRetry` — that flag only
+    // controls SILENT background retries.
+    val canResend = isUser &&
+        (message.pending == true || message.sendFailed == true) &&
+        onResend != null
 
     val density = LocalDensity.current
     val configuration = LocalConfiguration.current
@@ -67,11 +72,18 @@ fun MessageContextMenu(
 
     val menuWidth = 240.dp
     val menuWidthPx = with(density) { menuWidth.toPx() }
-    val menuHeightPx = with(density) { 200.dp.toPx() }
-    val ownItemCount = (if (isUser) 3 else 0) + (if (canResend) 1 else 0)
-    val menuHeightAbovePx = with(density) {
-        (48.dp + (ownItemCount * 40).dp).toPx()
-    }
+    // Visible items: Copy is always shown; for own messages the menu also shows
+    // either Retry (when canResend) OR Edit, plus Delete. Received messages
+    // show Copy only. Each ContextMenuItem is ~40 dp; dividers between items
+    // are 8 dp; the surrounding Column has 8 dp top + 8 dp bottom padding.
+    val visibleItemCount = if (isUser) 3 else 1
+    val itemHeightDp = 40
+    val dividerHeightDp = 8
+    val menuChromeDp = 16 // 8 dp top + 8 dp bottom padding
+    val menuHeightDp = menuChromeDp +
+        (itemHeightDp * visibleItemCount) +
+        (dividerHeightDp * (visibleItemCount - 1).coerceAtLeast(0))
+    val menuHeightPx = with(density) { menuHeightDp.dp.toPx() }
     val gapPx = with(density) { 8.dp.toPx() }
 
     val spaceBelow = heightPx - boundsBottom - gapPx
@@ -85,12 +97,14 @@ fun MessageContextMenu(
         (boundsLeft + gapPx).coerceIn(minX, maxX)
     }
 
-    val rawYAbove = boundsTop - gapPx - menuHeightAbovePx
+    // Anchor to the bubble: prefer ABOVE so the message itself stays visible,
+    // fall back to BELOW only when there's not enough room above.
+    val rawYAbove = boundsTop - gapPx - menuHeightPx
     val adjustedY = when {
-        spaceBelow >= menuHeightPx -> boundsBottom + gapPx
         spaceAbove >= menuHeightPx -> rawYAbove.coerceAtLeast(gapPx)
+        spaceBelow >= menuHeightPx -> boundsBottom + gapPx
         else -> {
-            val fallbackY = if (spaceBelow >= spaceAbove) boundsBottom + gapPx else rawYAbove
+            val fallbackY = if (spaceAbove >= spaceBelow) rawYAbove else boundsBottom + gapPx
             fallbackY.coerceIn(gapPx, (heightPx - menuHeightPx - gapPx).coerceAtLeast(gapPx))
         }
     }

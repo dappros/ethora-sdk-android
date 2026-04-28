@@ -382,14 +382,27 @@ fun ChatInput(
                             // the user's actual state (they finished composing this message).
                             idleTypingJob?.cancel()
                             sendStop()
-                            if (selectedFile != null && onSendMedia != null && editText == null) {
-                                val (file, mimeType) = selectedFile!!
-                                selectedFile = null
-                                onSendMedia(file, mimeType)
-                            } else if (text.isNotBlank()) {
-                                val textToSend = text.trim()
-                                text = ""
-                                onSendMessage(textToSend, replyingToMessage?.id)
+                            // Combo send: when both an attachment AND text are present,
+                            // dispatch BOTH as separate optimistic messages — media first,
+                            // then text. Each confirms or fails independently.
+                            // Edit mode is single-message-only and short-circuits below.
+                            val pendingFile = selectedFile
+                            val pendingText = text.trim().takeIf { it.isNotBlank() }
+                            val replyId = replyingToMessage?.id
+                            if (editText != null) {
+                                if (pendingText != null) {
+                                    text = ""
+                                    onSendMessage(pendingText, replyId)
+                                }
+                            } else {
+                                if (pendingFile != null && onSendMedia != null) {
+                                    selectedFile = null
+                                    onSendMedia(pendingFile.first, pendingFile.second)
+                                }
+                                if (pendingText != null) {
+                                    text = ""
+                                    onSendMessage(pendingText, replyId)
+                                }
                             }
                         },
                         modifier = Modifier

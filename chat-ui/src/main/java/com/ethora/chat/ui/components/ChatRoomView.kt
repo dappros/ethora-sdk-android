@@ -355,6 +355,36 @@ fun ChatRoomView(
         wasImeVisible = isImeVisible
     }
 
+    // ---- Auto-scroll when the typing indicator appears ----
+    //
+    // The typing indicator is a LazyColumn item that's appended to the bottom
+    // of the list. If the user is at-or-near the bottom when another user
+    // starts typing, the new item lands below the visible viewport (hidden
+    // behind the input field) — they never see "X is typing…" because the
+    // list size grew but the scroll position didn't follow.
+    //
+    // Fix: on the empty→non-empty transition of `composingUsers`, check if
+    // the user was near the bottom *before* the indicator pushed the list
+    // down, and if so animate-scroll to the new bottom. If they're scrolled
+    // up reading older messages, don't fight them.
+    var hadComposingUsers by remember { mutableStateOf(composingUsers.isNotEmpty()) }
+    LaunchedEffect(composingUsers.isNotEmpty()) {
+        val nowComposing = composingUsers.isNotEmpty()
+        if (nowComposing && !hadComposingUsers && messages.isNotEmpty()) {
+            val total = listState.layoutInfo.totalItemsCount
+            val lastVisibleIdx = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val nearBottom = !listState.canScrollForward ||
+                (total > 0 && lastVisibleIdx >= total - 2)
+            if (nearBottom) {
+                // Brief delay lets the typing-indicator item compose so
+                // scrollToTrueBottom sees the updated totalItemsCount.
+                kotlinx.coroutines.delay(60)
+                scrollToTrueBottom(animate = true)
+            }
+        }
+        hadComposingUsers = nowComposing
+    }
+
     // Restore scroll position after loading older messages (avoid jumps)
     LaunchedEffect(scrollRestoreAnchor, isLoadingMore, messages.size) {
         val anchorId = scrollRestoreAnchor
@@ -639,7 +669,12 @@ fun ChatRoomView(
                                             .firstOrNull { it.messageId == message.id }
                                         val pendingMediaStatus = pendingMediaItem?.status
                                         val sendFailed = isUser && (
-                                            pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.FAILED_WAITING_RETRY ||
+                                            // Explicit failure flag survives reconnects so the bubble
+                                            // does not silently flip back to "delivered" after an
+                                            // auto-retry timer fires while the send still hasn't
+                                            // been confirmed by the server.
+                                            message.sendFailed == true ||
+                                                pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.FAILED_WAITING_RETRY ||
                                                 pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.PERMANENTLY_FAILED ||
                                                 ((message.pending == true || pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.QUEUED) &&
                                                     connectionState.status != ChatConnectionStatus.ONLINE)
