@@ -4,6 +4,10 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.04.30] — JitPack `v1.0.29`
+
+- **New:** In-bubble timestamp + sent indicator on `MessageBubble`. For this iteration the double-check means "delivered to the server"; the same icon will be re-purposed once true delivery/read receipts are added.
+
 ## [26.04.28] — JitPack `v1.0.28`
 
 - **Fixed:** File messages loaded from history (MAM) on login no longer render as plain-text bubbles. The MAM parser now extracts the `<data>` element when the archive serialises it as `<data ...></data>` (open/close form, in addition to the `<data .../>` self-closing form), so `isMediafile`, `location`, `mimetype`, `originalName`, `size`, `locationPreview` and `waveForm` survive the round-trip and `MessageBubble` renders the proper image / video / audio / file component instead of falling through to the text body.

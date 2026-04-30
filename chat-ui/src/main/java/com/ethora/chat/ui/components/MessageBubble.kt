@@ -35,6 +35,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.ui.graphics.Color
 import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
@@ -167,81 +169,126 @@ fun MessageBubble(
                 shadowElevation = if (message.isDeleted == true) 0.dp else if (isUser) 3.dp else 1.dp,
                 tonalElevation = 0.dp
             ) {
-                // Check if message is deleted
-                if (message.isDeleted == true) {
-                    // Show deleted message UI (matches web: DeletedMessage component)
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Delete icon container
-                        Surface(
-                            shape = RoundedCornerShape(7.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.size(28.dp)
+                // Sent indicator shows on every own message that the server has
+                // echoed back (no XMPP receipts on the wire yet, so the
+                // double-check means "delivered to the server"). Time renders
+                // inside the bubble too — WhatsApp/Telegram style — and is
+                // gated on `showTimestamp` so grouped messages keep their tick
+                // even when the time label is suppressed.
+                val showSentIcon = isUser
+                    && message.pending != true
+                    && pendingMediaStatus == null
+                    && !sendFailed
+                    && message.isDeleted != true
+                Column {
+                    // Check if message is deleted
+                    if (message.isDeleted == true) {
+                        // Show deleted message UI (matches web: DeletedMessage component)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
+                            // Delete icon container
+                            Surface(
+                                shape = RoundedCornerShape(7.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.size(28.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Delete,
-                                    contentDescription = "Deleted",
-                                    modifier = Modifier.size(18.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                                )
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Deleted",
+                                        modifier = Modifier.size(18.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    )
+                                }
                             }
-                        }
-                        Text(
-                            text = "This message was deleted.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                            fontStyle = FontStyle.Italic
-                        )
-                    }
-                } else {
-                    Column {
-                        // Show quoted message if it exists
-                        parentMessage?.let { parent ->
-                            QuotedMessage(
-                                message = parent,
-                                isUser = isUser,
-                                modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 8.dp)
+                            Text(
+                                text = "This message was deleted.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                fontStyle = FontStyle.Italic
                             )
                         }
-                        
-                        if (message.isMediafile == "true") {
-                    // Show media component (only if not deleted)
-                    MediaMessage(
-                        message = message,
-                        isUser = isUser,
-                        onMediaClick = { msg -> onMediaClick?.invoke(msg) },
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
-                    )
-                } else {
-                    // Show text message with formatting
-                    FormattedMessageText(
-                        text = message.body,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                        textColor = if (isUser) 
-                            MaterialTheme.colorScheme.onPrimary 
-                        else 
-                            MaterialTheme.colorScheme.onSurfaceVariant,
-                        lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4
-                    )
-                    val firstUrl = remember(message.body) { extractFirstUrl(message.body) }
-                    if (!firstUrl.isNullOrBlank()) {
-                        UrlPreviewCard(
-                            url = firstUrl,
-                            isUser = isUser,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    } else {
+                        Column {
+                            // Show quoted message if it exists
+                            parentMessage?.let { parent ->
+                                QuotedMessage(
+                                    message = parent,
+                                    isUser = isUser,
+                                    modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 8.dp)
+                                )
+                            }
+
+                            if (message.isMediafile == "true") {
+                                // Show media component (only if not deleted)
+                                MediaMessage(
+                                    message = message,
+                                    isUser = isUser,
+                                    onMediaClick = { msg -> onMediaClick?.invoke(msg) },
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+                                )
+                            } else {
+                                // Show text message with formatting
+                                FormattedMessageText(
+                                    text = message.body,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                    textColor = if (isUser)
+                                        MaterialTheme.colorScheme.onPrimary
+                                    else
+                                        MaterialTheme.colorScheme.onSurfaceVariant,
+                                    lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4
+                                )
+                                val firstUrl = remember(message.body) { extractFirstUrl(message.body) }
+                                if (!firstUrl.isNullOrBlank()) {
+                                    UrlPreviewCard(
+                                        url = firstUrl,
+                                        isUser = isUser,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Time renders on every bubble inside, regardless of the
+                    // `showTimestamp` grouping flag, so each message carries
+                    // its own time + (own-only) sent indicator.
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.End)
+                            .padding(end = 10.dp, start = 10.dp, bottom = 6.dp, top = 0.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = formatTime(message.date),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = when {
+                                message.isDeleted == true ->
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                isUser ->
+                                    MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f)
+                                else ->
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            }
                         )
+                        if (showSentIcon) {
+                            Icon(
+                                imageVector = Icons.Default.DoneAll,
+                                contentDescription = "Sent",
+                                tint = Color(0xFF4CAF50),
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
                     }
                 }
             }
-        }
-    }
     
     // Reactions
     message.reaction?.let { reactions ->
@@ -254,47 +301,42 @@ fun MessageBubble(
         }
     }
             
-    // Timestamp - only show if showTimestamp is true
-            if (showTimestamp) {
-                Spacer(modifier = Modifier.height(6.dp))
+    // Sending/failed status text stays OUTSIDE the bubble so the longer
+            // "Sending failed. Tap to retry or delete." copy doesn't have to
+            // squeeze into a small bubble. Timestamp and sent indicator now
+            // render inside the bubble (above), WhatsApp-style.
+            if (showTimestamp && isUser && (message.pending == true || pendingMediaStatus != null || sendFailed)) {
+                Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.padding(horizontal = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Show "sending..." if pending and it's user's message
-                    if (isUser && (message.pending == true || pendingMediaStatus != null || sendFailed)) {
-                        Text(
-                            text = if (sendFailed) {
-                                "⚠ Sending failed. Tap to retry or delete."
-                            } else {
-                                when (pendingMediaStatus) {
-                                    PendingMediaSendStatus.FAILED_WAITING_RETRY -> "failed, will retry"
-                                    PendingMediaSendStatus.PERMANENTLY_FAILED -> "failed"
-                                    PendingMediaSendStatus.READY_TO_SEND -> "retrying..."
-                                    PendingMediaSendStatus.UPLOADING -> "sending..."
-                                    PendingMediaSendStatus.QUEUED -> "sending..."
-                                    PendingMediaSendStatus.SENT,
-                                    null -> "sending..."
-                                }
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (sendFailed) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                            }
-                        )
-                    }
                     Text(
-                        text = formatTime(message.date),
+                        text = if (sendFailed) {
+                            "⚠ Sending failed. Tap to retry or delete."
+                        } else {
+                            when (pendingMediaStatus) {
+                                PendingMediaSendStatus.FAILED_WAITING_RETRY -> "failed, will retry"
+                                PendingMediaSendStatus.PERMANENTLY_FAILED -> "failed"
+                                PendingMediaSendStatus.READY_TO_SEND -> "retrying..."
+                                PendingMediaSendStatus.UPLOADING -> "sending..."
+                                PendingMediaSendStatus.QUEUED -> "sending..."
+                                PendingMediaSendStatus.SENT,
+                                null -> "sending..."
+                            }
+                        },
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        color = if (sendFailed) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                        }
                     )
                 }
             }
         }
-        
+
         // No avatar for sent messages (right side) - user's own messages don't show avatar
         if (isUser) {
             Spacer(modifier = Modifier.width(12.dp))
