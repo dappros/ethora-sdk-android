@@ -49,6 +49,7 @@ import com.ethora.chat.core.store.toBareRoomName
 import com.ethora.chat.core.push.PushNotificationManager
 import com.ethora.chat.core.xmpp.XMPPClientDelegate
 import com.ethora.chat.core.xmpp.ConnectionStatus
+import com.ethora.chat.internal.ChatXMPPClientOwnership
 import com.ethora.chat.ui.components.ChatRoomView
 import com.ethora.chat.ui.components.ConfigErrorScreen
 import com.ethora.chat.ui.components.RoomListView
@@ -700,18 +701,23 @@ fun Chat(
             }
         }
         
-        DisposableEffect(xmppClient) {
+        DisposableEffect(xmppClient, bootstrappedClient) {
             onDispose {
                 android.util.Log.d("EthoraChat", "🧹 Disposing XMPP components")
                 messageLoaderQueue?.stop()
                 messagePriorityQueue?.stop()
-                xmppClient?.disconnect()
-                LogoutService.setXMPPClient(null)
-                ConnectionStore.setReconnectAction(null)
-                ConnectionStore.setState(
-                    status = ChatConnectionStatus.OFFLINE,
-                    reason = "Disposed"
-                )
+                val shouldDisconnectClient = ChatXMPPClientOwnership.shouldDisconnectOnDispose(xmppClient, bootstrappedClient)
+                if (shouldDisconnectClient) {
+                    xmppClient?.disconnect()
+                    LogoutService.setXMPPClient(null)
+                    ConnectionStore.setReconnectAction(null)
+                    ConnectionStore.setState(
+                        status = ChatConnectionStatus.OFFLINE,
+                        reason = "Disposed"
+                    )
+                } else {
+                    android.util.Log.d("EthoraChat", "Keeping shared bootstrap XMPPClient alive after Chat dispose")
+                }
             }
         }
         

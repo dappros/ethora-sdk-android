@@ -19,8 +19,10 @@ import kotlinx.coroutines.flow.first
  * Persistence manager for chat data
  * Matches web: redux-persist with localStorage
  */
+private val Context.chatPersistenceDataStore: DataStore<Preferences> by preferencesDataStore(name = "chat_persistence")
+
 class ChatPersistenceManager(private val context: Context) {
-    private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "chat_persistence")
+    private val appContext = context.applicationContext
     private val gson = Gson()
     
     companion object {
@@ -46,7 +48,7 @@ class ChatPersistenceManager(private val context: Context) {
             }
             
             val json = gson.toJson(roomsWithoutMessages)
-            context.dataStore.edit { preferences ->
+            appContext.chatPersistenceDataStore.edit { preferences ->
                 preferences[ROOMS_KEY] = json
             }
             android.util.Log.d("ChatPersistenceManager", "💾 Saved ${roomsWithoutMessages.size} rooms (without messages) to persistence")
@@ -62,7 +64,7 @@ class ChatPersistenceManager(private val context: Context) {
      */
     suspend fun loadRooms(): List<Room> {
         return try {
-            val json = context.dataStore.data.first()[ROOMS_KEY] ?: return emptyList()
+            val json = appContext.chatPersistenceDataStore.data.first()[ROOMS_KEY] ?: return emptyList()
             val type = object : TypeToken<List<Room>>() {}.type
             val rooms = gson.fromJson<List<Room>>(json, type) ?: emptyList()
             val now = System.currentTimeMillis()
@@ -84,7 +86,7 @@ class ChatPersistenceManager(private val context: Context) {
      */
     suspend fun saveCurrentRoomJid(roomJid: String?) {
         try {
-            context.dataStore.edit { preferences ->
+            appContext.chatPersistenceDataStore.edit { preferences ->
                 if (roomJid != null) {
                     preferences[CURRENT_ROOM_JID_KEY] = roomJid
                 } else {
@@ -102,7 +104,7 @@ class ChatPersistenceManager(private val context: Context) {
      */
     suspend fun loadCurrentRoomJid(): String? {
         return try {
-            val jid = context.dataStore.data.first()[CURRENT_ROOM_JID_KEY]
+            val jid = appContext.chatPersistenceDataStore.data.first()[CURRENT_ROOM_JID_KEY]
             android.util.Log.d("ChatPersistenceManager", "📂 Loaded current room JID: $jid")
             jid
         } catch (e: Exception) {
@@ -116,7 +118,7 @@ class ChatPersistenceManager(private val context: Context) {
      */
     suspend fun saveUser(user: User?) {
         try {
-            context.dataStore.edit { preferences ->
+            appContext.chatPersistenceDataStore.edit { preferences ->
                 if (user != null) {
                     val json = gson.toJson(user)
                     preferences[USER_KEY] = json
@@ -135,7 +137,7 @@ class ChatPersistenceManager(private val context: Context) {
      */
     suspend fun loadUser(): User? {
         return try {
-            val json = context.dataStore.data.first()[USER_KEY] ?: return null
+            val json = appContext.chatPersistenceDataStore.data.first()[USER_KEY] ?: return null
             val user = gson.fromJson<User>(json, User::class.java)
             android.util.Log.d("ChatPersistenceManager", "📂 Loaded user from persistence")
             user
@@ -150,7 +152,7 @@ class ChatPersistenceManager(private val context: Context) {
      */
     suspend fun saveTokens(token: String?, refreshToken: String?) {
         try {
-            context.dataStore.edit { preferences ->
+            appContext.chatPersistenceDataStore.edit { preferences ->
                 if (token != null) {
                     preferences[TOKEN_KEY] = token
                 } else {
@@ -173,7 +175,7 @@ class ChatPersistenceManager(private val context: Context) {
      */
     suspend fun loadTokens(): Pair<String?, String?> {
         return try {
-            val prefs = context.dataStore.data.first()
+            val prefs = appContext.chatPersistenceDataStore.data.first()
             val token = prefs[TOKEN_KEY]
             val refreshToken = prefs[REFRESH_TOKEN_KEY]
             android.util.Log.d("ChatPersistenceManager", "📂 Loaded tokens from persistence")
@@ -221,7 +223,7 @@ class ChatPersistenceManager(private val context: Context) {
      */
     fun clearJWTToken() {
         try {
-            val localStorage = LocalStorage(context)
+            val localStorage = LocalStorage(appContext)
             localStorage.clearJWTToken()
             android.util.Log.d("ChatPersistenceManager", "🗑️ Cleared JWT token")
         } catch (e: Exception) {
@@ -234,7 +236,7 @@ class ChatPersistenceManager(private val context: Context) {
      */
     fun saveJWTToken(token: String) {
         try {
-            val localStorage = LocalStorage(context)
+            val localStorage = LocalStorage(appContext)
             localStorage.saveJWTToken(token)
             android.util.Log.d("ChatPersistenceManager", "💾 Saved JWT token")
         } catch (e: Exception) {
@@ -247,7 +249,7 @@ class ChatPersistenceManager(private val context: Context) {
      */
     fun getJWTToken(): String? {
         return try {
-            val localStorage = LocalStorage(context)
+            val localStorage = LocalStorage(appContext)
             localStorage.getJWTToken()
         } catch (e: Exception) {
             android.util.Log.e("ChatPersistenceManager", "❌ Error getting JWT token", e)
@@ -260,10 +262,10 @@ class ChatPersistenceManager(private val context: Context) {
      */
     suspend fun clearAll() {
         try {
-            context.dataStore.edit { preferences ->
+            appContext.chatPersistenceDataStore.edit { preferences ->
                 preferences.clear()
             }
-            val prefs = context.getSharedPreferences(SCROLL_POSITIONS_PREFS, Context.MODE_PRIVATE)
+            val prefs = appContext.getSharedPreferences(SCROLL_POSITIONS_PREFS, Context.MODE_PRIVATE)
             prefs.edit().clear().apply()
             // Clear JWT token
             clearJWTToken()

@@ -39,7 +39,12 @@ object MessageLoader {
     /**
      * Initialize with LocalStorage for sync timestamp tracking
      */
+    @Synchronized
     fun initialize(localStorage: LocalStorage) {
+        if (this.localStorage === localStorage) {
+            Log.d(TAG, "↻ MessageLoader already initialized with this LocalStorage")
+            return
+        }
         this.localStorage = localStorage
     }
     

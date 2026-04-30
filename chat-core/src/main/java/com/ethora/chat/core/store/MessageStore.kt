@@ -137,7 +137,12 @@ object MessageStore {
     /**
      * Initialize with MessageCache for persistence
      */
+    @Synchronized
     fun initialize(cache: MessageCache) {
+        if (messageCache === cache) {
+            android.util.Log.d("MessageStore", "↻ MessageStore already initialized with this MessageCache")
+            return
+        }
         messageCache = cache
         android.util.Log.d("MessageStore", "✅ MessageStore initialized with MessageCache")
     }

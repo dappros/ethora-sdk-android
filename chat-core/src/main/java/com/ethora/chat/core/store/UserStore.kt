@@ -29,7 +29,12 @@ object UserStore {
     /**
      * Initialize with persistence manager
      */
+    @Synchronized
     fun initialize(persistence: ChatPersistenceManager) {
+        if (persistenceManager === persistence) {
+            android.util.Log.d("UserStore", "↻ UserStore already initialized with this ChatPersistenceManager")
+            return
+        }
         persistenceManager = persistence
         android.util.Log.d("UserStore", "✅ UserStore initialized with ChatPersistenceManager")
     }

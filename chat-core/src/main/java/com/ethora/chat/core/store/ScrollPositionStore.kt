@@ -14,8 +14,14 @@ object ScrollPositionStore {
     /**
      * Initialize with context
      */
+    @Synchronized
     fun initialize(context: Context) {
-        sharedPreferences = context.getSharedPreferences("chat_scroll_positions", Context.MODE_PRIVATE)
+        val prefs = context.applicationContext.getSharedPreferences("chat_scroll_positions", Context.MODE_PRIVATE)
+        if (sharedPreferences === prefs) {
+            android.util.Log.d("ScrollPositionStore", "↻ ScrollPositionStore already initialized")
+            return
+        }
+        sharedPreferences = prefs
         // Load existing scroll positions
         loadScrollPositions()
         android.util.Log.d("ScrollPositionStore", "✅ ScrollPositionStore initialized")

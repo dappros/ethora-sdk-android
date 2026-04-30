@@ -123,47 +123,43 @@ dependencies {
 
 ## Host App Setup
 
-Before rendering `Chat(...)`, initialize SDK stores (same pattern as sample app):
+Initialize the SDK once per app process, preferably from `Application.onCreate`,
+before rendering `Chat(...)` or starting the background bootstrap:
 
 ```kotlin
-import android.content.Context
-import com.ethora.chat.core.persistence.ChatDatabase
-import com.ethora.chat.core.persistence.ChatPersistenceManager
-import com.ethora.chat.core.persistence.LocalStorage
-import com.ethora.chat.core.persistence.MessageCache
-import com.ethora.chat.core.push.PushNotificationManager
-import com.ethora.chat.core.store.MessageLoader
-import com.ethora.chat.core.store.MessageStore
-import com.ethora.chat.core.store.RoomStore
-import com.ethora.chat.core.store.ScrollPositionStore
-import com.ethora.chat.core.store.UserStore
+import android.app.Application
+import com.ethora.chat.EthoraChatSdk
 
-fun initEthoraSdk(context: Context) {
-    val appContext = context.applicationContext
-    val persistenceManager = ChatPersistenceManager(appContext)
-    val chatDatabase = ChatDatabase.getDatabase(appContext)
-    val messageCache = MessageCache(chatDatabase)
-
-    RoomStore.initialize(persistenceManager)
-    UserStore.initialize(persistenceManager)
-    MessageStore.initialize(messageCache)
-    ScrollPositionStore.initialize(appContext)
-    MessageLoader.initialize(LocalStorage(appContext))
-
-    // Optional but recommended if push is enabled
-    PushNotificationManager.initialize(appContext)
+class MyApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        EthoraChatSdk.initialize(this)
+    }
 }
 ```
+
+`EthoraChatSdk.initialize(...)` is idempotent. Calling it defensively more than
+once in the same process is safe, but do not make Activity or Composable
+lifecycle own SDK persistence setup. Android may destroy and recreate an
+Activity while keeping the process alive, and persistence should remain
+process-scoped.
+
+If you have an existing integration that manually initializes
+`RoomStore.initialize(...)`, `UserStore.initialize(...)`, and
+`MessageStore.initialize(...)`, those calls remain supported and idempotent.
+New integrations should prefer the single initializer above.
 
 ### Pre-loading data before the Chat tab opens
 
 If your host shell (Activity, Service, or Application) needs the unread count
 before the user has ever opened the chat tab — or if your chat screen is lazily
 instantiated and may not mount for a while — call
-`EthoraChatBootstrap.initializeAsync` right after `initEthoraSdk`:
+`EthoraChatBootstrap.initializeAsync` right after `EthoraChatSdk.initialize(...)`:
 
 ```kotlin
+import android.app.Application
 import com.ethora.chat.EthoraChatBootstrap
+import com.ethora.chat.EthoraChatSdk
 import com.ethora.chat.core.config.ChatConfig
 import com.ethora.chat.core.config.JWTLoginConfig
 import com.ethora.chat.core.config.XMPPSettings
@@ -171,7 +167,7 @@ import com.ethora.chat.core.config.XMPPSettings
 class MyApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        initEthoraSdk(this)
+        EthoraChatSdk.initialize(this)
 
         val config = ChatConfig(
             appId = "YOUR_APP_ID",
@@ -192,7 +188,10 @@ class MyApplication : Application() {
 Once the bootstrap finishes, `RoomStore.rooms` and all unread APIs reflect real
 server state — without the `Chat` composable ever mounting. The same config and
 XMPP socket are reused when the user eventually opens the chat tab, so no second
-connection is opened.
+connection is opened. If the user later leaves the chat tab, the shared
+bootstrap socket remains alive until explicit logout or
+`EthoraChatBootstrap.shutdown()`, so `EthoraChatBootstrap.addUnreadListener(...)`
+can keep receiving unread changes while the `Chat` UI is unmounted.
 
 **Config validation:** if `baseUrl` or `xmppSettings` is missing,
 `EthoraChatBootstrap.initialize` aborts immediately, sets

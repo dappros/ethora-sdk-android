@@ -4,6 +4,14 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.05.01] — JitPack `v1.0.31`
+
+- **New:** `EthoraChatSdk.initialize(context)` — a one-shot, process-level initializer for SDK persistence, stores, message cache, pending media queue, message loader, scroll positions and push setup. It is idempotent so defensive repeated calls during host app startup are safe.
+- **Fixed:** Recreating an Activity and re-running SDK setup no longer creates multiple active DataStore instances for `chat_persistence.preferences_pb` / `chat_storage.preferences_pb`. DataStore ownership is now singleton-backed and uses the application context.
+- **Fixed:** Leaving the `Chat` composable no longer disconnects the shared bootstrap XMPP socket. Hosts using `EthoraChatBootstrap.initializeAsync(...)` with `addUnreadListener(...)` can keep receiving unread updates while the chat UI is unmounted; explicit logout / bootstrap shutdown still closes the socket.
+
+---
+
 ## [26.04.30] — JitPack `v1.0.30`
 
 - **Fixed:** Media bubbles no longer render as a blank surface when their image / preview URL fails to load (404, expired token, network down). `ImageMessage` and the preview thumbnail in `FileMessage` now track AsyncImage error state and fall back to a `InsertDriveFile` icon, so every media message has a visible icon regardless of CDN reachability.

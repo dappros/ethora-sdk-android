@@ -173,8 +173,14 @@ object PendingMediaSendQueue {
 
     fun initialize(context: Context) {
         synchronized(lock) {
-            prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            pendingUploadsDir(context).mkdirs()
+            val appContext = context.applicationContext
+            val nextPrefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            if (prefs === nextPrefs) {
+                Log.d(TAG, "↻ Pending media send queue already initialized")
+                return
+            }
+            prefs = nextPrefs
+            pendingUploadsDir(appContext).mkdirs()
             val restored = PendingMediaSendCodec.decodeList(prefs?.getString(QUEUE_KEY, null))
                 .map { item ->
                     if (item.status == PendingMediaSendStatus.UPLOADING) {

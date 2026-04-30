@@ -16,16 +16,18 @@ import kotlinx.coroutines.flow.first
 /**
  * Local storage utility using DataStore and EncryptedSharedPreferences for sensitive data
  */
+private val Context.chatStorageDataStore: DataStore<Preferences> by preferencesDataStore(name = "chat_storage")
+
 class LocalStorage(private val context: Context) {
-    private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "chat_storage")
+    private val appContext = context.applicationContext
     
     // Encrypted storage for JWT tokens
-    private val masterKey = MasterKey.Builder(context)
+    private val masterKey = MasterKey.Builder(appContext)
         .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
         .build()
     
     private val encryptedPrefs: SharedPreferences = EncryptedSharedPreferences.create(
-        context,
+        appContext,
         "encrypted_chat_storage",
         masterKey,
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
@@ -44,7 +46,7 @@ class LocalStorage(private val context: Context) {
      * Save user token
      */
     suspend fun saveUserToken(token: String) {
-        context.dataStore.edit { preferences ->
+        appContext.chatStorageDataStore.edit { preferences ->
             preferences[USER_TOKEN_KEY] = token
         }
     }
@@ -53,7 +55,7 @@ class LocalStorage(private val context: Context) {
      * Get user token
      */
     fun getUserToken(): Flow<String?> {
-        return context.dataStore.data.map { preferences ->
+        return appContext.chatStorageDataStore.data.map { preferences ->
             preferences[USER_TOKEN_KEY]
         }
     }
@@ -62,7 +64,7 @@ class LocalStorage(private val context: Context) {
      * Save refresh token
      */
     suspend fun saveRefreshToken(token: String) {
-        context.dataStore.edit { preferences ->
+        appContext.chatStorageDataStore.edit { preferences ->
             preferences[REFRESH_TOKEN_KEY] = token
         }
     }
@@ -71,7 +73,7 @@ class LocalStorage(private val context: Context) {
      * Get refresh token
      */
     fun getRefreshToken(): Flow<String?> {
-        return context.dataStore.data.map { preferences ->
+        return appContext.chatStorageDataStore.data.map { preferences ->
             preferences[REFRESH_TOKEN_KEY]
         }
     }
@@ -80,7 +82,7 @@ class LocalStorage(private val context: Context) {
      * Save user ID
      */
     suspend fun saveUserId(userId: String) {
-        context.dataStore.edit { preferences ->
+        appContext.chatStorageDataStore.edit { preferences ->
             preferences[USER_ID_KEY] = userId
         }
     }
@@ -89,7 +91,7 @@ class LocalStorage(private val context: Context) {
      * Get user ID
      */
     fun getUserId(): Flow<String?> {
-        return context.dataStore.data.map { preferences ->
+        return appContext.chatStorageDataStore.data.map { preferences ->
             preferences[USER_ID_KEY]
         }
     }
@@ -134,7 +136,7 @@ class LocalStorage(private val context: Context) {
      * Save last sync timestamp
      */
     suspend fun saveLastSyncTimestamp(timestamp: Long) {
-        context.dataStore.edit { preferences ->
+        appContext.chatStorageDataStore.edit { preferences ->
             preferences[LAST_SYNC_TIMESTAMP_KEY] = timestamp.toString()
         }
     }
@@ -144,7 +146,7 @@ class LocalStorage(private val context: Context) {
      */
     suspend fun getLastSyncTimestamp(): Long? {
         return try {
-            val timestampStr = context.dataStore.data.first()[LAST_SYNC_TIMESTAMP_KEY]
+            val timestampStr = appContext.chatStorageDataStore.data.first()[LAST_SYNC_TIMESTAMP_KEY]
             timestampStr?.toLongOrNull()
         } catch (e: Exception) {
             android.util.Log.e("LocalStorage", "❌ Error getting last sync timestamp", e)
@@ -156,7 +158,7 @@ class LocalStorage(private val context: Context) {
      * Clear all data
      */
     suspend fun clear() {
-        context.dataStore.edit { preferences ->
+        appContext.chatStorageDataStore.edit { preferences ->
             preferences.clear()
         }
         clearJWTToken()
