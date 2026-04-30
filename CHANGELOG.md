@@ -4,6 +4,12 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.04.30] — JitPack `v1.0.30`
+
+- **Fixed:** Media bubbles no longer render as a blank surface when their image / preview URL fails to load (404, expired token, network down). `ImageMessage` and the preview thumbnail in `FileMessage` now track AsyncImage error state and fall back to a `InsertDriveFile` icon, so every media message has a visible icon regardless of CDN reachability.
+
+---
+
 ## [26.04.30] — JitPack `v1.0.29`
 
 - **New:** In-bubble timestamp + sent indicator on `MessageBubble`. For this iteration the double-check means "delivered to the server"; the same icon will be re-purposed once true delivery/read receipts are added.

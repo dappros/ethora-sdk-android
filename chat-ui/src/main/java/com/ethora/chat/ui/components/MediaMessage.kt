@@ -99,13 +99,16 @@ private fun ImageMessage(
         }
     }
 
+    var loadFailed by remember(model) { mutableStateOf(false) }
+    val showFallback = model == null || loadFailed
+
     Surface(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onClick),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
     ) {
-        if (model != null) {
+        if (!showFallback) {
             AsyncImage(
                 model = model,
                 contentDescription = fileName,
@@ -113,27 +116,28 @@ private fun ImageMessage(
                     .widthIn(min = 160.dp, max = 300.dp)
                     .heightIn(min = 120.dp, max = 400.dp),
                 contentScale = ContentScale.Fit,
-                onError = {
-                    // Swallow — placeholder below keeps the bubble visible.
-                }
+                onError = { loadFailed = true }
             )
         } else {
-            // Placeholder bubble so the message is never a zero-size blob
-            // while we wait for upload / CDN URL to arrive.
-            Box(
-                modifier = Modifier
-                    .widthIn(min = 160.dp)
-                    .heightIn(min = 120.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Image,
-                    contentDescription = fileName,
-                    modifier = Modifier.size(40.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                )
-            }
+            MediaFallbackIcon(fileName = fileName)
         }
+    }
+}
+
+@Composable
+private fun MediaFallbackIcon(fileName: String) {
+    Box(
+        modifier = Modifier
+            .widthIn(min = 160.dp)
+            .heightIn(min = 120.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.InsertDriveFile,
+            contentDescription = fileName,
+            modifier = Modifier.size(40.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+        )
     }
 }
 
@@ -233,6 +237,9 @@ private fun FileMessage(
         MaterialTheme.colorScheme.onSurfaceVariant
     }
 
+    var previewFailed by remember(previewUrl) { mutableStateOf(false) }
+    val showIcon = previewUrl.isNullOrBlank() || previewFailed
+
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
@@ -242,15 +249,15 @@ private fun FileMessage(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Show preview image if available, otherwise show file icon
-        if (previewUrl != null && previewUrl.isNotBlank()) {
+        if (!showIcon) {
             AsyncImage(
                 model = previewUrl,
                 contentDescription = fileName,
                 modifier = Modifier
                     .size(60.dp)
                     .clip(RoundedCornerShape(8.dp)),
-                contentScale = ContentScale.Crop
+                contentScale = ContentScale.Crop,
+                onError = { previewFailed = true }
             )
         } else {
             Icon(
