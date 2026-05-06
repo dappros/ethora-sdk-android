@@ -4,6 +4,15 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.05.06] — JitPack `v1.0.32`
+
+- **New:** `EthoraChatSdk.shutdown()` — symmetric counterpart to `EthoraChatSdk.initialize(context)`. Disconnects the shared bootstrap XMPP client, resets the runtime sync flags, clears the cached fallback client, and flips the SDK's `initialized` flag so a subsequent `initialize(...)` re-runs the real setup. Persisted data — Room database, DataStore, encrypted token storage, pending-media files, scroll positions — is intentionally preserved so unsent messages survive a logout/login round-trip.
+- **Docs:** Added an "SDK lifecycle" section to the README that spells out the three concentric scopes (`EthoraChatSdk` for persistence, `EthoraChatBootstrap` for session, `Chat` composable for UI) and which initialization sites are safe vs. which trigger the duplicate-DataStore failure. Also documents the logout/shutdown flow and clarifies that the `Chat` composable no longer disconnects the bootstrap-owned socket on dispose.
+- **Fixed:** Removed the redundant root Maven publication that shadowed `:ethora-component:release`. JitPack builds no longer emit the `Multiple publications with coordinates 'com.github.dappros:ethora-sdk-android:vX.Y.Z' ... will overwrite each other` warning, and the install path is no longer racy on whichever publication runs last.
+- **Docs:** README integrator dependency example updated to `com.github.dappros:ethora-sdk-android:<version>` — the coordinate that JitPack actually publishes. The previous `com.github.dappros.ethora-sdk-android:ethora-component:<version>` form returned 404 because no module is published under that artifactId.
+
+---
+
 ## [26.05.01] — JitPack `v1.0.31`
 
 - **New:** `EthoraChatSdk.initialize(context)` — a one-shot, process-level initializer for SDK persistence, stores, message cache, pending media queue, message loader, scroll positions and push setup. It is idempotent so defensive repeated calls during host app startup are safe.

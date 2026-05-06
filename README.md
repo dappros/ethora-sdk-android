@@ -93,11 +93,11 @@ dependencyResolutionManagement {
 
 ```kotlin
 dependencies {
-    implementation("com.github.dappros.ethora-sdk-android:ethora-component:<version>")
+    implementation("com.github.dappros:ethora-sdk-android:<version>")
 }
 ```
 
-Use a release tag or commit SHA for `<version>`.
+Use a release tag (e.g. `v1.0.31`) or commit SHA for `<version>`.
 
 ### Option B: Source module integration
 
@@ -197,6 +197,94 @@ can keep receiving unread changes while the `Chat` UI is unmounted.
 `EthoraChatBootstrap.initialize` aborts immediately, sets
 `ChatConnectionStatus.ERROR` with a descriptive message, and never attempts an
 XMPP connection. It will not fall back to any built-in server.
+
+### SDK lifecycle
+
+The SDK has three concentric lifecycles. Mixing them up is the most common
+source of "duplicate DataStore" errors and disappearing unread callbacks, so
+this section spells out who owns what.
+
+**1. Process scope — `EthoraChatSdk` (persistence, stores).** All of
+`RoomStore`, `UserStore`, `MessageStore`, `MessageCache`, `LocalStorage`, the
+`PendingMediaSendQueue`, `ScrollPositionStore` and `PushNotificationManager`
+are process-wide singletons backed by a single `DataStore<Preferences>` per
+file. They must be initialized exactly once per process and must use the
+**application context**:
+
+| Where to initialize | OK? |
+|---|---|
+| `Application.onCreate()` | ✅ recommended |
+| First Activity's `onCreate()` *as a fallback*, with `applicationContext` | ⚠️ tolerated — `EthoraChatSdk.initialize` is idempotent — but Activity recreation re-runs `onCreate`, so this only works because the second call short-circuits |
+| Per-Activity setup with the Activity context | ❌ will eventually create a duplicate `DataStore` and throw `IllegalStateException: There are multiple DataStores active for the same file` |
+| Inside a Composable (`LaunchedEffect`, etc.) | ❌ same as above, plus it ties persistence setup to a recomposition you do not control |
+
+`EthoraChatSdk.initialize(...)` is `@Synchronized` and guarded by a
+`@Volatile initialized` flag, so calling it again in the same process is a
+cheap no-op. The legacy per-store `RoomStore.initialize(...)` /
+`UserStore.initialize(...)` / `MessageStore.initialize(...)` calls remain
+supported and are individually idempotent — they are kept for backwards
+compatibility, but new integrations should use `EthoraChatSdk.initialize`.
+
+**2. Session scope — `EthoraChatBootstrap` (XMPP client, unread listeners).**
+The shared XMPP socket and the unread-listener registry live on
+`EthoraChatBootstrap`, not on the `Chat` composable. A typical app shape:
+
+```kotlin
+EthoraChatSdk.initialize(applicationContext)            // step 1, once
+EthoraChatBootstrap.initializeAsync(appCtx, chatConfig) // step 2, per session
+val reg = EthoraChatBootstrap.addUnreadListener { hasUnread ->
+    updateBadge(hasUnread)
+}
+```
+
+The unread listener fires regardless of whether the `Chat` composable is on
+screen. The only caller responsible for that lifecycle is the host — when
+you no longer need the listener (e.g. on logout) call `reg.close()`.
+
+**3. UI scope — the `Chat` composable.** The composable consumes
+`EthoraChatBootstrap`'s shared client when one is available; if it is not
+available it falls back to creating a connection of its own. On dispose, the
+composable disconnects **only the client it created itself**. The
+bootstrap-owned client is left running so unread callbacks continue to fire
+while the chat tab is unmounted. This decision is made automatically — there
+is no `disconnectOnDispose` flag to set — and is implemented in
+`ChatXMPPClientOwnership.shouldDisconnectOnDispose`.
+
+#### Logout / shutdown
+
+To tear down a session — for example on user-driven logout, or in tests
+between cases — call:
+
+```kotlin
+EthoraChatSdk.shutdown()
+```
+
+`shutdown()`:
+- disconnects the shared bootstrap XMPP client and clears it,
+- resets the `InitBeforeLoadFlow` and `MessageLoader` sync flags so the next
+  login re-runs the first-pass history preload,
+- clears the cached fallback client in `XMPPClientRegistry`,
+- flips `EthoraChatSdk`'s `initialized` flag so a subsequent
+  `EthoraChatSdk.initialize(...)` re-runs the real setup.
+
+`shutdown()` does **not** delete persisted data: the Room database, DataStore
+preferences, encrypted token storage, pending-media files and scroll
+positions all survive. This is intentional — pending offline messages and
+saved tokens must outlive a logout/login round-trip on the same device.
+
+If you need a fully-awaited teardown (e.g. before exiting a test), use the
+suspend variant from a coroutine:
+
+```kotlin
+EthoraChatBootstrap.shutdownBlocking()
+EthoraChatSdk.shutdown()  // flips the initialized flag
+```
+
+For a clean wipe of persisted data the host app is responsible for clearing
+its own storage (e.g. `context.getSharedPreferences(...)`,
+`context.deleteDatabase(...)`); the SDK does not expose a destructive "wipe
+all" entry point because it cannot tell what part of that state is yours and
+what part is shared with another logged-in user.
 
 ## Quick Start
 
