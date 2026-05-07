@@ -402,8 +402,7 @@ object RoomStore {
             return
         }
 
-        val currentUserXmppUsername = UserStore.currentUser.value?.xmppUsername
-        val userLocal = currentUserXmppUsername?.substringBefore("@")?.takeIf { it.isNotBlank() }
+        val currentUser = UserStore.currentUser.value
         val lastViewed = room.lastViewedTimestamp ?: 0L
 
         val countable = messages.count { msg ->
@@ -411,10 +410,7 @@ object RoomStore {
             if (msg.pending == true) return@count false
             if (msg.isSystemMessage == "true") return@count false
 
-            // Skip own messages (web: toLocal(msg.user.id) === toLocal(currentXmppUsername))
-            val msgLocal = msg.user.id.substringBefore("@").takeIf { it.isNotBlank() }
-            if (userLocal != null && msgLocal != null &&
-                msgLocal.equals(userLocal, ignoreCase = true)) return@count false
+            if (isOwnMessage(msg, currentUser)) return@count false
 
             val ts = msg.timestamp ?: msg.date.time
             if (ts <= 0) return@count false
@@ -429,6 +425,50 @@ object RoomStore {
             updateRoom(room.copy(unreadMessages = unread, unreadCapped = capped))
             android.util.Log.d("RoomStore", "📊 Unread count for $roomJid: $unread (capped=$capped)")
         }
+    }
+
+    fun recomputeUnreadForAllRooms() {
+        _rooms.value.forEach { room ->
+            updateUnreadCount(room.jid, com.ethora.chat.core.store.MessageStore.getMessagesForRoom(room.jid))
+        }
+    }
+
+    private fun isOwnMessage(
+        message: com.ethora.chat.core.models.Message,
+        currentUser: com.ethora.chat.core.models.User?
+    ): Boolean {
+        currentUser ?: return false
+        val currentCandidates = identityCandidates(
+            currentUser.id,
+            currentUser.xmppUsername,
+            currentUser.userJID,
+            currentUser.username
+        )
+        if (currentCandidates.isEmpty()) return false
+
+        val messageCandidates = identityCandidates(
+            message.user.id,
+            message.user.xmppUsername,
+            message.xmppFrom
+        )
+        return messageCandidates.any { it in currentCandidates }
+    }
+
+    private fun identityCandidates(vararg rawValues: String?): Set<String> {
+        return rawValues.asSequence()
+            .filterNotNull()
+            .flatMap { value ->
+                sequence {
+                    val trimmed = value.trim()
+                    if (trimmed.isBlank()) return@sequence
+                    yield(trimmed.lowercase())
+                    val bare = trimmed.substringBefore("/").lowercase()
+                    yield(bare)
+                    val local = bare.substringBefore("@")
+                    if (local.isNotBlank()) yield(local)
+                }
+            }
+            .toSet()
     }
 
     fun setHistoryPreloadState(roomJid: String, state: HistoryPreloadState) {

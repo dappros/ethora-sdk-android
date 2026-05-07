@@ -226,6 +226,15 @@ class XMPPClient(
         roomPresenceBlockedUntil.clear()
     }
 
+    fun resetRoomPresence(roomJID: String) {
+        val bareRoomJID = roomJID.substringBefore("/")
+        if (bareRoomJID.isBlank()) return
+        roomsWithPresenceResponse.remove(bareRoomJID)
+        roomPresenceInFlight.remove(bareRoomJID)
+        roomPresenceBlockedUntil.remove(bareRoomJID)
+        LogStore.info(TAG, "Presence state reset for $bareRoomJID", category = "presence")
+    }
+
     suspend fun ensureRoomPresence(
         roomJID: String,
         timeoutMs: Long = 2_000L,

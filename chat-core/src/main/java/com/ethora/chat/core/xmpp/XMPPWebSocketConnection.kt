@@ -1693,8 +1693,17 @@ class XMPPWebSocketConnection(
             
             if (hasNotAuthorized || hasForbidden) {
                 Log.w(TAG, "⚠️ Message error for room $roomJid: not authorized or forbidden")
-                // TODO: Send presence to room and retry queued messages
-                // For now, just log it
+                clientWrapper?.resetRoomPresence(roomJid)
+                scope.launch {
+                    runCatching {
+                        clientWrapper?.ensureRoomPresence(
+                            roomJID = roomJid,
+                            timeoutMs = 4_000L,
+                            waitForJoin = false,
+                            source = "message_error_recover"
+                        )
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing message error stanza", e)

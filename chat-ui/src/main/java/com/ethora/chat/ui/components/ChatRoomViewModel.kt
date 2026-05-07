@@ -109,6 +109,29 @@ class ChatRoomViewModel(
         }
 
         viewModelScope.launch {
+            combine(
+                PendingMediaSendQueue.items,
+                ConnectionStore.state,
+                UserStore.currentUser,
+                UserStore.token
+            ) { items, connection, user, token ->
+                PendingMediaQueueTrigger(
+                    hasPendingForRoom = items.any { queued ->
+                        queued.roomJid == room.jid && queued.status != PendingMediaSendStatus.SENT
+                    },
+                    isOnline = connection.status == ChatConnectionStatus.ONLINE,
+                    hasUser = user != null,
+                    hasToken = !token.isNullOrBlank() || !user?.token.isNullOrBlank(),
+                    hasClient = xmppClient != null
+                )
+            }.distinctUntilChanged().collect { trigger ->
+                if (trigger.hasPendingForRoom && trigger.isOnline && trigger.hasUser && trigger.hasToken && trigger.hasClient) {
+                    processPendingMediaQueue()
+                }
+            }
+        }
+
+        viewModelScope.launch {
             ConnectionStore.state
                 .map { it.status }
                 .distinctUntilChanged()
@@ -1034,6 +1057,14 @@ class ChatRoomViewModel(
     }
 
     companion object {
+        private data class PendingMediaQueueTrigger(
+            val hasPendingForRoom: Boolean,
+            val isOnline: Boolean,
+            val hasUser: Boolean,
+            val hasToken: Boolean,
+            val hasClient: Boolean
+        )
+
         // Room-keyed "last fast-ack" timestamps — shared across ViewModel
         // instances so switching chats doesn't reset the 600 ms throttle.
         private val fastAckLastByRoom = java.util.concurrent.ConcurrentHashMap<String, Long>()

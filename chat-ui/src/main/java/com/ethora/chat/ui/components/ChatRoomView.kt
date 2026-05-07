@@ -108,9 +108,14 @@ fun ChatRoomView(
         xmppClient?.let { client ->
             if (client.isFullyConnected()) {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    client.sendPresenceInRoom(room.jid)
+                    client.ensureRoomPresence(
+                        roomJID = room.jid,
+                        timeoutMs = 4_000L,
+                        waitForJoin = false,
+                        source = "room_open"
+                    )
                 }
-                android.util.Log.d("ChatRoomView", "Room opened: $room.jid, sent presence")
+                android.util.Log.d("ChatRoomView", "Room opened: $room.jid, started presence join")
             }
         }
         android.util.Log.d("ChatRoomView", "Room opened: $room.jid, set lastViewedTimestamp to 0")

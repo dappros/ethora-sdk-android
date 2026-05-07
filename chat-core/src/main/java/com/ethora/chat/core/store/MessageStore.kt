@@ -369,7 +369,7 @@ object MessageStore {
         
         // Find pending message - match by content (text or media)
         val pendingIndex = roomMessages.indexOfFirst { existing ->
-            if (existing.pending != true) return@indexOfFirst false
+            if (existing.pending != true && existing.sendFailed != true) return@indexOfFirst false
             val existingIsMedia = existing.isMediafile == "true" || existing.location != null || existing.fileName != null || existing.body == "media"
             val windowMs = if (existingIsMedia) 60_000L else 30_000L
             if ((now - existing.date.time) > windowMs) return@indexOfFirst false
@@ -447,6 +447,7 @@ object MessageStore {
             val updatedMessage = receivedMessage.copy(
                 id = pendingMessage.id, // Keep original optimistic ID
                 pending = false,
+                sendFailed = null,
                 body = if (receivedMessage.body.isNotBlank()) receivedMessage.body else pendingMessage.body,
                 isMediafile = receivedMessage.isMediafile ?: pendingMessage.isMediafile,
                 location = receivedMessage.location?.takeIf { it.isNotBlank() } ?: pendingMessage.location,
@@ -510,6 +511,7 @@ object MessageStore {
                 val merged = incoming.copy(
                     id = pending.id, // keep original optimistic ID for any callers that held onto it
                     pending = false,
+                    sendFailed = null,
                     body = if (incoming.body.isNotBlank()) incoming.body else pending.body,
                     isMediafile = incoming.isMediafile ?: pending.isMediafile,
                     location = incoming.location?.takeIf { it.isNotBlank() } ?: pending.location,
@@ -543,7 +545,7 @@ object MessageStore {
     private fun findMatchingPending(roomMessages: List<Message>, incoming: Message): Int {
         val now = System.currentTimeMillis()
         return roomMessages.indexOfFirst { existing ->
-            if (existing.pending != true) return@indexOfFirst false
+            if (existing.pending != true && existing.sendFailed != true) return@indexOfFirst false
             val isMedia = existing.isMediafile == "true" || existing.location != null ||
                 existing.fileName != null || existing.body == "media"
             val windowMs = if (isMedia) 120_000L else 60_000L

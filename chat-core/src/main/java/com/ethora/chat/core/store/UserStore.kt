@@ -121,8 +121,12 @@ object UserStore {
      */
     fun setUser(user: User?) {
         _currentUser.value = user
+        _token.value = user?.token
+        _refreshToken.value = user?.refreshToken
         // Persist user (background)
         persistUser()
+        persistTokens()
+        RoomStore.recomputeUnreadForAllRooms()
     }
 
     /**
@@ -139,6 +143,7 @@ object UserStore {
         // Persist user and tokens (background)
         persistUser()
         persistTokens()
+        RoomStore.recomputeUnreadForAllRooms()
     }
     
     /**
@@ -167,6 +172,7 @@ object UserStore {
         persistTokens()
         // Persist user (background) so token fields stay consistent on restore.
         persistUser()
+        RoomStore.recomputeUnreadForAllRooms()
     }
 
     /**
