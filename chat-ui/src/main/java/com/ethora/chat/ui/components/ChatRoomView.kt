@@ -390,13 +390,31 @@ fun ChatRoomView(
         hadComposingUsers = nowComposing
     }
 
-    // Restore scroll position after loading older messages (avoid jumps)
+    // Restore scroll position after loading older messages (avoid jumps).
+    // Compose's LazyColumn auto-shifts firstVisibleItemIndex when items are
+    // prepended (because we use stable keys), so the anchor mostly just has to
+    // be a no-op safety net for cases where auto-shift didn't keep position.
+    // CRUCIALLY: if the user manually scrolled forward (toward newer messages)
+    // while the older-message fetch was in flight, firstVisibleItemIndex will
+    // be well past the anchor — pulling them back at that point is the bug
+    // that throws them to the top after a "scroll up, then quickly scroll
+    // down" gesture, and also the bug that lands a freshly-opened chat at the
+    // top instead of the bottom (because the auto-scroll already settled at
+    // the bottom by the time loadMore returns).
     LaunchedEffect(scrollRestoreAnchor, isLoadingMore, messages.size) {
         val anchorId = scrollRestoreAnchor
         if (anchorId != null && !isLoadingMore) {
             val anchorIndex = messages.indexOfFirst { it.id == anchorId }
             if (anchorIndex >= 0) {
                 kotlinx.coroutines.delay(50)
+                val firstVisibleIdx = listState.firstVisibleItemIndex
+                if (firstVisibleIdx > anchorIndex + 5) {
+                    // User has scrolled past the anchor — they're on their way
+                    // to (or already at) newer messages. Don't fight them.
+                    android.util.Log.d("ChatRoomView", "Skipping anchor restore: user scrolled past (firstVisibleIdx=$firstVisibleIdx, anchorIndex=$anchorIndex)")
+                    viewModel.clearScrollRestoreAnchor()
+                    return@LaunchedEffect
+                }
                 listState.scrollToItem(anchorIndex)
                 android.util.Log.d("ChatRoomView", "Restored scroll to anchor $anchorId at index $anchorIndex")
             }
@@ -435,25 +453,32 @@ fun ChatRoomView(
         .collect { (firstVisibleIndex, firstVisibleOffset) ->
             val totalItems = listState.layoutInfo.totalItemsCount
             if (totalItems == 0) return@collect
-            
+
+            // Don't trigger loadMore until the initial auto-scroll-to-bottom has
+            // run. On chat open, the list briefly renders at index 0 before the
+            // auto-scroll fires; without this gate, that brief moment fires
+            // loadMore → sets scrollRestoreAnchor → after auto-scroll lands the
+            // user at the bottom, the anchor restore yanks them back to the top.
+            if (!initialAutoScrollDone) return@collect
+
             val currentIsLoadingMore = isLoadingMore
             val nearTop = firstVisibleIndex <= 2 && firstVisibleOffset < 300
 
             val now = System.currentTimeMillis()
-            val shouldTrigger = nearTop && 
-                               !currentIsLoadingMore && 
+            val shouldTrigger = nearTop &&
+                               !currentIsLoadingMore &&
                                (now - lastLoadTrigger) > 600
 
             if (shouldTrigger) {
                 lastLoadTrigger = now
-                
+
                 // Need ID of OLDEST message (to load messages before it)
                 // messages are sorted ascending: messages.first()=oldest
                 val oldestMessageId = messages
                     .filter { it.id != "delimiter-new" }
                     .firstOrNull()
                     ?.id
-                
+
                 android.util.Log.i("ChatRoomView", "🚀 Load more triggered: firstVisibleIndex=$firstVisibleIndex (nearTop=$nearTop), oldestMessageId=$oldestMessageId")
                 viewModel.loadMoreMessages(idOfMessageBefore = oldestMessageId)
             }

@@ -115,21 +115,24 @@ object MessageStore {
      *  lastViewed + active state. No-op when the id sequence is unchanged. */
     fun renormalizeRoomDelimiter(roomJid: String?) {
         if (roomJid.isNullOrBlank()) return
-        val current = _messages.value[roomJid] ?: return
-        if (current.isEmpty()) return
-        val room = RoomStore.getRoomByJid(roomJid) ?: return
-        val lastViewed = room.lastViewedTimestamp ?: 0L
-        val normalized = normalizeDelimiterPosition(
-            messages = current,
-            lastViewed = lastViewed,
-            skipDelimiter = skipDelimiterFor(roomJid),
-            roomJid = roomJid
-        )
-        val sameIds = normalized.size == current.size &&
-            normalized.zip(current).all { (a, b) -> a.id == b.id }
-        if (sameIds) return
-        _messages.value = _messages.value.toMutableMap().apply {
-            this[roomJid] = normalized
+        // Under mutationLock so a concurrent addMessage doesn't race with us.
+        synchronized(mutationLock) {
+            val current = _messages.value[roomJid] ?: return
+            if (current.isEmpty()) return
+            val room = RoomStore.getRoomByJid(roomJid) ?: return
+            val lastViewed = room.lastViewedTimestamp ?: 0L
+            val normalized = normalizeDelimiterPosition(
+                messages = current,
+                lastViewed = lastViewed,
+                skipDelimiter = skipDelimiterFor(roomJid),
+                roomJid = roomJid
+            )
+            val sameIds = normalized.size == current.size &&
+                normalized.zip(current).all { (a, b) -> a.id == b.id }
+            if (sameIds) return
+            _messages.value = _messages.value.toMutableMap().apply {
+                this[roomJid] = normalized
+            }
         }
     }
 
@@ -251,10 +254,20 @@ object MessageStore {
      * Updates room's last message in RoomStore so chat list shows preview on first load.
      */
     fun setMessagesForRoom(roomJid: String, messages: List<Message>) {
-        val currentMessages = _messages.value.toMutableMap()
-        val normalized = withDelimiter(roomJid, messages.filterNot { it.id == "delimiter-new" })
-        currentMessages[roomJid] = normalized
-        _messages.value = currentMessages
+        // MUST run under mutationLock: MessageLoader.loadAllRooms invokes
+        // setMessagesForRoom in parallel for a batch of rooms via awaitAll().
+        // Without the lock, two parallel callers each read the same _messages
+        // snapshot, then write back their delta in turn — the second write
+        // erases the first, so most rooms end up with no messages at all.
+        // External symptom: empty previews in the room list and a blank chat
+        // screen when opening any room.
+        val normalized = synchronized(mutationLock) {
+            val currentMessages = _messages.value.toMutableMap()
+            val n = withDelimiter(roomJid, messages.filterNot { it.id == "delimiter-new" })
+            currentMessages[roomJid] = n
+            _messages.value = currentMessages
+            n
+        }
         if (normalized.isNotEmpty()) {
             updateRoomLastMessage(roomJid, normalized)
         }
@@ -778,28 +791,36 @@ object MessageStore {
      * Remove message
      */
     fun removeMessage(roomJid: String, messageId: String) {
-        val currentMessages = _messages.value.toMutableMap()
-        val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
-        roomMessages.removeAll { it.id == messageId }
-        currentMessages[roomJid] = roomMessages
-        _messages.value = currentMessages
+        // Under mutationLock so a concurrent addMessage / updatePendingMessage
+        // doesn't overwrite our removal.
+        synchronized(mutationLock) {
+            val currentMessages = _messages.value.toMutableMap()
+            val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
+            roomMessages.removeAll { it.id == messageId }
+            currentMessages[roomJid] = roomMessages
+            _messages.value = currentMessages
+        }
     }
 
     /**
      * Clear messages for room
      */
     fun clearMessagesForRoom(roomJid: String) {
-        val currentMessages = _messages.value.toMutableMap()
-        currentMessages.remove(roomJid)
-        _messages.value = currentMessages
+        synchronized(mutationLock) {
+            val currentMessages = _messages.value.toMutableMap()
+            currentMessages.remove(roomJid)
+            _messages.value = currentMessages
+        }
     }
 
     /**
      * Clear all messages
      */
     fun clear() {
-        _messages.value = emptyMap()
-        // Clear persistence (background)
+        synchronized(mutationLock) {
+            _messages.value = emptyMap()
+        }
+        // Persistent cache wipe stays outside the lock — it's background IO.
         persistenceScope.launch {
             messageCache?.clearAllMessages()
         }
@@ -830,25 +851,28 @@ object MessageStore {
      * Matches web: editRoomMessage action
      */
     fun editMessage(roomJid: String, messageId: String, newText: String) {
-        val currentMessages = _messages.value.toMutableMap()
-        val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
-        val index = roomMessages.indexOfFirst { it.id == messageId }
-        if (index >= 0) {
+        // Mutate under the lock, then run IO / notifications outside it.
+        data class EditOutcome(val updated: Message, val sorted: List<Message>)
+        val outcome: EditOutcome? = synchronized(mutationLock) {
+            val currentMessages = _messages.value.toMutableMap()
+            val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
+            val index = roomMessages.indexOfFirst { it.id == messageId }
+            if (index < 0) return@synchronized null
             val originalMessage = roomMessages[index]
             val updatedMessage = originalMessage.copy(body = newText)
             roomMessages[index] = updatedMessage
             val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
-            android.util.Log.d("MessageStore", "✏️ Edited message $messageId in $roomJid")
-            
-            // Persist to Room Database (background)
-            persistMessage(roomJid, updatedMessage)
-            
-            updateRoomLastMessage(roomJid, sorted)
-        } else {
-            android.util.Log.w("MessageStore", "⚠️ Message $messageId not found in $roomJid to edit")
+            EditOutcome(updatedMessage, sorted)
         }
+        if (outcome == null) {
+            android.util.Log.w("MessageStore", "⚠️ Message $messageId not found in $roomJid to edit")
+            return
+        }
+        android.util.Log.d("MessageStore", "✏️ Edited message $messageId in $roomJid")
+        persistMessage(roomJid, outcome.updated)
+        updateRoomLastMessage(roomJid, outcome.sorted)
     }
     
     /**
@@ -856,40 +880,39 @@ object MessageStore {
      * Matches web: setReactions action
      */
     fun updateReaction(roomJid: String, messageId: String, from: String, reactions: List<String>, data: Map<String, String>) {
-        val currentMessages = _messages.value.toMutableMap()
-        val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
-        val index = roomMessages.indexOfFirst { it.id == messageId }
-        if (index >= 0) {
+        val updated: Message? = synchronized(mutationLock) {
+            val currentMessages = _messages.value.toMutableMap()
+            val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
+            val index = roomMessages.indexOfFirst { it.id == messageId }
+            if (index < 0) return@synchronized null
             val originalMessage = roomMessages[index]
             val fromId = from.split("@").firstOrNull() ?: from
-            
-            // Get existing reactions or create new map
+
+            // Take the existing reaction map or start a fresh one.
             val existingReactions = originalMessage.reaction?.toMutableMap() ?: mutableMapOf()
-            
             if (reactions.isEmpty()) {
-                // Remove reaction if empty list
                 existingReactions.remove(fromId)
             } else {
-                // Add or update reaction
                 val reactionData = com.ethora.chat.core.models.ReactionMessage(
                     emoji = reactions,
                     data = data
                 )
                 existingReactions[fromId] = reactionData
             }
-            
+
             val updatedMessage = originalMessage.copy(reaction = existingReactions)
             roomMessages[index] = updatedMessage
             val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
             currentMessages[roomJid] = sorted
             _messages.value = currentMessages
-            android.util.Log.d("MessageStore", "😀 Updated reaction for message $messageId in $roomJid: from=$fromId, reactions=$reactions")
-            
-            // Persist to Room Database (background)
-            persistMessage(roomJid, updatedMessage)
-        } else {
-            android.util.Log.w("MessageStore", "⚠️ Message $messageId not found in $roomJid to add reaction")
+            updatedMessage
         }
+        if (updated == null) {
+            android.util.Log.w("MessageStore", "⚠️ Message $messageId not found in $roomJid to add reaction")
+            return
+        }
+        android.util.Log.d("MessageStore", "😀 Updated reaction for message $messageId in $roomJid: from=${from.split("@").firstOrNull() ?: from}, reactions=$reactions")
+        persistMessage(roomJid, updated)
     }
     
     /**
@@ -897,34 +920,36 @@ object MessageStore {
      * Matches web: deleteRoomMessage action (but we keep the message with isDeleted flag)
      */
     fun markMessageAsDeleted(roomJid: String, messageId: String) {
-        val currentMessages = _messages.value.toMutableMap()
-        val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
-        val index = roomMessages.indexOfFirst { it.id == messageId }
-        if (index >= 0) {
+        data class DeleteOutcome(val updated: Message, val list: List<Message>)
+        val outcome: DeleteOutcome? = synchronized(mutationLock) {
+            val currentMessages = _messages.value.toMutableMap()
+            val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
+            val index = roomMessages.indexOfFirst { it.id == messageId }
+            if (index < 0) return@synchronized null
             val originalMessage = roomMessages[index]
             val updatedMessage = originalMessage.copy(
-                body = "This message was deleted.", // Update body for UI
+                body = "This message was deleted.",
                 isDeleted = true,
-                isMediafile = null, // Clear media info
+                isMediafile = null,
                 location = null,
                 locationPreview = null,
                 fileName = null,
                 mimetype = null,
                 originalName = null,
-                reaction = null, // Clear reactions
-                reply = null // Clear replies
+                reaction = null,
+                reply = null
             )
             roomMessages[index] = updatedMessage
             currentMessages[roomJid] = roomMessages
             _messages.value = currentMessages
-            android.util.Log.d("MessageStore", "🗑️ Marked message $messageId in $roomJid as deleted.")
-            
-            // Persist to Room Database (background)
-            persistMessage(roomJid, updatedMessage)
-            
-            updateRoomLastMessage(roomJid, roomMessages) // Update last message in room list
-        } else {
-            android.util.Log.w("MessageStore", "⚠️ Message $messageId not found in $roomJid to mark as deleted.")
+            DeleteOutcome(updatedMessage, roomMessages.toList())
         }
+        if (outcome == null) {
+            android.util.Log.w("MessageStore", "⚠️ Message $messageId not found in $roomJid to mark as deleted.")
+            return
+        }
+        android.util.Log.d("MessageStore", "🗑️ Marked message $messageId in $roomJid as deleted.")
+        persistMessage(roomJid, outcome.updated)
+        updateRoomLastMessage(roomJid, outcome.list)
     }
 }
