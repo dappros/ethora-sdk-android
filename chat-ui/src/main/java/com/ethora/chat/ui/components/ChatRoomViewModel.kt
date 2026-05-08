@@ -26,6 +26,8 @@ import com.ethora.chat.core.xmpp.XMPPClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.FileOutputStream
 import java.util.*
@@ -72,19 +74,26 @@ class ChatRoomViewModel(
 
     val currentUserXmppUsername: String?
         get() = UserStore.currentUser.value?.xmppUsername
-    
+
+    // Serializes text sends so stanzas hit the wire in tap order. Without this,
+    // three rapid taps spawn three parallel coroutines that race on
+    // ensureRoomPresence and may write stanzas out of order, producing the
+    // "1, 3, 2" UI order seen when one coroutine waits longer on presence.
+    // Fair (FIFO) — three taps complete in three sequential socket writes.
+    private val sendMutex = Mutex()
+
     // Observe composing state from RoomStore (matches web: useSelector)
     init {
-        // Observe messages from store
+        // Observe messages from store. MessageStore already emits ascending,
+        // pending-last-on-tie-break order via its `messageOrder` comparator —
+        // re-sorting here with sortedBy{timestamp} drops the pending tiebreaker
+        // and reshuffles a still-pending optimistic message ahead of a sibling
+        // that just got server-ack'd with an equal coarse timestamp.
         viewModelScope.launch {
             MessageStore.messages
-                .map { 
-                    val roomMessages = it[room.jid] ?: emptyList()
-                    // Sort ascending: oldest at index 0 for normal LazyColumn
-                    roomMessages.sortedBy { it.timestamp ?: it.date.time }
-                }
+                .map { it[room.jid] ?: emptyList() }
                 .distinctUntilChanged()
-                .collect { 
+                .collect {
                     _messages.value = it
                 }
         }
@@ -301,9 +310,12 @@ class ChatRoomViewModel(
             // Create the optimistic row before the network send. Waiting for
             // sendMessage() here can block on room presence/socket state and
             // makes the input feel laggy even though the tap handler fired.
+            //
+            // Use the atomic per-room allocator: under rapid spam, plain
+            // `lastKnownTimestamp + now` races and produces equal timestamps
+            // for parallel sends, breaking sort order for still-pending rows.
             val messageId = "send-text-message:${UUID.randomUUID()}"
-            val lastKnownTs = MessageStore.lastKnownTimestamp(room.jid)
-            val optimisticTs = maxOf(System.currentTimeMillis(), lastKnownTs + 1)
+            val optimisticTs = MessageStore.allocateOptimisticTimestamp(room.jid)
             val optimisticMessage = Message(
                 id = messageId,
                 body = finalText,
@@ -320,17 +332,42 @@ class ChatRoomViewModel(
             MessageStore.addMessage(room.jid, optimisticMessage)
             android.util.Log.d("ChatRoomViewModel", "Created optimistic message before send, ID: $messageId")
 
-            val sentMessageId = xmppClient?.sendMessage(
-                roomJID = room.jid,
-                messageBody = finalText,
-                firstName = currentUser.firstName,
-                lastName = currentUser.lastName,
-                photo = currentUser.profileImage,
-                walletAddress = currentUser.walletAddress,
-                isReply = finalParentMessageId != null,
-                mainMessage = finalParentMessageId,
-                customId = messageId
-            )
+            // Serialize the actual transport call. xmppClient.sendMessage returns
+            // as soon as the stanza is written to the socket (it does not wait
+            // for the server echo), so the lock is held for ~one socket write —
+            // fast, but enough to guarantee tap order is wire order. A single
+            // retry absorbs transient failures (presence backoff, brief
+            // disconnect blip) so the bubble doesn't flip to "Sending failed"
+            // for what is really a recoverable race.
+            val sentMessageId = sendMutex.withLock {
+                var attempt = xmppClient?.sendMessage(
+                    roomJID = room.jid,
+                    messageBody = finalText,
+                    firstName = currentUser.firstName,
+                    lastName = currentUser.lastName,
+                    photo = currentUser.profileImage,
+                    walletAddress = currentUser.walletAddress,
+                    isReply = finalParentMessageId != null,
+                    mainMessage = finalParentMessageId,
+                    customId = messageId
+                )
+                if (attempt == null) {
+                    android.util.Log.w("ChatRoomViewModel", "sendMessage returned null, retrying once after 400ms")
+                    kotlinx.coroutines.delay(400)
+                    attempt = xmppClient?.sendMessage(
+                        roomJID = room.jid,
+                        messageBody = finalText,
+                        firstName = currentUser.firstName,
+                        lastName = currentUser.lastName,
+                        photo = currentUser.profileImage,
+                        walletAddress = currentUser.walletAddress,
+                        isReply = finalParentMessageId != null,
+                        mainMessage = finalParentMessageId,
+                        customId = messageId
+                    )
+                }
+                attempt
+            }
 
             if (sentMessageId != null) {
                 // Web parity (useSendMessage.tsx L316-317): fast-ack immediately,
@@ -348,21 +385,40 @@ class ChatRoomViewModel(
                 )
             } else {
                 android.util.Log.e("ChatRoomViewModel", "Failed to send message - sendMessage returned null")
-                // Mark the optimistic row as send-failed so the bubble switches
-                // immediately to the "Sending failed. Tap to retry or delete."
-                // state without waiting for the 6 s pending-timeout.
-                MessageStore.updateMessage(
-                    room.jid,
-                    optimisticMessage.copy(pending = false, sendFailed = true)
-                )
-                ChatEventDispatcher.emit(
-                    ChatEvent.MessageFailed(
-                        roomJid = room.jid,
-                        messageType = MessageType.TEXT,
-                        text = finalText,
-                        error = IllegalStateException("sendMessage returned null")
+                // Only fail-fast if XMPP is genuinely disconnected. While we're
+                // still connected, a null return is almost always a recoverable
+                // race (presence backoff window, brief socket hiccup) — let the
+                // 15 s pending timeout in MessageStore be the final arbiter.
+                // Without this guard, rapid spam causes presence backoff to
+                // fire on a couple of messages and the user sees spurious
+                // "Sending failed" bubbles even though the wire is healthy.
+                val stillConnected = xmppClient?.isFullyConnected() == true
+                if (!stillConnected) {
+                    MessageStore.updateMessage(
+                        room.jid,
+                        optimisticMessage.copy(pending = false, sendFailed = true)
                     )
-                )
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MessageFailed(
+                            roomJid = room.jid,
+                            messageType = MessageType.TEXT,
+                            text = finalText,
+                            error = IllegalStateException("sendMessage returned null (offline)")
+                        )
+                    )
+                } else {
+                    // Stay pending — the catchup poll + pending timeout will
+                    // either recover (echo arrives) or eventually mark failed.
+                    schedulePendingFallback(messageId)
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MessageFailed(
+                            roomJid = room.jid,
+                            messageType = MessageType.TEXT,
+                            text = finalText,
+                            error = IllegalStateException("sendMessage returned null (will retry via timeout)")
+                        )
+                    )
+                }
             }
         }
     }
