@@ -380,7 +380,18 @@ fun ChatInput(
                 // Send button - visible when there's text or file (or in edit mode)
                 if (text.isNotBlank() || selectedFile != null || editText != null) {
                     FloatingActionButton(
-                        onClick = {
+                        onClick = onClick@{
+                            // canSendMessage gates the actual send. Previously this
+                            // flag only changed the FAB's container color (dimmer
+                            // surface variant), but the click still fired
+                            // onSendMessage / onSendMedia. That made the visual
+                            // "blocked" state misleading — users tapping a dimmed
+                            // button would silently dispatch messages anyway.
+                            // Hosts that want sends blocked (e.g. while a moderation
+                            // hook is evaluating, while reconnecting, while a
+                            // rate-limit cool-down is active) can now rely on
+                            // canSendMessage = false to actually prevent dispatch.
+                            if (!canSendMessage) return@onClick
                             // Always pause typing on send — bounds XMPP traffic and matches
                             // the user's actual state (they finished composing this message).
                             idleTypingJob?.cancel()
