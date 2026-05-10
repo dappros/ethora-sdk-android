@@ -647,6 +647,53 @@ LogoutService.setOnLogoutCallback {
 - Current builds use native `PdfRenderer`; no hosted PDF.js page is required.
 - Confirm the file URL returns valid PDF bytes and is reachable from the device.
 
+## Testing
+
+The SDK uses a **two-layer testing strategy**, with each layer pinned to
+the codebase it tests so changes ship in the same PR as the test that
+exercises them.
+
+### Layer 1 — Unit + Compose UI tests (this repo)
+
+Live alongside the source they exercise; surfaced under Studio's "Tests"
+tab so they don't clutter main source.
+
+| Where | What | Run with |
+|-------|------|----------|
+| `chat-core/src/test/` | Pure-JVM unit tests — JID parsing, message serializers, store reducers, networking helpers | `./gradlew :chat-core:test` |
+| `chat-ui/src/androidTest/` | Compose UI tests using `androidx.compose.ui.test` — render a composable in isolation, drive it with callbacks, assert behavior | `./gradlew :chat-ui:connectedDebugAndroidTest` |
+| `ethora-component/src/test/` | Aggregate-module unit tests covering cross-module behavior (UnreadObserver, single-room support, XMPP client ownership, file size formatting, DNS fallback, pending-media queue, log export formatter) | `./gradlew :ethora-component:test` |
+
+The Compose UI tests run on a connected emulator or device (API 26+).
+They're hermetic — no network, no XMPP, no FCM. End-to-end flows that
+need a real server go in Layer 2.
+
+`chat-ui/src/androidTest/java/com/ethora/chat/ui/components/ChatInputTest.kt`
+is the canonical example to copy when adding a new Compose UI test.
+
+### Layer 2 — End-to-end smoke flows (`ethora-sample-android`)
+
+Maestro YAML scenarios that drive the sample app on a real
+emulator/device against `chat-qa.ethora.com`: login → list rooms → send
+text → receive text → reconnect → push intent → logout. Live in
+[`ethora-sample-android/.maestro/`](https://github.com/dappros/ethora-sample-android/tree/main/.maestro)
+because they need a built APK, not SDK source.
+
+These run on the sample's CI on every release tag of the SDK — that's
+the gate that catches integration regressions like config drift,
+preset URL breakage, or feature parity gaps with iOS/Web.
+
+### Adding a test for a fix or new feature
+
+- **Behavior bug in `chat-core` or `chat-ui`** → add a unit / Compose
+  UI test in this repo, in the same PR as the fix.
+- **Integration bug** (something the SDK exposes but the sample
+  consumes) → add a Maestro flow in `ethora-sample-android/.maestro/`,
+  in a paired PR to that repo.
+- **Cross-platform parity gap** → add the matching test to all three
+  (Android Maestro, iOS XCUITest/Maestro, Web Playwright). See
+  the cross-platform parity matrix doc for the canonical scenario list.
+
 ## Production Checklist
 
 - Always provide your own `baseUrl`, `appId`, `xmppSettings`, and production token values.
