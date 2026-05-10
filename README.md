@@ -653,6 +653,13 @@ The SDK uses a **two-layer testing strategy**, with each layer pinned to
 the codebase it tests so changes ship in the same PR as the test that
 exercises them.
 
+This Android SDK is one of four runtime targets that share a single
+selector contract — Compose `testTag` strings here match SwiftUI
+`accessibilityIdentifier` strings on iOS and `data-testid` attributes
+on Web, so a Maestro YAML flow drives all three platforms by the same
+ID. See [Cross-platform testing overview](#cross-platform-testing-overview)
+at the end of this section.
+
 ### Layer 1 — Unit + Compose UI tests (this repo)
 
 Live alongside the source they exercise; surfaced under Studio's "Tests"
@@ -718,8 +725,37 @@ preset URL breakage, or feature parity gaps with iOS/Web.
   consumes) → add a Maestro flow in `ethora-sample-android/.maestro/`,
   in a paired PR to that repo.
 - **Cross-platform parity gap** → add the matching test to all three
-  (Android Maestro, iOS XCUITest/Maestro, Web Playwright). See
-  the cross-platform parity matrix doc for the canonical scenario list.
+  (Android Maestro, iOS Maestro, Web Playwright). The selector
+  contract below makes the test bodies near-identical across
+  platforms.
+
+### Cross-platform testing overview
+
+Four runtime targets, one selector contract. Same test intent runs
+against any of them via Maestro (mobile) or Playwright (web).
+
+| Layer 1 (hermetic) | Layer 2 (E2E) |
+|--------------------|----------------|
+| `ethora-sdk-android` — Compose UI tests in `chat-ui/src/androidTest/` (this repo) | `ethora-sample-android/.maestro/` — 19 Maestro flows on Android emulator |
+| `ethora-sdk-swift` — XCTest in `Tests/XMPPChatCoreTests/` + `accessibilityIdentifier` markers in `XMPPChatUI/` | `ethora-sample-swift/.maestro/` — same 19 Maestro flows on iOS Simulator |
+| `ethora-chat-component` — Vitest + RTL in `src/**/*.test.tsx` with `data-testid` attrs | `ethora-app-reactjs/tests/e2e/` — Playwright on chromium |
+
+Selector parity (a Maestro `id: "chat_input"` matches all of these):
+
+| String | Android (`*TestTags`) | iOS (`*AccessibilityID`) | Web (`*TestIds`) |
+|--------|----------------------|--------------------------|------------------|
+| `chat_input` | `ChatInputTestTags.INPUT_FIELD` | `ChatInputAccessibilityID.inputField` | `ChatInputTestIds.inputField` |
+| `chat_send_button` | `ChatInputTestTags.SEND_BUTTON` | `ChatInputAccessibilityID.sendButton` | `ChatInputTestIds.sendButton` |
+| `chat_attach_button` | `ChatInputTestTags.ATTACH_BUTTON` | `ChatInputAccessibilityID.attachButton` | `ChatInputTestIds.attachButton` |
+| `chat_message_image` | `MessageBubbleTestTags.MEDIA_CONTENT` | `MessageBubbleAccessibilityID.mediaContent` | `MessageBubbleTestIds.mediaContent` |
+| `rooms_list` | `RoomListViewTestTags.ROOMS_LIST` | `RoomListAccessibilityID.roomsList` | `RoomListTestIds.roomsList` |
+| `room_row` | `RoomListViewTestTags.ROOM_ROW` | `RoomListAccessibilityID.roomRow` | `RoomListTestIds.roomRow` |
+| `rooms_search_input` | `RoomListViewTestTags.SEARCH_INPUT` | (system search bar, no ID) | `RoomListTestIds.searchInput` |
+| `create_room_button` | `RoomListViewTestTags.CREATE_ROOM_BUTTON` | `RoomListAccessibilityID.createRoomButton` | `RoomListTestIds.createRoomButton` |
+
+Changing any value above is a 4-repo change. The cost of that
+coupling is the benefit — a renamed tag breaks four CI runs the
+same week, not silently rotting in one of them.
 
 ## Production Checklist
 
