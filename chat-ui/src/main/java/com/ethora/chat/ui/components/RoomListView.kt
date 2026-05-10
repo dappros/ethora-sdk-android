@@ -15,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.TextFieldValue
@@ -171,7 +172,10 @@ fun RoomListView(
                     ) 
                 },
                 actions = {
-                    IconButton(onClick = { showCreateChatDialog = true }) {
+                    IconButton(
+                        onClick = { showCreateChatDialog = true },
+                        modifier = Modifier.testTag(RoomListViewTestTags.CREATE_ROOM_BUTTON)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Add,
                             contentDescription = "Create new chat"
@@ -201,6 +205,7 @@ fun RoomListView(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 12.dp)
+                    .testTag(RoomListViewTestTags.SEARCH_INPUT)
             )
             
             if (isLoading && rooms.isEmpty()) {
@@ -234,7 +239,9 @@ fun RoomListView(
                 }
             } else {
                 LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag(RoomListViewTestTags.ROOMS_LIST),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
@@ -331,7 +338,8 @@ private fun RoomListItem(
         onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .testTag(RoomListViewTestTags.ROOM_ROW),
         shape = RoundedCornerShape(16.dp),
         color = if (isActive) {
             MaterialTheme.colorScheme.primary
@@ -679,4 +687,16 @@ private fun formatTimeToHHMM(date: java.util.Date): String {
             SimpleDateFormat("yyyy/MM/dd", Locale.getDefault()).format(date)
         }
     }
+}
+
+/**
+ * Stable testTag identifiers for [RoomListView]'s child affordances.
+ * See [ChatInputTestTags] for the rationale (UI tests + Maestro
+ * flows resolve nodes by these tags).
+ */
+object RoomListViewTestTags {
+    const val ROOMS_LIST = "rooms_list"
+    const val ROOM_ROW = "room_row"
+    const val SEARCH_INPUT = "rooms_search_input"
+    const val CREATE_ROOM_BUTTON = "create_room_button"
 }
