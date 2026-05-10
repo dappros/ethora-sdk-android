@@ -671,6 +671,33 @@ need a real server go in Layer 2.
 `chat-ui/src/androidTest/java/com/ethora/chat/ui/components/ChatInputTest.kt`
 is the canonical example to copy when adding a new Compose UI test.
 
+#### Current Compose UI coverage
+
+| Component | Test | Asserts |
+|-----------|------|---------|
+| `ChatInput` | `rendersInputAndFiresCallbackOnSend` | Type → tap Send → `onSendMessage` callback fires with the typed text |
+| `ChatInput` | `emptyInputShowsSendIconWithoutFiringCallback` | Empty field shows a disabled Send icon; tap is a no-op |
+| `ChatInput` | `editModePrePopulatesText` | `editText="..."` prop is rendered in the field on first composition |
+| `ChatInput` | `replyPreviewShowsAndCancelFiresCallback` | `replyingToMessage` → preview body visible → "Cancel reply" fires `onReplyCancel` |
+| `LogsView` | `rendersFilterFieldAndLogEntries` | Entries pushed via `LogStore.info(...)` render with the "Filter logs" field visible |
+| `LogsView` | `queryFilterHidesNonMatchingEntries` | Typing into the filter hides non-matching entries |
+| `MessageBubble` | `rendersBodyText` | Outgoing bubble renders its body text |
+| `MessageBubble` | `rendersAuthorNameForIncomingMessage` | Incoming bubble (`isUser=false`) shows author + body |
+| `MessageBubble` | `rendersDeletedTombstone` | Bubble composes without crashing for `isDeleted=true` |
+| `MessageBubble` | `rendersSendFailedState` | Bubble composes without crashing for `sendFailed=true` |
+
+**Gaps** still to cover at this layer (file an issue + a test in the
+same PR when you tackle one):
+
+- `RoomListView` — search behavior, active-room highlight, badge counts
+- `MessageContextMenu` — long-press menu items per message state
+- `FullScreenImageViewer` — zoom + pan + close
+- `PDFViewer` — page navigation + render-on-low-memory fallback
+- `ChatInfoScreen` — participants list, leave-room flow
+- Tombstone / failed-state explicit string assertions on `MessageBubble`
+  (TODOs in `MessageBubbleTest.kt` flag where to tighten once the SDK
+  exposes stable strings)
+
 ### Layer 2 — End-to-end smoke flows (`ethora-sample-android`)
 
 Maestro YAML scenarios that drive the sample app on a real
