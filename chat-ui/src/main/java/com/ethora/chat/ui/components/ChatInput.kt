@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -306,7 +307,8 @@ fun ChatInput(
                 // Attach button (hidden in edit mode)
                 if (onSendMedia != null && editText == null) {
                     IconButton(
-                        onClick = { showAttachSheet = true }
+                        onClick = { showAttachSheet = true },
+                        modifier = Modifier.testTag(ChatInputTestTags.ATTACH_BUTTON)
                     ) {
                         Icon(
                             imageVector = Icons.Default.AttachFile,
@@ -345,6 +347,7 @@ fun ChatInput(
                     },
                     modifier = Modifier
                         .weight(1f)
+                        .testTag(ChatInputTestTags.INPUT_FIELD)
                         .onFocusChanged { focusState ->
                             isFocused = focusState.isFocused
                             if (focusState.isFocused && text.isNotBlank() && editText == null) {
@@ -407,7 +410,8 @@ fun ChatInput(
                         },
                         modifier = Modifier
                             .size(44.dp)
-                            .offset(y = (-3).dp),
+                            .offset(y = (-3).dp)
+                            .testTag(ChatInputTestTags.SEND_BUTTON),
                         containerColor = if (canSendMessage) {
                             MaterialTheme.colorScheme.primary
                         } else {
@@ -430,12 +434,15 @@ fun ChatInput(
                         )
                     }
                 } else {
-                    // Disabled send button
+                    // Disabled send button — same testTag as the active FAB so
+                    // tests can resolve the send affordance regardless of
+                    // whether the field is empty.
                     IconButton(
                         onClick = { },
                         modifier = Modifier
                             .size(44.dp)
-                            .offset(y = (-3).dp),
+                            .offset(y = (-3).dp)
+                            .testTag(ChatInputTestTags.SEND_BUTTON),
                         enabled = false
                     ) {
                         Surface(
@@ -550,4 +557,18 @@ private fun uniqueFile(directory: File, fileName: String): File {
         index++
     }
     return candidate
+}
+
+/**
+ * Stable testTag identifiers for [ChatInput]'s child affordances.
+ *
+ * Compose UI tests in this repo and Maestro flows in the host
+ * sample app (`ethora-sample-android/.maestro/`) resolve UI nodes
+ * by these tags, so renaming a tag breaks tests in both layers.
+ * Do not change a value without updating both consumers.
+ */
+object ChatInputTestTags {
+    const val INPUT_FIELD = "chat_input"
+    const val SEND_BUTTON = "chat_send_button"
+    const val ATTACH_BUTTON = "chat_attach_button"
 }
