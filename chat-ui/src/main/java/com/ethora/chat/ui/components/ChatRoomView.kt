@@ -194,6 +194,10 @@ fun ChatRoomView(
     // Track unread count (messages that arrived while scrolled up)
     var unreadCount by remember { mutableStateOf(0) }
     var lastMessageCount by remember { mutableStateOf(messages.size) }
+    // Track the id of the newest (tail) message we've already accounted for.
+    // load-more only prepends older messages, so the tail id is unchanged —
+    // that's how we distinguish it from a real incoming message arrival.
+    var lastTailId by remember { mutableStateOf(messages.lastOrNull()?.id) }
     var pendingOwnMessageAutoScroll by remember { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner, viewModel) {
@@ -298,12 +302,29 @@ fun ChatRoomView(
             }
             initialAutoScrollDone = true
             lastMessageCount = messages.size
+            lastTailId = messages.lastOrNull()?.id
             unreadCount = 0
             return@LaunchedEffect
         }
 
-        if (messages.size > lastMessageCount && !isLoadingMore) {
-            val delta = messages.size - lastMessageCount
+        // Count ONLY messages that appeared past the previous tail. load-more
+        // prepends older messages without touching the tail, so its growth must
+        // not bump `unreadCount`. The `!isLoadingMore` guard alone races with
+        // the viewmodel's finally-block that flips the flag right after pushing
+        // messages, so we additionally compare tail ids here.
+        val newTailId = messages.lastOrNull()?.id
+        val previousTailId = lastTailId
+        val newAtTail: Int = when {
+            previousTailId == null -> 0
+            newTailId == previousTailId -> 0
+            else -> {
+                val idx = messages.indexOfLast { it.id == previousTailId }
+                if (idx >= 0) messages.size - 1 - idx
+                else (messages.size - lastMessageCount).coerceAtLeast(0)
+            }
+        }
+
+        if (newAtTail > 0 && !isLoadingMore) {
             val total = listState.layoutInfo.totalItemsCount
             val lastVisibleIdx = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
             val atEndOfContent = !listState.canScrollForward
@@ -313,10 +334,11 @@ fun ChatRoomView(
                 scrollToTrueBottom(animate = true)
                 unreadCount = 0
             } else {
-                unreadCount += delta
+                unreadCount += newAtTail
             }
         }
         lastMessageCount = messages.size
+        lastTailId = newTailId
     }
 
     // ---- Scroll after the user sends a message — ALWAYS ----
