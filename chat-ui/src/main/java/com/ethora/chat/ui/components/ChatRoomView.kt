@@ -189,6 +189,10 @@ fun ChatRoomView(
     // Track unread count (messages that arrived while scrolled up)
     var unreadCount by remember { mutableStateOf(0) }
     var lastMessageCount by remember { mutableStateOf(messages.size) }
+    // Track the id of the newest (tail) message we've already accounted for.
+    // load-more only prepends older messages, so the tail id is unchanged —
+    // that's how we distinguish it from a real incoming message arrival.
+    var lastTailId by remember { mutableStateOf(messages.lastOrNull()?.id) }
     var pendingOwnMessageAutoScroll by remember { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner, viewModel) {
@@ -293,12 +297,29 @@ fun ChatRoomView(
             }
             initialAutoScrollDone = true
             lastMessageCount = messages.size
+            lastTailId = messages.lastOrNull()?.id
             unreadCount = 0
             return@LaunchedEffect
         }
 
-        if (messages.size > lastMessageCount && !isLoadingMore) {
-            val delta = messages.size - lastMessageCount
+        // Count ONLY messages that appeared past the previous tail. load-more
+        // prepends older messages without touching the tail, so its growth must
+        // not bump `unreadCount`. The `!isLoadingMore` guard alone races with
+        // the viewmodel's finally-block that flips the flag right after pushing
+        // messages, so we additionally compare tail ids here.
+        val newTailId = messages.lastOrNull()?.id
+        val previousTailId = lastTailId
+        val newAtTail: Int = when {
+            previousTailId == null -> 0
+            newTailId == previousTailId -> 0
+            else -> {
+                val idx = messages.indexOfLast { it.id == previousTailId }
+                if (idx >= 0) messages.size - 1 - idx
+                else (messages.size - lastMessageCount).coerceAtLeast(0)
+            }
+        }
+
+        if (newAtTail > 0 && !isLoadingMore) {
             val total = listState.layoutInfo.totalItemsCount
             val lastVisibleIdx = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
             val atEndOfContent = !listState.canScrollForward
@@ -308,7 +329,7 @@ fun ChatRoomView(
                 scrollToTrueBottom(animate = true)
                 unreadCount = 0
             } else {
-                unreadCount += delta
+                unreadCount += newAtTail
             }
         }
         lastMessageCount = messages.size
@@ -669,15 +690,18 @@ fun ChatRoomView(
                                             .firstOrNull { it.messageId == message.id }
                                         val pendingMediaStatus = pendingMediaItem?.status
                                         val sendFailed = isUser && (
-                                            // Explicit failure flag survives reconnects so the bubble
-                                            // does not silently flip back to "delivered" after an
-                                            // auto-retry timer fires while the send still hasn't
-                                            // been confirmed by the server.
+                                            // A bubble is "failed" iff something explicit said so —
+                                            // either the per-message `sendFailed` flag (set by the
+                                            // 6 s pending-timeout or by an XMPP transport rejection)
+                                            // or the media queue's hard-failed states. Connection-
+                                            // level dips to DEGRADED/CONNECTING used to flip every
+                                            // pending bubble red here, even though sends were still
+                                            // in flight — that turned "sending" into a permanent
+                                            // false alarm. Pending stays pending; only timeouts /
+                                            // explicit failures cross over to the failed state.
                                             message.sendFailed == true ||
                                                 pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.FAILED_WAITING_RETRY ||
-                                                pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.PERMANENTLY_FAILED ||
-                                                ((message.pending == true || pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.QUEUED) &&
-                                                    connectionState.status != ChatConnectionStatus.ONLINE)
+                                                pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.PERMANENTLY_FAILED
                                         )
                                         val openFailedActions = { tapX: Float, tapY: Float, left: Float, top: Float, right: Float, bottom: Float ->
                                             contextMenuMessage = message
@@ -997,9 +1021,23 @@ fun ChatRoomView(
                 )
             )
         } else {
+            val handleSendMediaWithCaption: ((java.io.File, String, String, String?) -> Unit)? =
+                if (disableMedia) null else comboHandler@{ file, mimeType, caption, replyId ->
+                    viewModel.sendMediaWithCaption(file, mimeType, caption, replyId)
+                    pendingOwnMessageAutoScroll = true
+                    coroutineScope.launch {
+                        kotlinx.coroutines.delay(60)
+                        scrollToTrueBottom(animate = true)
+                    }
+                    if (replyingToMessage != null) {
+                        replyingToMessage = null
+                    }
+                    viewModel.sendStopTyping()
+                }
             ChatInput(
                 onSendMessage = handleSendMessage,
                 onSendMedia = handleSendMedia,
+                onSendMediaWithCaption = handleSendMediaWithCaption,
                 onStartTyping = {
                     viewModel.sendStartTyping()
                 },

@@ -90,7 +90,28 @@ data class PendingMediaSend(
     val attemptCount: Int = 0,
     val nextRetryAt: Long = 0L,
     val status: PendingMediaSendStatus = PendingMediaSendStatus.QUEUED,
-    val uploaded: PendingMediaUploadPayload? = null
+    val uploaded: PendingMediaUploadPayload? = null,
+    /**
+     * Optional text the user typed alongside the attachment. The combo
+     * "image + caption" send dispatches the text only AFTER the media's
+     * XMPP send has been acknowledged, so the receiver sees the bubble
+     * order [image][caption] every time. Firing both in parallel (the
+     * pre-fix path) raced the upload, and the caption usually arrived
+     * first because the text send is a single stanza vs upload + stanza
+     * for the media.
+     */
+    val caption: String? = null,
+    /** Reply target carried alongside [caption] so the follow-up text
+     *  send preserves the user's reply intent. */
+    val replyToMessageId: String? = null,
+    /**
+     * Id of the optimistic text bubble that was added to MessageStore at
+     * the same moment as the media bubble. When the upload completes the
+     * caption is transmitted over XMPP with this id as `customId`, so
+     * the server echo merges into the existing row rather than appending
+     * a duplicate. Null when no caption was attached.
+     */
+    val captionMessageId: String? = null
 ) {
     companion object {
         const val MAX_RETRY_ATTEMPTS = 3

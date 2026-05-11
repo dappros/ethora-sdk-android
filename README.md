@@ -575,6 +575,7 @@ Notes:
 - Messages persisted in Room DB (`chat_database`, table `messages`) via `MessageStore` + `MessageCache`.
 - Unsent media/file messages are persisted separately from chat history via `PendingMediaSendQueue`.
   - queued items keep their optimistic message visible
+  - queued items also persist `caption` and `replyToMessageId`, so attachment+text sends can resume after process restart without losing the follow-up text or reply target
   - upload/XMPP failures show an inline warning with Retry/Delete actions
   - uploaded payloads are reused when only the XMPP send step failed
   - app-private pending files are removed after send success, user discard, or logout cleanup
@@ -642,6 +643,12 @@ LogoutService.setOnLogoutCallback {
 - Check `useConnectionState()` and XMPP logs if items remain failed.
 - If a queued local file was deleted by host cleanup, the message can be discarded by the user.
 
+### Older history stops loading too early
+
+- Current builds keep pagination alive until the room is explicitly marked `historyComplete=true`.
+- A transient empty MAM page no longer flips the UI into a permanent "no more history" state.
+- If older messages still do not load, verify the XMPP connection is fully established before the scroll-to-top pagination path runs.
+
 ### PDF preview fails but download works
 
 - Current builds use native `PdfRenderer`; no hosted PDF.js page is required.
@@ -669,7 +676,7 @@ tab so they don't clutter main source.
 |-------|------|----------|
 | `chat-core/src/test/` | Pure-JVM unit tests — JID parsing, message serializers, store reducers, networking helpers | `./gradlew :chat-core:test` |
 | `chat-ui/src/androidTest/` | Compose UI tests using `androidx.compose.ui.test` — render a composable in isolation, drive it with callbacks, assert behavior | `./gradlew :chat-ui:connectedDebugAndroidTest` |
-| `ethora-component/src/test/` | Aggregate-module unit tests covering cross-module behavior (UnreadObserver, single-room support, XMPP client ownership, file size formatting, DNS fallback, pending-media queue, log export formatter) | `./gradlew :ethora-component:test` |
+| `ethora-component/src/test/` | Aggregate-module unit tests covering cross-module behavior (UnreadObserver, single-room support, XMPP client ownership, file size formatting, DNS fallback, pending-media queue, pagination edge cases, optimistic-send reconciliation, log export formatter) | `./gradlew :ethora-component:test` |
 
 The Compose UI tests run on a connected emulator or device (API 26+).
 They're hermetic — no network, no XMPP, no FCM. End-to-end flows that
@@ -700,6 +707,8 @@ is the canonical example to copy when adding a new Compose UI test.
 | `MessageContextMenu` | `sendFailedOwnMessageOffersRetry` | `sendFailed=true` → Retry replaces Edit (auto-timer path) |
 | `MessageContextMenu` | `pendingMessageWithoutResendHandlerOffersEditNotRetry` | Missing `onResend` → falls back to Edit |
 | `MessageContextMenu` | `tappingCopyFiresOnCopyAndOnDismiss` | Tap Copy → both `onCopy` and `onDismiss` callbacks fire (auto-close) |
+| `MessageContextMenu` | `ownMediaMessageHidesEditButKeepsCopyAndDelete` | Sent media bubbles stay non-editable while still exposing Copy/Delete |
+| `MessageContextMenu` | `pendingMediaMessageOffersRetryNotEdit` | Pending media bubble shows Retry instead of Edit |
 | `MessageContextMenu` | `ownMessageRendersExactlyThreeMenuItems` | Regression guard: own-message menu has exactly 3 items (Copy, Edit, Delete) |
 
 ##### chat-core unit tests
@@ -709,9 +718,12 @@ Pure-JVM, no emulator. Run with `./gradlew :chat-core:test`.
 | Module | Test class | Asserts |
 |--------|------------|---------|
 | `chat-core` | `TimestampUtilsTest` | 14 tests covering the s/ms/µs/ns ladder, ISO-8601 + XEP-0091 string parsing, embedded-digit extraction, null/Date/Number/String type dispatch, and zero-clamping on invalid input |
-| `chat-core` | `XmppXmlUtilsTest` | 14 tests covering `extractDataElement` (self-closing vs open-close, malformed input) and `extractAttribute` (double-quoted, single-quoted, unquoted; missing attribute; entity decoding for `&amp;` / `&lt;` / `&gt;` / `&quot;` / `&apos;`). Anchored on the historical bug where signed-URL thumbnails broke because `&amp;` wasn't decoded back to `&` in MAM-replayed messages |
-| `chat-core` | `RoomStoreTest` | 15 tests covering `setRooms` (full replace), `addRoom` (append vs merge by id / jid), `updateRoom` (replace + `presenceReady` stickiness — incoming `false` doesn't clear an already-`true` flag, regression-guarded), `removeRoom` (by id or jid; clears `currentRoom` when active room is removed), `setCurrentRoom`, `getRoomById` / `getRoomByJid`, `upsertRoom`, `clear` |
-| `chat-core` | `MessageStoreTest` | 11 tests covering `setMessagesForRoom` / `getMessagesForRoom` (per-room isolation), `addMessage` new-append (returns `false`), `addMessage` non-pending duplicate dropped (MAM-replay idempotency), `addMessage` pending-merge bidirectional ID matching (incoming `id` vs existing `xmppId` AND existing `id` vs incoming `xmppId` — the load-bearing reconciliation between optimistic UUID and server-assigned id), `clearMessagesForRoom`, `clear` |
+| `chat-core` | `XmppXmlUtilsTest` | Expanded parser coverage for `extractDataElement`, `extractAttribute`, `extractBody`, and `unwrapMucSubInnerMessage`, including XML-entity decoding, `<body>` tags with attributes / namespaces, and MUC-SUB pubsub wrappers |
+| `chat-core` | `RoomStoreTest` | Covers `setRooms`, `addRoom`, `updateRoom`, `removeRoom`, `setCurrentRoom`, `getRoomById` / `getRoomByJid`, `upsertRoom`, `clear`, plus parked `lastViewedTimestamp` application when room metadata arrives later |
+| `chat-core` | `MessageStoreTest` | Covers per-room isolation, append vs dedup behavior, bidirectional optimistic/server id reconciliation, bulk insert ordering, deleted-message tombstones, and clear paths |
+| `ethora-component` | `MessageSpamTest` | Regression coverage for rapid optimistic sends, out-of-order echoes, late-echo recovery for `sendFailed` messages, and duplicate suppression once delivery is already confirmed |
+| `ethora-component` | `PendingMediaSendQueueTest` | Queue codec coverage for retry transitions, filename sanitization, and persistence of `caption` / `replyToMessageId` across encode-decode round trips |
+| `ethora-component` | `ChatRoomViewModelTest` | Pagination guard: an empty MAM page before `historyComplete=true` is treated as transient, not as hard end-of-history |
 
 **Gaps** still to cover at this layer (file an issue + a test in the
 same PR when you tackle one):

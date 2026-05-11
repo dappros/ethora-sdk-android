@@ -62,6 +62,17 @@ fun MessageContextMenu(
         (message.pending == true || message.sendFailed == true) &&
         onResend != null
 
+    // Media messages (images, files, audio, etc.) are NOT editable —
+    // only the text body can be redacted. Editing a media bubble's
+    // body would desync from the uploaded asset, and we don't expose
+    // re-upload flows through the edit path. Matches the web client's
+    // behaviour (`isMediafile === "true"` short-circuits the edit
+    // affordance in the bubble action sheet).
+    val isMediaMessage = message.isMediafile == "true" ||
+        !message.location.isNullOrBlank() ||
+        !message.fileName.isNullOrBlank()
+    val canEdit = !isMediaMessage
+
     val density = LocalDensity.current
     val configuration = LocalConfiguration.current
     val screenWidthPx = with(density) { configuration.screenWidthDp.dp.toPx() }
@@ -72,11 +83,16 @@ fun MessageContextMenu(
 
     val menuWidth = 240.dp
     val menuWidthPx = with(density) { menuWidth.toPx() }
-    // Visible items: Copy is always shown; for own messages the menu also shows
-    // either Retry (when canResend) OR Edit, plus Delete. Received messages
-    // show Copy only. Each ContextMenuItem is ~40 dp; dividers between items
-    // are 8 dp; the surrounding Column has 8 dp top + 8 dp bottom padding.
-    val visibleItemCount = if (isUser) 3 else 1
+    // Visible items: Copy is always shown; for own messages the menu also
+    // shows either Retry (when canResend) OR Edit (only on text messages),
+    // plus Delete. Received messages show Copy only. Media messages skip
+    // Edit entirely — see `canEdit` above. Each ContextMenuItem is ~40 dp;
+    // dividers between items are 8 dp; the surrounding Column has 8 dp top
+    // + 8 dp bottom padding.
+    val showEdit = isUser && !canResend && canEdit
+    val showRetry = isUser && canResend
+    val ownItemCount = 1 + (if (showRetry) 1 else 0) + (if (showEdit) 1 else 0) // +Delete
+    val visibleItemCount = if (isUser) ownItemCount else 1
     val itemHeightDp = 40
     val dividerHeightDp = 8
     val menuChromeDp = 16 // 8 dp top + 8 dp bottom padding
@@ -163,7 +179,7 @@ fun MessageContextMenu(
                             }
                         )
                     }
-                    if (!canResend) {
+                    if (showEdit) {
                         Divider(
                             modifier = Modifier.padding(vertical = 4.dp),
                             color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)

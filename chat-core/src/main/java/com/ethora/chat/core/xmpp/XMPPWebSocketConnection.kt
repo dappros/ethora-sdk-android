@@ -743,8 +743,27 @@ class XMPPWebSocketConnection(
     
     /**
      * Parse and handle real-time message (not from MAM)
+     *
+     * MUC-SUB note: ejabberd delivers room messages wrapped as
+     *   <message id='OUTER'>
+     *     <event xmlns='http://jabber.org/protocol/pubsub#event'>
+     *       <items node='urn:xmpp:mucsub:nodes:messages'>
+     *         <item id='ITEM_ID'>
+     *           <message id='send-text-message:UUID' type='groupchat' ...>
+     *             ...the real chat message...
+     *           </message>
+     *         </item>
+     *       </items>
+     *     </event>
+     *   </message>
+     * If we read attributes off the OUTER wrapper, we get the pubsub-event id
+     * (a server-side number), not the `send-text-message:UUID` we used when
+     * sending. Optimistic-row dedup then fails (incoming.id != existing.id),
+     * and every echo creates a second visible bubble — that's the
+     * "spam-sends double-render" bug. Unwrap to the inner stanza first.
      */
-    private fun parseAndHandleRealtimeMessage(xml: String) {
+    private fun parseAndHandleRealtimeMessage(rawXml: String) {
+        val xml = unwrapMucSubInnerMessage(rawXml)
         try {
             val messageId = extractAttribute(xml, "id") ?: ""
             // For consistency with MAM history IDs, prefer server archive stanza-id when available.
@@ -1125,11 +1144,31 @@ class XMPPWebSocketConnection(
     /**
      * Send raw XML
      */
-    fun sendRaw(xml: String) {
+    /**
+     * Transmit a raw XML stanza. Returns true if OkHttp accepted the frame
+     * into its outgoing queue.
+     *
+     * Previously this swallowed the Boolean from `WebSocket.send`, which made
+     * stanza loss invisible: under burst load OkHttp's outgoing queue rejects
+     * frames (returns false) and the caller never knew. That manifested as
+     * the "spam 15 messages, 2 don't go" bug — the optimistic bubble was
+     * created, `sendMessage` returned a non-null id, but no XMPP message
+     * ever reached the server, so no echo ever arrived and the bubble
+     * eventually flipped to `sendFailed` via the 6 s pending timeout
+     * (sometimes the user noticed it as "stuck sending" rather than failed).
+     */
+    fun sendRaw(xml: String): Boolean {
         com.ethora.chat.core.store.LogStore.send(TAG, "📤 Transmit: ${xml.take(300)}${if (xml.length > 300) "..." else ""}")
-        webSocket?.send(xml) ?: run {
+        val ws = webSocket
+        if (ws == null) {
             Log.e(TAG, "Cannot send: WebSocket is null")
+            return false
         }
+        val ok = ws.send(xml)
+        if (!ok) {
+            Log.e(TAG, "WebSocket.send() returned false (outgoing queue rejected); caller must retry or fail the send")
+        }
+        return ok
     }
     
     /**
@@ -1204,7 +1243,24 @@ class XMPPWebSocketConnection(
         
         val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$dataElement<body>$escapedBody</body></message>"""
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMessage() to $fixedRoomJid")
-        sendRaw(message)
+        // Surface OkHttp queue rejection (the silent-drop root cause behind
+        // "spam 15 messages, 2 don't go"). One short retry to ride out a
+        // momentarily-inconsistent socket — same pattern as sendMediaMessage
+        // a few methods down.
+        var sent = sendRaw(message)
+        if (!sent) {
+            kotlinx.coroutines.delay(50)
+            sent = sendRaw(message)
+        }
+        if (!sent) {
+            com.ethora.chat.core.store.LogStore.error(
+                TAG,
+                "Send failed: WebSocket rejected stanza id=$messageId room=$fixedRoomJid",
+                category = "xmpp-send"
+            )
+            Log.e(TAG, "❌ sendMessage: WebSocket rejected message id=$messageId — caller will mark sendFailed")
+            return null
+        }
         Log.d(TAG, "📤 Sent message to $fixedRoomJid: $body (ID: $messageId)")
         Log.d(TAG, "📤 Message XML: ${message.take(500)}")
         return messageId

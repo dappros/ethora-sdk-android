@@ -231,6 +231,92 @@ class RoomStoreTest {
         assertEquals("Second", RoomStore.rooms.value[0].title)
     }
 
+    // --- setLastViewedTimestamp (Bug B parking) ------------------------
+
+    @Test
+    fun `setLastViewedTimestamp parks value when room is not yet present and applies on later addRoom`() {
+        // Bug B: InitBeforeLoadFlow ran before the room-list API
+        // populated this single-chat JID into the store, so the
+        // server-supplied read marker was silently dropped. The fix
+        // parks the value and applies it when the room shows up.
+        val singleChatJid = "peer-user@xmpp.example.com"
+        val ts = 1_700_000_000_000L
+
+        RoomStore.setLastViewedTimestamp(singleChatJid, ts)
+        // Room not present yet → no entry in store.
+        assertNull(RoomStore.getRoomByJid(singleChatJid))
+
+        // Room arrives later (e.g. from the room-list API).
+        RoomStore.addRoom(makeRoom("peer-user", jid = singleChatJid))
+        val room = RoomStore.getRoomByJid(singleChatJid)
+        assertNotNull(room)
+        assertEquals(
+            "parked timestamp must transfer to the room when it materialises",
+            ts,
+            room!!.lastViewedTimestamp
+        )
+        assertEquals("unread must reset along with the read marker", 0, room.unreadMessages)
+    }
+
+    @Test
+    fun `setLastViewedTimestamp parks value and applies on later setRooms`() {
+        // Parallel test for the bulk path — `RoomsAPIHelper.getRooms` flows
+        // through `setRooms`, which is the realistic order in production:
+        // 1) bootstrap fetches private store, 2) writes parked values,
+        // 3) bootstrap fetches rooms via REST, 4) `setRooms` drains.
+        val jid = "another-peer@xmpp.example.com"
+        val ts = 1_700_000_500_000L
+
+        RoomStore.setLastViewedTimestamp(jid, ts)
+        RoomStore.setRooms(listOf(makeRoom("another-peer", jid = jid)))
+
+        assertEquals(ts, RoomStore.getRoomByJid(jid)!!.lastViewedTimestamp)
+    }
+
+    @Test
+    fun `parked timestamp does not clobber a fresher local read marker`() {
+        // If the user has already opened the room in this session and
+        // bumped its lastViewed past what the server has, the stale
+        // parked value must not overwrite it.
+        val jid = "peer3@xmpp.example.com"
+        val stale = 1_700_000_000_000L
+        val fresh = 1_700_999_999_999L
+
+        RoomStore.setLastViewedTimestamp(jid, stale)
+        RoomStore.addRoom(makeRoom("peer3", jid = jid, lastViewedTimestamp = fresh))
+
+        assertEquals(
+            "fresher local value wins over a stale parked value",
+            fresh,
+            RoomStore.getRoomByJid(jid)!!.lastViewedTimestamp
+        )
+    }
+
+    @Test
+    fun `parked entry is consumed on first apply and not reused later`() {
+        // Guard: drain is one-shot per jid. A subsequent unrelated
+        // upsert (e.g. metadata refresh) must not re-zero the room.
+        val jid = "peer4@xmpp.example.com"
+        val ts = 1_700_000_111_111L
+
+        RoomStore.setLastViewedTimestamp(jid, ts)
+        RoomStore.addRoom(makeRoom("peer4", jid = jid))
+        assertEquals(ts, RoomStore.getRoomByJid(jid)!!.lastViewedTimestamp)
+
+        // User locally bumps the read marker by reading the room.
+        val newer = ts + 50_000L
+        val current = RoomStore.getRoomByJid(jid)!!.copy(lastViewedTimestamp = newer)
+        RoomStore.updateRoom(current)
+
+        // Another upsert (e.g. room title update) must not reapply
+        // the original parked ts and clobber `newer`.
+        RoomStore.upsertRoom(makeRoom("peer4", jid = jid, title = "renamed"))
+        assertEquals(
+            newer,
+            RoomStore.getRoomByJid(jid)!!.lastViewedTimestamp
+        )
+    }
+
     // --- clear ---------------------------------------------------------
 
     @Test

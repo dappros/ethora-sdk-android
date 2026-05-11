@@ -4,11 +4,22 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.05.11] — JitPack `v1.0.34`
+
+- **Fixed:** Room-history pagination is more resilient. `ChatRoomViewModel.loadMoreMessages(...)` now reconnects before requesting older MAM pages, promotes the room history cursor, and no longer treats a transient empty page as end-of-history until `Room.historyComplete == true`.
+- **Fixed:** The "scroll to bottom" FAB unread counter no longer jumps when the user loads older history. `ChatRoomView` now distinguishes prepended history pages from genuinely new tail messages before incrementing `unreadCount`.
+- **Fixed:** A late server echo or MAM catch-up now reconciles optimistic messages that had already timed out into `sendFailed = true`. Successful retry / delayed delivery clears the failed state instead of leaving a stale failed bubble in the transcript.
+- **Fixed:** Pending-media queue persistence now keeps `caption` and `replyToMessageId`, so attachment+text sends survive process restart without losing the follow-up text or reply target.
+- **Improved:** XMPP stanza parsing now covers `<body>` tags with attributes / namespaces and unwraps MUC-SUB pubsub envelopes before extracting the inner chat message, improving realtime and history parsing parity.
+- **Tests:** Added regression coverage for pagination edge cases, optimistic-send reconciliation under late echoes, pending-media queue caption serialization, expanded XMPP XML parsing, and message-context-menu media cases.
+
+---
+
 ## [26.05.06] — JitPack `v1.0.32`
 
 - **New:** `EthoraChatSdk.shutdown()` — symmetric counterpart to `EthoraChatSdk.initialize(context)`. Disconnects the shared bootstrap XMPP client, resets the runtime sync flags, clears the cached fallback client, and flips the SDK's `initialized` flag so a subsequent `initialize(...)` re-runs the real setup. Persisted data — Room database, DataStore, encrypted token storage, pending-media files, scroll positions — is intentionally preserved so unsent messages survive a logout/login round-trip.
 - **Docs:** Added an "SDK lifecycle" section to the README that spells out the three concentric scopes (`EthoraChatSdk` for persistence, `EthoraChatBootstrap` for session, `Chat` composable for UI) and which initialization sites are safe vs. which trigger the duplicate-DataStore failure. Also documents the logout/shutdown flow and clarifies that the `Chat` composable no longer disconnects the bootstrap-owned socket on dispose.
-dappros:ethora-sdk-android:<version>' ... will overwrite each other` warning is intentional: the install command runs the root publish first, then the module publish, so the module's full-dependency POM overwrites the aggregator stub in `~/.m2`. Integrators keep using `com.github.dappros:ethora-sdk-android:<version>` and resolve the AAR directly.
+- **Build:** JitPack publication stays on the canonical coordinate `com.github.dappros:ethora-sdk-android:<version>`. The root POM aggregator is kept intentionally so JitPack discovers the build artifacts correctly; integrators should continue depending on the canonical coordinate rather than a module artifactId.
 - **Docs:** README integrator dependency example updated to `com.github.dappros:ethora-sdk-android:<version>` — the coordinate JitPack actually publishes. The previous `com.github.dappros.ethora-sdk-android:ethora-component:<version>` form returned 404 because no module is published under that artifactId.
 
 ---

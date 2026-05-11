@@ -342,50 +342,63 @@ private fun ProfileImagePlaceholder(
     modifier: Modifier = Modifier
 ) {
     Box(
-        modifier = modifier
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onImageClick)
-            .border(
-                2.dp,
-                MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                CircleShape
-            )
+        modifier = modifier,
+        contentAlignment = Alignment.Center
     ) {
-        if (imageUri != null) {
-            AsyncImage(
-                model = imageUri,
-                contentDescription = "Profile image",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-            // Remove button overlay
-            IconButton(
-                onClick = onRemoveClick,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .size(32.dp)
-                    .background(
-                        MaterialTheme.colorScheme.error,
-                        CircleShape
-                    )
-            ) {
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .clickable(onClick = onImageClick)
+                .border(
+                    2.dp,
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                    CircleShape
+                )
+        ) {
+            if (imageUri != null) {
+                AsyncImage(
+                    model = imageUri,
+                    contentDescription = "Profile image",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
                 Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Remove image",
-                    tint = MaterialTheme.colorScheme.onError,
-                    modifier = Modifier.size(16.dp)
+                    imageVector = Icons.Default.AddPhotoAlternate,
+                    contentDescription = "Add photo",
+                    modifier = Modifier
+                        .fillMaxSize(0.6f)
+                        .align(Alignment.Center),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-        } else {
-            Icon(
-                imageVector = Icons.Default.AddPhotoAlternate,
-                contentDescription = "Add photo",
+        }
+
+        if (imageUri != null) {
+            Surface(
                 modifier = Modifier
-                    .fillMaxSize(0.6f)
-                    .align(Alignment.Center),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+                    .align(Alignment.TopEnd)
+                    .offset(x = 6.dp, y = (-6).dp)
+                    .size(32.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.error,
+                tonalElevation = 2.dp,
+                shadowElevation = 2.dp
+            ) {
+                IconButton(
+                    onClick = onRemoveClick,
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Remove image",
+                        tint = MaterialTheme.colorScheme.onError,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
         }
     }
 }

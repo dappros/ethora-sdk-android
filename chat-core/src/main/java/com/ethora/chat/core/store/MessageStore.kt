@@ -251,9 +251,17 @@ object MessageStore {
         
         if (existingIndex >= 0) {
             val existingMessage = roomMessages[existingIndex]
-            
+
+            // A row flagged `sendFailed = true` (the 6 s pending-timeout
+            // already ran, or the transport returned null on first attempt)
+            // is treated like a pending row for the purposes of the server
+            // echo: when the auto-retry path or a late server echo finally
+            // arrives, replace the row in place and clear the failure flag.
+            // Without this, the failed bubble lives forever in the UI even
+            // though the message was actually delivered — that's the
+            // "stale bad copy after retry" bug.
             // If it's a pending message, update it and clear pending state
-            if (existingMessage.pending == true) {
+            if (existingMessage.pending == true || existingMessage.sendFailed == true) {
                 // Deep merge: prefer the incoming server echo but fall back to every
                 // upload-side field the client set locally before the server was
                 // asked to echo it. Missing ANY of these (isMediafile/originalName/
@@ -262,6 +270,7 @@ object MessageStore {
                 val updatedMessage = message.copy(
                     id = existingMessage.id, // Keep original optimistic ID
                     pending = false,
+                    sendFailed = null, // Echo arrived — clear any prior failure flag.
                     body = if (message.body.isNotBlank()) message.body else existingMessage.body,
                     isMediafile = message.isMediafile ?: existingMessage.isMediafile,
                     location = message.location?.takeIf { it.isNotBlank() } ?: existingMessage.location,
@@ -492,24 +501,54 @@ object MessageStore {
         val pendingResolved = mutableListOf<Message>()
 
         for (incoming in newMessages) {
-            // Exact id/xmppId dedup against current list (never duplicate confirmed messages).
-            val duplicate = roomMessages.any { existing ->
+            // Exact id/xmppId dedup against current list. When the existing
+            // row is sendFailed (auto-retry path: the row was timed out, but
+            // the auto-retry succeeded and the server echo just arrived via
+            // MAM), do NOT skip — fall through and treat it as a pending
+            // reconciliation so the failed flag gets cleared.
+            val matchIdx = roomMessages.indexOfFirst { existing ->
                 val exactIdMatch = existing.id == incoming.id
                 val incomingXmppIdMatchesExistingId = incoming.xmppId != null && existing.id == incoming.xmppId
                 val existingXmppIdMatchesIncomingId = existing.xmppId != null && existing.xmppId == incoming.id
                 val xmppIdMatch = existing.xmppId != null && incoming.xmppId != null && existing.xmppId == incoming.xmppId
                 exactIdMatch || incomingXmppIdMatchesExistingId || existingXmppIdMatchesIncomingId || xmppIdMatch
             }
-            if (duplicate) continue
+            if (matchIdx >= 0) {
+                val matched = roomMessages[matchIdx]
+                if (matched.sendFailed == true) {
+                    val cleared = incoming.copy(
+                        id = matched.id,
+                        pending = false,
+                        sendFailed = null,
+                        body = if (incoming.body.isNotBlank()) incoming.body else matched.body,
+                        isMediafile = incoming.isMediafile ?: matched.isMediafile,
+                        location = incoming.location?.takeIf { it.isNotBlank() } ?: matched.location,
+                        locationPreview = incoming.locationPreview?.takeIf { it.isNotBlank() } ?: matched.locationPreview,
+                        fileName = incoming.fileName ?: matched.fileName,
+                        mimetype = incoming.mimetype ?: matched.mimetype,
+                        originalName = incoming.originalName ?: matched.originalName,
+                        size = incoming.size ?: matched.size,
+                        waveForm = incoming.waveForm ?: matched.waveForm
+                    )
+                    roomMessages[matchIdx] = cleared
+                    pendingResolved.add(cleared)
+                }
+                // Either we cleared the failure or the row is already a
+                // confirmed duplicate — in both cases skip the "add as new".
+                continue
+            }
 
             // Pending reconciliation: if a local optimistic message content-matches this incoming,
-            // replace it in place instead of adding a new row.
+            // replace it in place instead of adding a new row. Covers both
+            // `pending = true` and `sendFailed = true` locals — the latter
+            // for the "row timed out before the echo got here" path.
             val pendingIdx = findMatchingPending(roomMessages, incoming)
             if (pendingIdx >= 0) {
                 val pending = roomMessages[pendingIdx]
                 val merged = incoming.copy(
                     id = pending.id, // keep original optimistic ID for any callers that held onto it
                     pending = false,
+                    sendFailed = null,
                     body = if (incoming.body.isNotBlank()) incoming.body else pending.body,
                     isMediafile = incoming.isMediafile ?: pending.isMediafile,
                     location = incoming.location?.takeIf { it.isNotBlank() } ?: pending.location,
@@ -543,7 +582,13 @@ object MessageStore {
     private fun findMatchingPending(roomMessages: List<Message>, incoming: Message): Int {
         val now = System.currentTimeMillis()
         return roomMessages.indexOfFirst { existing ->
-            if (existing.pending != true) return@indexOfFirst false
+            // Reconcile both still-pending rows AND already-failed rows.
+            // The failed case is the "late echo for a row that timed out
+            // and was flipped to sendFailed=true" path (see Bug F + the
+            // explicit MessageStoreReconciliationTest contract): the echo
+            // may carry a fresh server-assigned id, so id-dedup misses
+            // and we have to fall back to content matching.
+            if (existing.pending != true && existing.sendFailed != true) return@indexOfFirst false
             val isMedia = existing.isMediafile == "true" || existing.location != null ||
                 existing.fileName != null || existing.body == "media"
             val windowMs = if (isMedia) 120_000L else 60_000L
