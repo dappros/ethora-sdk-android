@@ -223,4 +223,167 @@ class MessageStoreTest {
         assertEquals(0, MessageStore.getMessagesForRoom(a).size)
         assertEquals(0, MessageStore.getMessagesForRoom(b).size)
     }
+
+    // --- rapid-send + duplication patterns (Cluster D in QA_SCENARIOS.md)
+    //
+    // These tests target the cluster of field reports where bulk sends
+    // under degraded networks leave duplicate or out-of-order bubbles in
+    // the list. The bidirectional id/xmppId match in `addMessage` and
+    // `addMessages` is load-bearing for this contract.
+
+    @Test
+    fun `addMessage 10 unique ids appends all 10 in order`() {
+        val room = "room-1@conference.xmpp.example.com"
+        repeat(10) { i ->
+            // Distinct timestamps preserve a deterministic UI order under
+            // sortedForUi — without unique timestamps the sort falls
+            // through to id comparison and the test would assert on
+            // string ordering rather than insertion order.
+            val msg = makeMessage("m-$i", body = "msg-$i").copy(
+                timestamp = 1_000L + i,
+                date = Date(1_000L + i)
+            )
+            MessageStore.addMessage(room, msg)
+        }
+
+        val read = MessageStore.getMessagesForRoom(room)
+        assertEquals(10, read.size)
+        assertEquals(
+            "rapid send must preserve chronological order",
+            (0 until 10).map { "m-$it" },
+            read.map { it.id }
+        )
+    }
+
+    @Test
+    fun `addMessage mixed unique + duplicates ends with only the unique set`() {
+        // Field-bug shape: under network blip, the send pipeline can
+        // re-emit the same id multiple times — once optimistically, again
+        // from MAM replay, again from server echo. Each redundant call
+        // must NOT add a new bubble.
+        val room = "room-1@conference.xmpp.example.com"
+        val ids = listOf("a", "b", "c", "d", "e")
+        ids.forEach { MessageStore.addMessage(room, makeMessage(it, pending = false)) }
+        // Duplicate fire — second pass over the same ids.
+        ids.forEach { MessageStore.addMessage(room, makeMessage(it, pending = false)) }
+
+        val read = MessageStore.getMessagesForRoom(room)
+        assertEquals(
+            "duplicate id fire must not increase the bubble count",
+            5, read.size
+        )
+    }
+
+    @Test
+    fun `addMessage cross-room — adding to A leaves B untouched`() {
+        // Catches a regression class where adding to room A would
+        // accidentally clobber the `_messages` map's B entry through
+        // an in-place mutation. The Map.toMutableMap() guard in
+        // addMessage is what protects this — the test locks that
+        // protection in.
+        val a = "room-a@conference.xmpp.example.com"
+        val b = "room-b@conference.xmpp.example.com"
+        MessageStore.setMessagesForRoom(
+            b,
+            listOf(
+                makeMessage("b1", roomJid = b),
+                makeMessage("b2", roomJid = b),
+            )
+        )
+
+        // Drive 5 sends into A.
+        repeat(5) { i ->
+            MessageStore.addMessage(a, makeMessage("a-$i", roomJid = a))
+        }
+
+        assertEquals(5, MessageStore.getMessagesForRoom(a).size)
+        assertEquals(
+            "messages in room B must be unaffected by sends to room A",
+            listOf("b1", "b2"),
+            MessageStore.getMessagesForRoom(b).map { it.id }
+        )
+    }
+
+    @Test
+    fun `addMessages bulk insert dedups and preserves order by timestamp`() {
+        // `addMessages` is the bulk path used by history/MAM ingestion.
+        // It must dedup against existing rows AND ingest a mixed batch
+        // in a single observable update without losing intra-batch
+        // ordering.
+        val room = "room-1@conference.xmpp.example.com"
+
+        // Seed with one existing message.
+        MessageStore.addMessage(
+            room,
+            makeMessage("seed").copy(timestamp = 5_000L, date = Date(5_000L))
+        )
+
+        // Bulk-add: 4 new + 1 duplicate of the seed.
+        val batch = listOf(
+            makeMessage("b1").copy(timestamp = 1_000L, date = Date(1_000L)),
+            makeMessage("b2").copy(timestamp = 2_000L, date = Date(2_000L)),
+            makeMessage("seed").copy(timestamp = 5_000L, date = Date(5_000L)), // dup
+            makeMessage("b3").copy(timestamp = 3_000L, date = Date(3_000L)),
+            makeMessage("b4").copy(timestamp = 4_000L, date = Date(4_000L)),
+        )
+        MessageStore.addMessages(room, batch)
+
+        val read = MessageStore.getMessagesForRoom(room)
+        assertEquals(
+            "duplicate must be dropped — final size is 5 (seed + 4 unique)",
+            5, read.size
+        )
+        assertEquals(
+            "messages sorted by timestamp ascending",
+            listOf("b1", "b2", "b3", "b4", "seed"),
+            read.map { it.id }
+        )
+    }
+
+    // --- cache contract (Cluster F in QA_SCENARIOS.md) ----------------
+
+    @Test
+    fun `setMessagesForRoom then getMessagesForRoom round-trips content`() {
+        // The fast-load contract: when the persistence layer hydrates a
+        // room from the on-disk cache, it does so via setMessagesForRoom.
+        // The very next read must observe the seeded messages without
+        // a network round-trip. This is what users experience as
+        // "instant open" on a previously-visited room.
+        val room = "room-1@conference.xmpp.example.com"
+        val seeded = listOf(
+            makeMessage("c1", body = "cached one"),
+            makeMessage("c2", body = "cached two"),
+            makeMessage("c3", body = "cached three"),
+        )
+        MessageStore.setMessagesForRoom(room, seeded)
+
+        val read = MessageStore.getMessagesForRoom(room)
+        assertEquals(seeded.size, read.size)
+        assertEquals(
+            "cached content survives the set→get round-trip exactly",
+            seeded.map { it.id }.toSet(),
+            read.map { it.id }.toSet()
+        )
+    }
+
+    @Test
+    fun `markMessageAsDeleted keeps the row but flips isDeleted true`() {
+        // Catches the failure mode where deleting a message removed the
+        // row entirely (causing surrounding messages to renumber and
+        // unread cursors to drift) instead of leaving a tombstone in
+        // place.
+        val room = "room-1@conference.xmpp.example.com"
+        MessageStore.addMessage(room, makeMessage("doomed", body = "delete me"))
+        MessageStore.addMessage(room, makeMessage("survivor", body = "keep me"))
+
+        MessageStore.markMessageAsDeleted(room, "doomed")
+
+        val read = MessageStore.getMessagesForRoom(room)
+        assertEquals(
+            "deleted message must remain in the list as a tombstone",
+            2, read.size
+        )
+        val doomed = read.first { it.id == "doomed" }
+        assertEquals(true, doomed.isDeleted)
+    }
 }
