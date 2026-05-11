@@ -173,6 +173,11 @@ dependencies {
     androidTestImplementation(libs.compose.ui.test.junit4)
     testImplementation(libs.mockito.core)
     testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
+    // Coroutines test utilities — runTest, StandardTestDispatcher,
+    // Dispatchers.setMain / resetMain. Required for LogoutService tests
+    // because performLogout uses scope.launch on Dispatchers.Main and
+    // can't be driven hermetically without overriding Main first.
+    testImplementation(libs.kotlinx.coroutines.test)
 }
 
 // JitPack publishing is opt-in: run with -Ppublish=true (or set PUBLISH_SDK=true in env)

@@ -1,14 +1,18 @@
 package com.ethora.chat.core.store
 
+import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.RoomType
+import com.ethora.chat.core.models.User
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import java.util.Date
 
 /**
  * Unit tests for the [RoomStore] singleton's reducer-shaped methods.
@@ -351,5 +355,289 @@ class RoomStoreTest {
             "active room must always read as 0 unread",
             0, RoomStore.getRoomById("a")?.unreadMessages
         )
+    }
+
+    // --- unread counter math, exhaustive (Cluster E in QA_SCENARIOS.md)
+    //
+    // The per-room counter math in `updateUnreadCount` is where most of
+    // the field-reported unread bugs live (MAM own-messages counted as
+    // unread, edges around lastViewed, capped-vs-exact rendering). PR #6
+    // covered the "active room = 0" rule; these tests cover the
+    // non-active branch and the cap behaviour.
+
+    private fun otherUserMessage(
+        id: String,
+        roomJid: String,
+        timestamp: Long,
+        senderXmppLocal: String = "other-user",
+    ) = Message(
+        id = id,
+        user = User(id = "$senderXmppLocal@xmpp.example.com"),
+        date = Date(timestamp),
+        body = "msg-$id",
+        roomJid = roomJid,
+        timestamp = timestamp,
+    )
+
+    @Test
+    fun `updateUnreadCount on non-active room with lastViewed=0 counts all countable messages`() {
+        // Fresh-room semantics: when lastViewedTimestamp is 0 (room
+        // never opened), every countable message must register as
+        // unread. Previously this branch was treated as "all read"
+        // which is why first-open rooms never lit up the badge.
+        val room = makeRoom("a", lastViewedTimestamp = 0L)
+        RoomStore.setRooms(listOf(room))
+        // No current room set → "a" is non-active.
+
+        val messages = (1..3).map {
+            otherUserMessage(id = "m-$it", roomJid = room.jid, timestamp = 1_000L * it)
+        }
+
+        RoomStore.updateUnreadCount(room.jid, messages)
+
+        assertEquals(3, RoomStore.getRoomById("a")?.unreadMessages)
+        assertFalse(RoomStore.getRoomById("a")?.unreadCapped ?: true)
+    }
+
+    @Test
+    fun `updateUnreadCount excludes own messages from the count`() {
+        // MAM replay frequently delivers a user's own historical
+        // messages alongside others'. Own messages must NOT bump the
+        // unread badge — a recurring field bug observed after
+        // re-login.
+        val ownLocal = "alice"
+        UserStore.setUser(
+            User(id = "$ownLocal@xmpp.example.com", xmppUsername = "$ownLocal@xmpp.example.com")
+        )
+        try {
+            val room = makeRoom("a", lastViewedTimestamp = 0L)
+            RoomStore.setRooms(listOf(room))
+
+            val mixed = listOf(
+                otherUserMessage("o-1", room.jid, 1_000L, senderXmppLocal = ownLocal),
+                otherUserMessage("o-2", room.jid, 2_000L, senderXmppLocal = ownLocal),
+                otherUserMessage("x-1", room.jid, 3_000L, senderXmppLocal = "other"),
+            )
+
+            RoomStore.updateUnreadCount(room.jid, mixed)
+
+            assertEquals(
+                "only the message from 'other' counts; own messages are skipped",
+                1, RoomStore.getRoomById("a")?.unreadMessages
+            )
+        } finally {
+            UserStore.clear()
+        }
+    }
+
+    @Test
+    fun `updateUnreadCount excludes pending and system messages`() {
+        val room = makeRoom("a", lastViewedTimestamp = 0L)
+        RoomStore.setRooms(listOf(room))
+
+        val messages = listOf(
+            otherUserMessage("real", room.jid, 1_000L),
+            otherUserMessage("pending", room.jid, 2_000L).copy(pending = true),
+            otherUserMessage("system", room.jid, 3_000L).copy(isSystemMessage = "true"),
+        )
+
+        RoomStore.updateUnreadCount(room.jid, messages)
+
+        assertEquals(
+            "only the non-pending, non-system message from another user counts",
+            1, RoomStore.getRoomById("a")?.unreadMessages
+        )
+    }
+
+    @Test
+    fun `updateUnreadCount caps at 99 and flags unreadCapped when above`() {
+        // The cap = 99 + unreadCapped=true encodes the "99+" badge
+        // contract. The UI reads `unreadCapped` to decide between
+        // exact-count and overflow rendering.
+        val room = makeRoom("a", lastViewedTimestamp = 0L)
+        RoomStore.setRooms(listOf(room))
+
+        val messages = (1..150).map {
+            otherUserMessage(id = "m-$it", roomJid = room.jid, timestamp = 1_000L * it)
+        }
+
+        RoomStore.updateUnreadCount(room.jid, messages)
+
+        val after = RoomStore.getRoomById("a")
+        assertEquals("count must clamp to 99", 99, after?.unreadMessages)
+        assertTrue("unreadCapped must be true above 99", after?.unreadCapped == true)
+    }
+
+    @Test
+    fun `updateUnreadCount honors lastViewedTimestamp — only newer messages count`() {
+        // Messages older than the last time the user viewed the room
+        // must not contribute to unread. This is the boundary that
+        // protects against MAM replay re-marking-as-unread on every
+        // re-login.
+        val lastViewed = 5_000L
+        val room = makeRoom("a", lastViewedTimestamp = lastViewed)
+        RoomStore.setRooms(listOf(room))
+
+        val messages = listOf(
+            otherUserMessage("old", room.jid, lastViewed - 1_000L), // older — skip
+            otherUserMessage("boundary", room.jid, lastViewed),     // not strictly > → skip
+            otherUserMessage("new", room.jid, lastViewed + 1_000L), // newer — count
+        )
+
+        RoomStore.updateUnreadCount(room.jid, messages)
+
+        assertEquals(
+            "only messages strictly newer than lastViewed count",
+            1, RoomStore.getRoomById("a")?.unreadMessages
+        )
+    }
+
+    @Test
+    fun `updateUnreadCount drops to zero when no countable messages remain`() {
+        // After deletes or filter changes leave nothing countable, the
+        // badge must clear. Guards a regression class where the count
+        // remained stuck at the previous high-water-mark.
+        val room = makeRoom("a", unread = 5, lastViewedTimestamp = 0L)
+        RoomStore.setRooms(listOf(room))
+
+        RoomStore.updateUnreadCount(room.jid, messages = emptyList())
+
+        assertEquals(0, RoomStore.getRoomById("a")?.unreadMessages)
+        assertFalse(RoomStore.getRoomById("a")?.unreadCapped ?: true)
+    }
+
+    // --- multi-room concurrent activity (extends Cluster A) -----------
+    //
+    // "Message arrives in room A while room B is focused" is where the
+    // subtlest unread bugs hide. These tests lock in the contract that
+    // current-room state is unaffected by incoming messages to other
+    // rooms.
+
+    @Test
+    fun `addMessage in non-current room leaves current-room pointer untouched`() {
+        val a = makeRoom("a")
+        val b = makeRoom("b")
+        RoomStore.setRooms(listOf(a, b))
+        RoomStore.setCurrentRoom(RoomStore.getRoomById("b"))
+
+        MessageStore.clear()
+        try {
+            MessageStore.addMessage(a.jid, otherUserMessage("a-1", a.jid, 1_000L))
+            assertEquals(
+                "current room must remain B even when A receives a message",
+                "b", RoomStore.currentRoom.value?.id
+            )
+        } finally {
+            MessageStore.clear()
+        }
+    }
+
+    @Test
+    fun `updateUnreadCount on non-current room doesn't touch the current room's unread`() {
+        val a = makeRoom("a", unread = 0, lastViewedTimestamp = 0L)
+        val b = makeRoom("b", unread = 0)
+        RoomStore.setRooms(listOf(a, b))
+        RoomStore.setCurrentRoom(RoomStore.getRoomById("b"))
+
+        // Recompute unread on A with 2 incoming messages. B (current)
+        // must stay at 0 — the active-room rule is independent of
+        // updates to other rooms.
+        val messages = listOf(
+            otherUserMessage("a-1", a.jid, 1_000L),
+            otherUserMessage("a-2", a.jid, 2_000L),
+        )
+        RoomStore.updateUnreadCount(a.jid, messages)
+
+        assertEquals(2, RoomStore.getRoomById("a")?.unreadMessages)
+        assertEquals(
+            "current room B must remain at 0 unread",
+            0, RoomStore.getRoomById("b")?.unreadMessages
+        )
+    }
+
+    @Test
+    fun `addMessage in non-current room updates that room's lastMessage but not the current room's`() {
+        // Catches a regression class where receiving in A would also
+        // overwrite B's last-message preview (cross-room mutation bug).
+        val a = makeRoom("a")
+        val b = makeRoom("b")
+        RoomStore.setRooms(listOf(a, b))
+        RoomStore.setCurrentRoom(RoomStore.getRoomById("b"))
+        MessageStore.clear()
+        try {
+            MessageStore.addMessage(a.jid, otherUserMessage("a-1", a.jid, 1_000L))
+
+            // A's lastMessage must now be populated; B's must remain
+            // null since no messages went to B.
+            assertNotNull(
+                "room A's lastMessage must update on incoming",
+                RoomStore.getRoomById("a")?.lastMessage
+            )
+            assertNull(
+                "room B's lastMessage must be untouched by A's receive",
+                RoomStore.getRoomById("b")?.lastMessage
+            )
+        } finally {
+            MessageStore.clear()
+        }
+    }
+
+    // --- per-room state isolation (Cluster A continuation) ------------
+
+    @Test
+    fun `updatePendingCount writes the pending count from messages back onto the room`() {
+        // The pending-count derivation feeds the "X queued" indicator
+        // and the retry UI. If this drifts, the user sees a stale
+        // sending-state indicator.
+        val a = makeRoom("a")
+        RoomStore.setRooms(listOf(a))
+
+        val messages = listOf(
+            otherUserMessage("m-1", a.jid, 1_000L).copy(pending = true),
+            otherUserMessage("m-2", a.jid, 2_000L).copy(pending = true),
+            otherUserMessage("m-3", a.jid, 3_000L), // not pending
+        )
+
+        RoomStore.updatePendingCount(a.jid, messages)
+
+        assertEquals(2, RoomStore.getRoomById("a")?.pendingMessages)
+    }
+
+    @Test
+    fun `setComposing on one room doesn't bleed into sibling rooms`() {
+        // The typing indicator state is per-room. Bleeding it across
+        // rooms would surface as "B is typing" appearing when a user
+        // is actually typing in A — a confusing UX regression.
+        val a = makeRoom("a")
+        val b = makeRoom("b")
+        RoomStore.setRooms(listOf(a, b))
+
+        RoomStore.setComposing(a.jid, true, listOf("alice"))
+
+        assertEquals(true, RoomStore.getRoomById("a")?.composing)
+        assertEquals(
+            "room B must remain not-composing when A starts typing",
+            null, RoomStore.getRoomById("b")?.composing
+        )
+    }
+
+    @Test
+    fun `setComposing clears composing flag when the typing user is removed by name`() {
+        // setComposing iterates over the supplied composingList — so
+        // clearing requires passing the *user* to remove, not an empty
+        // list. Empty list is a no-op (no usernames to remove → flag
+        // stays). This test locks the actual contract.
+        val a = makeRoom("a")
+        RoomStore.setRooms(listOf(a))
+
+        RoomStore.setComposing(a.jid, true, listOf("alice"))
+        assertEquals(true, RoomStore.getRoomById("a")?.composing)
+
+        RoomStore.setComposing(a.jid, false, listOf("alice"))
+        assertEquals(
+            "composing must clear when the last typing user is removed",
+            false, RoomStore.getRoomById("a")?.composing
+        )
+        assertEquals(emptyList<String>(), RoomStore.getRoomById("a")?.composingList)
     }
 }

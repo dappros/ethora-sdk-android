@@ -2,6 +2,13 @@ package com.ethora.chat.core.store
 
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.persistence.MessageCache
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -11,6 +18,9 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.mockito.kotlin.any
+import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.mock
 import java.util.Date
 
 /**
@@ -364,6 +374,65 @@ class MessageStoreTest {
             seeded.map { it.id }.toSet(),
             read.map { it.id }.toSet()
         )
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `persistence caps writes at 100 messages per room`() = runTest {
+        // Cluster F continued: the PERSIST_LIMIT_PER_ROOM contract.
+        // setMessagesForRoom keeps all N messages in memory, but the
+        // persistence layer must cap writes at 100 — otherwise on-disk
+        // cache growth is unbounded over a long session.
+        //
+        // The cap is enforced inside `persistMessages` which runs on
+        // `persistenceScope (Dispatchers.IO)`, so the test stubs
+        // `MessageCache.saveMessages` via mockito and synchronises on
+        // a CompletableDeferred. The wait is real-time
+        // (`Dispatchers.Default.limitedParallelism(1)`) because
+        // `runTest`'s default virtual time doesn't drive real IO threads.
+        val saved = CompletableDeferred<List<Message>>()
+        val fakeCache = mock<MessageCache> {
+            onBlocking { saveMessages(any()) } doAnswer { invocation ->
+                @Suppress("UNCHECKED_CAST")
+                val list = invocation.getArgument<List<Message>>(0)
+                if (!saved.isCompleted) saved.complete(list)
+                Unit
+            }
+        }
+
+        try {
+            MessageStore.initialize(fakeCache)
+
+            val room = "room-1@conference.xmpp.example.com"
+            // 150 messages with monotonically increasing timestamps so
+            // sortedForUi orders them deterministically — the cap must
+            // keep the LAST 100 by sort order, which is the 100 newest.
+            val messages = (1..150).map { i ->
+                makeMessage("m-$i", body = "body-$i").copy(
+                    timestamp = 1_000L + i,
+                    date = Date(1_000L + i)
+                )
+            }
+            MessageStore.addMessages(room, messages)
+
+            val persisted = withContext(Dispatchers.Default.limitedParallelism(1)) {
+                withTimeout(5_000L) { saved.await() }
+            }
+
+            assertEquals(
+                "persistence layer must cap at 100 messages per room",
+                100, persisted.size
+            )
+            assertEquals(
+                "the kept set must be the 100 most recent (m-51..m-150)",
+                "m-51", persisted.first().id
+            )
+            assertEquals("m-150", persisted.last().id)
+        } finally {
+            // Tearing down the global singleton's cache reference —
+            // subsequent tests must not see this stub.
+            MessageStore.clear()
+        }
     }
 
     @Test
