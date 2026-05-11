@@ -3,6 +3,8 @@ package com.ethora.chat.ui.components
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
@@ -24,12 +26,16 @@ class MessageBubbleTest {
     @get:Rule
     val composeTestRule = createComposeRule()
 
+    // User.fullName falls through firstName+lastName → name → username → id.
+    // Setting `name` directly avoids relying on the firstName+lastName path
+    // (which requires both) so the bubble's author label resolves to a
+    // predictable string in tests.
     private fun textMessage(
         body: String,
         isDeleted: Boolean? = null,
     ) = Message(
         id = "msg-${body.hashCode()}",
-        user = User(id = "u-1", firstName = "Alice"),
+        user = User(id = "u-1", name = "Alice"),
         date = Date(),
         body = body,
         roomJid = "room-jid-1@conference.xmpp.example.com",
@@ -70,16 +76,13 @@ class MessageBubbleTest {
                 isUser = true,
             )
         }
-        // The bubble's surface color flips for deleted messages
-        // (MessageBubble.kt:163) and the body either renders a
-        // tombstone glyph or hides the original text. Anchor on
-        // the deleted-message indicator if the SDK adds one;
-        // otherwise this test asserts the bubble still composes
-        // without crashing — useful regression guard against
-        // null-deref on isDeleted=true paths.
-        composeTestRule.onNodeWithText("you should not see this", substring = true).assertIsDisplayed()
-        // TODO: tighten once the SDK exposes a tombstone label
-        // ("(deleted)" / "Message deleted") so we can assert on it.
+        // For deleted messages the bubble swaps the body for the
+        // canonical tombstone copy from MessageBubble.kt:212 — the
+        // original body must NOT leak into the rendered tree.
+        composeTestRule.onNodeWithText("This message was deleted.", substring = true)
+            .assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("you should not see this", substring = true)
+            .assertCountEquals(0)
     }
 
     @Test

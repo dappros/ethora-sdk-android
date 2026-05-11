@@ -1,7 +1,9 @@
 package com.ethora.chat.ui.components
 
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -65,20 +67,18 @@ class LogsViewTest {
             LogsView()
         }
 
-        // Type a query that matches one of the two entries.
+        // Type a query that matches one of the two entries. The filter
+        // input itself is also a node whose text is the typed query, so
+        // we can't use onNodeWithText("auth.success") (it matches both
+        // the input field and the log row → "Expected at most 1 node").
         composeTestRule.onNodeWithText("Filter logs").performTextInput("auth.success")
 
-        composeTestRule.onNodeWithText("auth.success", substring = true).assertIsDisplayed()
-        // Recompose passes; assert the non-matching entry is gone.
-        // assertDoesNotExist would throw on transient absence; this
-        // pattern (matchedNode().assertIsDisplayed + assertExists on
-        // the wanted node) is more reliable for filter-driven UIs.
-        try {
-            composeTestRule.onNodeWithText("presence.join", substring = true).assertIsDisplayed()
-            error("Expected 'presence.join' to be filtered out by query 'auth.success'")
-        } catch (assertionError: AssertionError) {
-            // Expected — the node should not be displayed under the
-            // active filter. Swallow to let the test pass.
-        }
+        // After filtering, both the OutlinedTextField holding the typed
+        // query AND the matching log row contain "auth.success" → 2 nodes.
+        composeTestRule.onAllNodesWithText("auth.success", substring = true)
+            .assertCountEquals(2)
+        // The non-matching entry must be filtered out.
+        composeTestRule.onAllNodesWithText("presence.join", substring = true)
+            .assertCountEquals(0)
     }
 }
