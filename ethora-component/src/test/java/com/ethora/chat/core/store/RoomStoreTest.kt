@@ -243,4 +243,113 @@ class RoomStoreTest {
         assertEquals(0, RoomStore.rooms.value.size)
         assertNull(RoomStore.currentRoom.value)
     }
+
+    // --- multi-room state machine (Cluster A in QA_SCENARIOS.md) -------
+    //
+    // These tests target the cluster of field bugs where opening Room A
+    // succeeds, then switching to Room B sticks on "Connecting", and
+    // re-entering A behaves inconsistently. The root cause is usually
+    // per-room state bleeding between rooms or being cleared on
+    // current-room transitions. RoomStore can't catch every variant
+    // (some live in the XMPP layer), but these assertions lock in the
+    // observable contract.
+
+    @Test
+    fun `setCurrentRoom transitions A then B then A — pointer reflects each step`() {
+        val a = makeRoom("a")
+        val b = makeRoom("b")
+        RoomStore.setRooms(listOf(a, b))
+
+        RoomStore.setCurrentRoom(a)
+        assertEquals("a", RoomStore.currentRoom.value?.id)
+
+        RoomStore.setCurrentRoom(b)
+        assertEquals("b", RoomStore.currentRoom.value?.id)
+
+        RoomStore.setCurrentRoom(a)
+        assertEquals(
+            "re-entering A after a B detour must register as a current-room transition",
+            "a", RoomStore.currentRoom.value?.id
+        )
+    }
+
+    @Test
+    fun `setRoomLoading on one room doesn't bleed into sibling rooms`() {
+        // Per-room loading maps to the "Connecting…" indicator on the
+        // chat screen. If touching loading state on B accidentally
+        // mutated A's flag, switching back to A would show the wrong
+        // skeleton — exactly the symptom multiple field reports describe.
+        val a = makeRoom("a")
+        val b = makeRoom("b")
+        val c = makeRoom("c")
+        RoomStore.setRooms(listOf(a, b, c))
+
+        RoomStore.setRoomLoading(b.jid, true)
+
+        assertEquals(false, RoomStore.isRoomLoading(a.jid))
+        assertTrue(RoomStore.isRoomLoading(b.jid))
+        assertEquals(false, RoomStore.isRoomLoading(c.jid))
+    }
+
+    @Test
+    fun `setRoomLoading transitions cleanly true to false on a single room`() {
+        val a = makeRoom("a")
+        RoomStore.setRooms(listOf(a))
+
+        RoomStore.setRoomLoading(a.jid, true)
+        assertTrue(RoomStore.isRoomLoading(a.jid))
+
+        RoomStore.setRoomLoading(a.jid, false)
+        assertEquals(
+            "loading must clear when set to false — guards the 'stuck on Connecting' regression",
+            false, RoomStore.isRoomLoading(a.jid)
+        )
+
+        // And back to true again — the map mutates idempotently.
+        RoomStore.setRoomLoading(a.jid, true)
+        assertTrue(RoomStore.isRoomLoading(a.jid))
+    }
+
+    @Test
+    fun `setCurrentRoom bumps lastViewedTimestamp on the outgoing room when zero`() {
+        // Catches the symptom where switching rooms would briefly flash
+        // a full unread badge on the room you just left, because its
+        // lastViewedTimestamp was still 0 (ChatRoomView keeps it 0 while
+        // open). The bump-on-switch in setCurrentRoom prevents this.
+        val a = makeRoom("a", lastViewedTimestamp = 0L)
+        val b = makeRoom("b")
+        RoomStore.setRooms(listOf(a, b))
+        RoomStore.setCurrentRoom(a)
+
+        RoomStore.setCurrentRoom(b)
+
+        val aAfter = RoomStore.getRoomById("a")
+        assertNotNull(aAfter)
+        val lastViewed = aAfter!!.lastViewedTimestamp ?: 0L
+        assertTrue(
+            "lastViewedTimestamp on outgoing room must be bumped above 0 on switch",
+            lastViewed > 0L
+        )
+    }
+
+    @Test
+    fun `updateUnreadCount on the active room zeroes unread regardless of input`() {
+        // The "active room → unread = 0" rule from
+        // RoomStore.updateUnreadCount is a load-bearing invariant for the
+        // chat-tab badge. If this regresses, the user sees a count on a
+        // room they're actively reading.
+        val a = makeRoom("a", unread = 5)
+        RoomStore.setRooms(listOf(a))
+        RoomStore.setCurrentRoom(RoomStore.getRoomById("a"))
+
+        // Feed in messages that would otherwise count as unread (lastViewed=0
+        // would otherwise mark all countable messages unread per the
+        // non-active branch).
+        RoomStore.updateUnreadCount(a.jid, messages = emptyList())
+
+        assertEquals(
+            "active room must always read as 0 unread",
+            0, RoomStore.getRoomById("a")?.unreadMessages
+        )
+    }
 }

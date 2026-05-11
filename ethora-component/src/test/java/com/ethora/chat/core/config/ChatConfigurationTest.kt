@@ -46,6 +46,35 @@ class ChatConfigurationTest {
         assertEquals(settings, ChatStore.getEffectiveXmppSettings())
     }
 
+    @Test
+    fun `xmppServerUrl with non-websocket scheme fails with helpful message`() {
+        // Field-bug shape: a misconfigured SDK init passes an http://
+        // (or no-scheme) URL where xmppServerUrl is expected. Without
+        // the explicit scheme check the connection would fail much
+        // later with an opaque "connection refused" — the validation
+        // surfaces a clear error at config time instead, which is
+        // what the no-fallback policy promises (Cluster H in the
+        // cross-platform QA scenario catalog).
+        ChatStore.setConfig(
+            ChatConfig(
+                baseUrl = "https://api.example.com/v1",
+                appId = "app-1",
+                xmppSettings = XMPPSettings(
+                    xmppServerUrl = "http://xmpp.example.com/ws", // wrong scheme
+                    host = "xmpp.example.com",
+                    conference = "conference.xmpp.example.com"
+                )
+            )
+        )
+
+        val error = assertIllegalState { ChatStore.getEffectiveXmppSettings() }
+
+        assertTrue(
+            "error must call out the scheme requirement explicitly",
+            error.message?.contains("ws://") == true || error.message?.contains("wss://") == true
+        )
+    }
+
     private fun assertIllegalState(block: () -> Unit): IllegalStateException {
         return try {
             block()
