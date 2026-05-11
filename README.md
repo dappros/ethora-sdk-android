@@ -709,6 +709,7 @@ Pure-JVM, no emulator. Run with `./gradlew :chat-core:test`.
 | Module | Test class | Asserts |
 |--------|------------|---------|
 | `chat-core` | `TimestampUtilsTest` | 14 tests covering the s/ms/µs/ns ladder, ISO-8601 + XEP-0091 string parsing, embedded-digit extraction, null/Date/Number/String type dispatch, and zero-clamping on invalid input |
+| `chat-core` | `XmppXmlUtilsTest` | 14 tests covering `extractDataElement` (self-closing vs open-close, malformed input) and `extractAttribute` (double-quoted, single-quoted, unquoted; missing attribute; entity decoding for `&amp;` / `&lt;` / `&gt;` / `&quot;` / `&apos;`). Anchored on the historical bug where signed-URL thumbnails broke because `&amp;` wasn't decoded back to `&` in MAM-replayed messages |
 
 **Gaps** still to cover at this layer (file an issue + a test in the
 same PR when you tackle one):
