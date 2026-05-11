@@ -710,6 +710,8 @@ Pure-JVM, no emulator. Run with `./gradlew :chat-core:test`.
 |--------|------------|---------|
 | `chat-core` | `TimestampUtilsTest` | 14 tests covering the s/ms/µs/ns ladder, ISO-8601 + XEP-0091 string parsing, embedded-digit extraction, null/Date/Number/String type dispatch, and zero-clamping on invalid input |
 | `chat-core` | `XmppXmlUtilsTest` | 14 tests covering `extractDataElement` (self-closing vs open-close, malformed input) and `extractAttribute` (double-quoted, single-quoted, unquoted; missing attribute; entity decoding for `&amp;` / `&lt;` / `&gt;` / `&quot;` / `&apos;`). Anchored on the historical bug where signed-URL thumbnails broke because `&amp;` wasn't decoded back to `&` in MAM-replayed messages |
+| `chat-core` | `RoomStoreTest` | 15 tests covering `setRooms` (full replace), `addRoom` (append vs merge by id / jid), `updateRoom` (replace + `presenceReady` stickiness — incoming `false` doesn't clear an already-`true` flag, regression-guarded), `removeRoom` (by id or jid; clears `currentRoom` when active room is removed), `setCurrentRoom`, `getRoomById` / `getRoomByJid`, `upsertRoom`, `clear` |
+| `chat-core` | `MessageStoreTest` | 11 tests covering `setMessagesForRoom` / `getMessagesForRoom` (per-room isolation), `addMessage` new-append (returns `false`), `addMessage` non-pending duplicate dropped (MAM-replay idempotency), `addMessage` pending-merge bidirectional ID matching (incoming `id` vs existing `xmppId` AND existing `id` vs incoming `xmppId` — the load-bearing reconciliation between optimistic UUID and server-assigned id), `clearMessagesForRoom`, `clear` |
 
 **Gaps** still to cover at this layer (file an issue + a test in the
 same PR when you tackle one):
@@ -721,8 +723,8 @@ same PR when you tackle one):
 - `chat-core` `XMPPClient` state machines — BIND-result handling, MAM
   subscription, reconnect on socket drop (testable with a stubbed
   transport)
-- `chat-core` store reducers — `RoomStore` add/update/clear semantics,
-  `MessageStore` insertion + de-duplication
+- `chat-core` send-failed timeout path in `MessageStore.schedulePendingTimeout`
+  (uses `kotlinx.coroutines.delay` — needs a coroutine TestScheduler)
 - Tombstone / failed-state explicit string assertions on `MessageBubble`
   (TODOs in `MessageBubbleTest.kt` flag where to tighten once the SDK
   exposes stable strings)
