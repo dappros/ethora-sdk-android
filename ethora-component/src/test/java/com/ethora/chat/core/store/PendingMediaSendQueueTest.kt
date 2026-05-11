@@ -102,4 +102,53 @@ class PendingMediaSendQueueTest {
 
         assertEquals("Quarterly_Report.pdf", sanitized)
     }
+
+    // --- caption serialization (Bug C) --------------------------------
+
+    @Test
+    fun `caption and replyToMessageId round-trip through encode and decode`() {
+        // Bug C: caption is the user's text typed alongside the
+        // attachment. It has to survive process restart in the queue
+        // payload so that an interrupted upload still emits the
+        // companion text once the upload resumes after relaunch.
+        val item = PendingMediaSend(
+            id = "queue-with-caption",
+            roomJid = "room@conference.example.com",
+            messageId = "send-media-message:with-caption",
+            localFilePath = "/private/pending/photo.jpg",
+            fileName = "photo.jpg",
+            mimeType = "image/jpeg",
+            createdAt = 5000L,
+            caption = "hey check this out — does it work?",
+            replyToMessageId = "parent-msg-1"
+        )
+
+        val decoded = PendingMediaSendCodec
+            .decodeList(PendingMediaSendCodec.encodeList(listOf(item)))
+            .single()
+
+        assertEquals(item.caption, decoded.caption)
+        assertEquals(item.replyToMessageId, decoded.replyToMessageId)
+    }
+
+    @Test
+    fun `caption defaults to null and is preserved across status transitions`() {
+        // The send-media-no-caption path must still produce a queue
+        // entry that round-trips without resurrecting a stray caption
+        // from a previous item.
+        val item = PendingMediaSend(
+            id = "queue-no-caption",
+            roomJid = "room",
+            messageId = "msg-no-caption",
+            localFilePath = "/file.pdf",
+            fileName = "file.pdf",
+            mimeType = "application/pdf",
+            createdAt = 1L
+        )
+        org.junit.Assert.assertNull(item.caption)
+        org.junit.Assert.assertNull(item.replyToMessageId)
+
+        val after = item.copy(status = PendingMediaSendStatus.READY_TO_SEND)
+        org.junit.Assert.assertNull(after.caption)
+    }
 }

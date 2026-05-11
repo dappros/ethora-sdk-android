@@ -108,14 +108,9 @@ fun ChatRoomView(
         xmppClient?.let { client ->
             if (client.isFullyConnected()) {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    client.ensureRoomPresence(
-                        roomJID = room.jid,
-                        timeoutMs = 4_000L,
-                        waitForJoin = false,
-                        source = "room_open"
-                    )
+                    client.sendPresenceInRoom(room.jid)
                 }
-                android.util.Log.d("ChatRoomView", "Room opened: $room.jid, started presence join")
+                android.util.Log.d("ChatRoomView", "Room opened: $room.jid, sent presence")
             }
         }
         android.util.Log.d("ChatRoomView", "Room opened: $room.jid, set lastViewedTimestamp to 0")
@@ -194,10 +189,6 @@ fun ChatRoomView(
     // Track unread count (messages that arrived while scrolled up)
     var unreadCount by remember { mutableStateOf(0) }
     var lastMessageCount by remember { mutableStateOf(messages.size) }
-    // Track the id of the newest (tail) message we've already accounted for.
-    // load-more only prepends older messages, so the tail id is unchanged —
-    // that's how we distinguish it from a real incoming message arrival.
-    var lastTailId by remember { mutableStateOf(messages.lastOrNull()?.id) }
     var pendingOwnMessageAutoScroll by remember { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner, viewModel) {
@@ -302,29 +293,12 @@ fun ChatRoomView(
             }
             initialAutoScrollDone = true
             lastMessageCount = messages.size
-            lastTailId = messages.lastOrNull()?.id
             unreadCount = 0
             return@LaunchedEffect
         }
 
-        // Count ONLY messages that appeared past the previous tail. load-more
-        // prepends older messages without touching the tail, so its growth must
-        // not bump `unreadCount`. The `!isLoadingMore` guard alone races with
-        // the viewmodel's finally-block that flips the flag right after pushing
-        // messages, so we additionally compare tail ids here.
-        val newTailId = messages.lastOrNull()?.id
-        val previousTailId = lastTailId
-        val newAtTail: Int = when {
-            previousTailId == null -> 0
-            newTailId == previousTailId -> 0
-            else -> {
-                val idx = messages.indexOfLast { it.id == previousTailId }
-                if (idx >= 0) messages.size - 1 - idx
-                else (messages.size - lastMessageCount).coerceAtLeast(0)
-            }
-        }
-
-        if (newAtTail > 0 && !isLoadingMore) {
+        if (messages.size > lastMessageCount && !isLoadingMore) {
+            val delta = messages.size - lastMessageCount
             val total = listState.layoutInfo.totalItemsCount
             val lastVisibleIdx = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
             val atEndOfContent = !listState.canScrollForward
@@ -334,11 +308,10 @@ fun ChatRoomView(
                 scrollToTrueBottom(animate = true)
                 unreadCount = 0
             } else {
-                unreadCount += newAtTail
+                unreadCount += delta
             }
         }
         lastMessageCount = messages.size
-        lastTailId = newTailId
     }
 
     // ---- Scroll after the user sends a message — ALWAYS ----
@@ -412,31 +385,13 @@ fun ChatRoomView(
         hadComposingUsers = nowComposing
     }
 
-    // Restore scroll position after loading older messages (avoid jumps).
-    // Compose's LazyColumn auto-shifts firstVisibleItemIndex when items are
-    // prepended (because we use stable keys), so the anchor mostly just has to
-    // be a no-op safety net for cases where auto-shift didn't keep position.
-    // CRUCIALLY: if the user manually scrolled forward (toward newer messages)
-    // while the older-message fetch was in flight, firstVisibleItemIndex will
-    // be well past the anchor — pulling them back at that point is the bug
-    // that throws them to the top after a "scroll up, then quickly scroll
-    // down" gesture, and also the bug that lands a freshly-opened chat at the
-    // top instead of the bottom (because the auto-scroll already settled at
-    // the bottom by the time loadMore returns).
+    // Restore scroll position after loading older messages (avoid jumps)
     LaunchedEffect(scrollRestoreAnchor, isLoadingMore, messages.size) {
         val anchorId = scrollRestoreAnchor
         if (anchorId != null && !isLoadingMore) {
             val anchorIndex = messages.indexOfFirst { it.id == anchorId }
             if (anchorIndex >= 0) {
                 kotlinx.coroutines.delay(50)
-                val firstVisibleIdx = listState.firstVisibleItemIndex
-                if (firstVisibleIdx > anchorIndex + 5) {
-                    // User has scrolled past the anchor — they're on their way
-                    // to (or already at) newer messages. Don't fight them.
-                    android.util.Log.d("ChatRoomView", "Skipping anchor restore: user scrolled past (firstVisibleIdx=$firstVisibleIdx, anchorIndex=$anchorIndex)")
-                    viewModel.clearScrollRestoreAnchor()
-                    return@LaunchedEffect
-                }
                 listState.scrollToItem(anchorIndex)
                 android.util.Log.d("ChatRoomView", "Restored scroll to anchor $anchorId at index $anchorIndex")
             }
@@ -475,32 +430,25 @@ fun ChatRoomView(
         .collect { (firstVisibleIndex, firstVisibleOffset) ->
             val totalItems = listState.layoutInfo.totalItemsCount
             if (totalItems == 0) return@collect
-
-            // Don't trigger loadMore until the initial auto-scroll-to-bottom has
-            // run. On chat open, the list briefly renders at index 0 before the
-            // auto-scroll fires; without this gate, that brief moment fires
-            // loadMore → sets scrollRestoreAnchor → after auto-scroll lands the
-            // user at the bottom, the anchor restore yanks them back to the top.
-            if (!initialAutoScrollDone) return@collect
-
+            
             val currentIsLoadingMore = isLoadingMore
             val nearTop = firstVisibleIndex <= 2 && firstVisibleOffset < 300
 
             val now = System.currentTimeMillis()
-            val shouldTrigger = nearTop &&
-                               !currentIsLoadingMore &&
+            val shouldTrigger = nearTop && 
+                               !currentIsLoadingMore && 
                                (now - lastLoadTrigger) > 600
 
             if (shouldTrigger) {
                 lastLoadTrigger = now
-
+                
                 // Need ID of OLDEST message (to load messages before it)
                 // messages are sorted ascending: messages.first()=oldest
                 val oldestMessageId = messages
                     .filter { it.id != "delimiter-new" }
                     .firstOrNull()
                     ?.id
-
+                
                 android.util.Log.i("ChatRoomView", "🚀 Load more triggered: firstVisibleIndex=$firstVisibleIndex (nearTop=$nearTop), oldestMessageId=$oldestMessageId")
                 viewModel.loadMoreMessages(idOfMessageBefore = oldestMessageId)
             }
@@ -721,15 +669,18 @@ fun ChatRoomView(
                                             .firstOrNull { it.messageId == message.id }
                                         val pendingMediaStatus = pendingMediaItem?.status
                                         val sendFailed = isUser && (
-                                            // Explicit failure flag survives reconnects so the bubble
-                                            // does not silently flip back to "delivered" after an
-                                            // auto-retry timer fires while the send still hasn't
-                                            // been confirmed by the server.
+                                            // A bubble is "failed" iff something explicit said so —
+                                            // either the per-message `sendFailed` flag (set by the
+                                            // 6 s pending-timeout or by an XMPP transport rejection)
+                                            // or the media queue's hard-failed states. Connection-
+                                            // level dips to DEGRADED/CONNECTING used to flip every
+                                            // pending bubble red here, even though sends were still
+                                            // in flight — that turned "sending" into a permanent
+                                            // false alarm. Pending stays pending; only timeouts /
+                                            // explicit failures cross over to the failed state.
                                             message.sendFailed == true ||
                                                 pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.FAILED_WAITING_RETRY ||
-                                                pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.PERMANENTLY_FAILED ||
-                                                ((message.pending == true || pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.QUEUED) &&
-                                                    connectionState.status != ChatConnectionStatus.ONLINE)
+                                                pendingMediaStatus == com.ethora.chat.core.store.PendingMediaSendStatus.PERMANENTLY_FAILED
                                         )
                                         val openFailedActions = { tapX: Float, tapY: Float, left: Float, top: Float, right: Float, bottom: Float ->
                                             contextMenuMessage = message
@@ -1049,9 +1000,23 @@ fun ChatRoomView(
                 )
             )
         } else {
+            val handleSendMediaWithCaption: ((java.io.File, String, String, String?) -> Unit)? =
+                if (disableMedia) null else comboHandler@{ file, mimeType, caption, replyId ->
+                    viewModel.sendMediaWithCaption(file, mimeType, caption, replyId)
+                    pendingOwnMessageAutoScroll = true
+                    coroutineScope.launch {
+                        kotlinx.coroutines.delay(60)
+                        scrollToTrueBottom(animate = true)
+                    }
+                    if (replyingToMessage != null) {
+                        replyingToMessage = null
+                    }
+                    viewModel.sendStopTyping()
+                }
             ChatInput(
                 onSendMessage = handleSendMessage,
                 onSendMedia = handleSendMedia,
+                onSendMediaWithCaption = handleSendMediaWithCaption,
                 onStartTyping = {
                     viewModel.sendStartTyping()
                 },

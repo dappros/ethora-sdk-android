@@ -37,6 +37,17 @@ object RoomStore {
     // Typing timeout tracking (5 seconds)
     private val typingTimeouts = mutableMapOf<String, MutableMap<String, Job>>()
     private val typingTimeoutDuration = 5000L // 5 seconds
+
+    // Server-supplied `lastViewedTimestamp` values whose room hadn't loaded
+    // yet when InitBeforeLoadFlow ran. Previously `setLastViewedTimestamp`
+    // silently no-op'd for unknown rooms, so single-chat read markers
+    // landed in the void whenever the private-store sync raced the room
+    // list fetch (or whenever the server keyed a 1-1 chat under a JID the
+    // local RoomStore hadn't materialised yet). Now we cache them and
+    // apply on `setRooms` / `addRoom` / `upsertRoom`. Best-effort: the
+    // pending entry is consumed on first match.
+    private val pendingLastViewedByJid =
+        java.util.concurrent.ConcurrentHashMap<String, Long>()
     
     // Persistence manager
     private var persistenceManager: ChatPersistenceManager? = null
@@ -130,6 +141,9 @@ object RoomStore {
         }
         // Persist rooms (background)
         persistRooms()
+        // Apply any server-supplied read markers that arrived before these
+        // rooms were known locally — see `pendingLastViewedByJid`.
+        drainPendingLastViewed()
     }
 
     /**
@@ -145,6 +159,7 @@ object RoomStore {
         }
         _rooms.value = currentRooms
         persistRooms()
+        drainPendingLastViewed()
     }
 
     /**
@@ -255,6 +270,7 @@ object RoomStore {
         }
         _rooms.value = currentRooms
         persistRooms()
+        drainPendingLastViewed()
     }
     
     /**
@@ -346,19 +362,64 @@ object RoomStore {
      */
     fun setLastViewedTimestamp(roomJid: String, timestamp: Long) {
         val room = getRoomByJid(roomJid)
-        room?.let {
-            // Reset BOTH unreadMessages and unreadCapped so the per-room dot
-            // AND the "10+" flag disappear atomically. Web zeroes both via
-            // the unreadMiddleware setLastViewedTimestamp action.
-            val updatedRoom = it.copy(
-                lastViewedTimestamp = timestamp,
+        if (room == null) {
+            // Park the timestamp until the room shows up — see
+            // `pendingLastViewedByJid`. Keep the freshest server value
+            // when multiple writes arrive for the same unknown room.
+            pendingLastViewedByJid.merge(roomJid, timestamp) { a, b -> maxOf(a, b) }
+            android.util.Log.d(
+                "RoomStore",
+                "📅 lastViewedTimestamp=$timestamp parked for not-yet-loaded room=$roomJid"
+            )
+            return
+        }
+        // Reset BOTH unreadMessages and unreadCapped so the per-room dot
+        // AND the "10+" flag disappear atomically. Web zeroes both via
+        // the unreadMiddleware setLastViewedTimestamp action.
+        val updatedRoom = room.copy(
+            lastViewedTimestamp = timestamp,
+            unreadMessages = 0,
+            unreadCapped = false
+        )
+        updateRoom(updatedRoom)
+        com.ethora.chat.core.store.MessageStore.renormalizeRoomDelimiter(roomJid)
+        android.util.Log.d("RoomStore", "📅 lastViewedTimestamp=$timestamp + unread zeroed room=$roomJid")
+    }
+
+    /**
+     * Drain any [pendingLastViewedByJid] entries whose room is now present
+     * in the store. Called from every code path that materialises rooms
+     * ([setRooms], [addRoom], [upsertRoom]). The pending entry is removed
+     * on first apply; rooms re-loaded later (e.g. through pagination)
+     * won't redundantly re-zero the unread counter.
+     */
+    private fun drainPendingLastViewed() {
+        if (pendingLastViewedByJid.isEmpty()) return
+        val known = _rooms.value.associateBy { it.jid }
+        val drained = mutableListOf<String>()
+        pendingLastViewedByJid.forEach { (jid, ts) ->
+            val room = known[jid] ?: return@forEach
+            val current = room.lastViewedTimestamp ?: 0L
+            // Don't clobber a fresher local read marker the user may have
+            // already produced in-app.
+            if (current > 0L && current >= ts) {
+                drained.add(jid)
+                return@forEach
+            }
+            val updated = room.copy(
+                lastViewedTimestamp = ts,
                 unreadMessages = 0,
                 unreadCapped = false
             )
-            updateRoom(updatedRoom)
-            com.ethora.chat.core.store.MessageStore.renormalizeRoomDelimiter(roomJid)
-            android.util.Log.d("RoomStore", "📅 lastViewedTimestamp=$timestamp + unread zeroed room=$roomJid")
+            updateRoom(updated)
+            com.ethora.chat.core.store.MessageStore.renormalizeRoomDelimiter(jid)
+            drained.add(jid)
+            android.util.Log.d(
+                "RoomStore",
+                "📅 drained parked lastViewedTimestamp=$ts onto newly-materialised room=$jid"
+            )
         }
+        drained.forEach { pendingLastViewedByJid.remove(it) }
     }
     
     /**
@@ -402,7 +463,8 @@ object RoomStore {
             return
         }
 
-        val currentUser = UserStore.currentUser.value
+        val currentUserXmppUsername = UserStore.currentUser.value?.xmppUsername
+        val userLocal = currentUserXmppUsername?.substringBefore("@")?.takeIf { it.isNotBlank() }
         val lastViewed = room.lastViewedTimestamp ?: 0L
 
         val countable = messages.count { msg ->
@@ -410,7 +472,10 @@ object RoomStore {
             if (msg.pending == true) return@count false
             if (msg.isSystemMessage == "true") return@count false
 
-            if (isOwnMessage(msg, currentUser)) return@count false
+            // Skip own messages (web: toLocal(msg.user.id) === toLocal(currentXmppUsername))
+            val msgLocal = msg.user.id.substringBefore("@").takeIf { it.isNotBlank() }
+            if (userLocal != null && msgLocal != null &&
+                msgLocal.equals(userLocal, ignoreCase = true)) return@count false
 
             val ts = msg.timestamp ?: msg.date.time
             if (ts <= 0) return@count false
@@ -485,6 +550,7 @@ object RoomStore {
         _currentRoom.value = null
         _roomLoadingStates.value = emptyMap()
         _isLoading.value = false
+        pendingLastViewedByJid.clear()
         // Persist cleared state (background)
         persistenceScope.launch {
             persistenceManager?.saveRooms(emptyList())

@@ -226,15 +226,6 @@ class XMPPClient(
         roomPresenceBlockedUntil.clear()
     }
 
-    fun resetRoomPresence(roomJID: String) {
-        val bareRoomJID = roomJID.substringBefore("/")
-        if (bareRoomJID.isBlank()) return
-        roomsWithPresenceResponse.remove(bareRoomJID)
-        roomPresenceInFlight.remove(bareRoomJID)
-        roomPresenceBlockedUntil.remove(bareRoomJID)
-        LogStore.info(TAG, "Presence state reset for $bareRoomJID", category = "presence")
-    }
-
     suspend fun ensureRoomPresence(
         roomJID: String,
         timeoutMs: Long = 2_000L,
@@ -1003,20 +994,14 @@ class XMPPClient(
             
             Log.d(TAG, "  Extracted - ID: $messageId, From: $from, Type: $type, Room: $actualRoomJid")
             
-            // Extract body - handle multiline and nested content
-            val bodyStart = messageXml.indexOf("<body>")
-            val bodyEnd = messageXml.indexOf("</body>", bodyStart)
-            val body = if (bodyStart != -1 && bodyEnd != -1) {
-                messageXml.substring(bodyStart + "<body>".length, bodyEnd)
-                    .replace("&lt;", "<")
-                    .replace("&gt;", ">")
-                    .replace("&amp;", "&")
-                    .replace("&quot;", "\"")
-                    .replace("&apos;", "'")
-            } else {
-                ""
-            }
-            
+            // Extract body via the shared helper. Tolerates `<body>`,
+            // `<body xml:lang="en">`, `<body xmlns="jabber:client">` and
+            // any whitespace inside the opening tag — the prior
+            // `indexOf("<body>")` only matched the first shape and was
+            // dropping archived messages with body attributes, which is
+            // what made "some messages omitted" in single-chat history.
+            val body = extractBody(messageXml).orEmpty()
+
             // Skip if no body (might be presence or other non-chat message)
             if (body.isBlank()) {
                 Log.d(TAG, "  Skipping message with no body")

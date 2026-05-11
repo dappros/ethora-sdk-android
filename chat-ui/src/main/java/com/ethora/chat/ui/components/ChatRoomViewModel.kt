@@ -26,8 +26,6 @@ import com.ethora.chat.core.xmpp.XMPPClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.FileOutputStream
 import java.util.*
@@ -74,26 +72,19 @@ class ChatRoomViewModel(
 
     val currentUserXmppUsername: String?
         get() = UserStore.currentUser.value?.xmppUsername
-
-    // Serializes text sends so stanzas hit the wire in tap order. Without this,
-    // three rapid taps spawn three parallel coroutines that race on
-    // ensureRoomPresence and may write stanzas out of order, producing the
-    // "1, 3, 2" UI order seen when one coroutine waits longer on presence.
-    // Fair (FIFO) — three taps complete in three sequential socket writes.
-    private val sendMutex = Mutex()
-
+    
     // Observe composing state from RoomStore (matches web: useSelector)
     init {
-        // Observe messages from store. MessageStore already emits ascending,
-        // pending-last-on-tie-break order via its `messageOrder` comparator —
-        // re-sorting here with sortedBy{timestamp} drops the pending tiebreaker
-        // and reshuffles a still-pending optimistic message ahead of a sibling
-        // that just got server-ack'd with an equal coarse timestamp.
+        // Observe messages from store
         viewModelScope.launch {
             MessageStore.messages
-                .map { it[room.jid] ?: emptyList() }
+                .map { 
+                    val roomMessages = it[room.jid] ?: emptyList()
+                    // Sort ascending: oldest at index 0 for normal LazyColumn
+                    roomMessages.sortedBy { it.timestamp ?: it.date.time }
+                }
                 .distinctUntilChanged()
-                .collect {
+                .collect { 
                     _messages.value = it
                 }
         }
@@ -115,29 +106,6 @@ class ChatRoomViewModel(
         viewModelScope.launch {
             restoreQueuedMediaMessages()
             processPendingMediaQueue()
-        }
-
-        viewModelScope.launch {
-            combine(
-                PendingMediaSendQueue.items,
-                ConnectionStore.state,
-                UserStore.currentUser,
-                UserStore.token
-            ) { items, connection, user, token ->
-                PendingMediaQueueTrigger(
-                    hasPendingForRoom = items.any { queued ->
-                        queued.roomJid == room.jid && queued.status != PendingMediaSendStatus.SENT
-                    },
-                    isOnline = connection.status == ChatConnectionStatus.ONLINE,
-                    hasUser = user != null,
-                    hasToken = !token.isNullOrBlank() || !user?.token.isNullOrBlank(),
-                    hasClient = xmppClient != null
-                )
-            }.distinctUntilChanged().collect { trigger ->
-                if (trigger.hasPendingForRoom && trigger.isOnline && trigger.hasUser && trigger.hasToken && trigger.hasClient) {
-                    processPendingMediaQueue()
-                }
-            }
         }
 
         viewModelScope.launch {
@@ -310,12 +278,9 @@ class ChatRoomViewModel(
             // Create the optimistic row before the network send. Waiting for
             // sendMessage() here can block on room presence/socket state and
             // makes the input feel laggy even though the tap handler fired.
-            //
-            // Use the atomic per-room allocator: under rapid spam, plain
-            // `lastKnownTimestamp + now` races and produces equal timestamps
-            // for parallel sends, breaking sort order for still-pending rows.
             val messageId = "send-text-message:${UUID.randomUUID()}"
-            val optimisticTs = MessageStore.allocateOptimisticTimestamp(room.jid)
+            val lastKnownTs = MessageStore.lastKnownTimestamp(room.jid)
+            val optimisticTs = maxOf(System.currentTimeMillis(), lastKnownTs + 1)
             val optimisticMessage = Message(
                 id = messageId,
                 body = finalText,
@@ -332,42 +297,17 @@ class ChatRoomViewModel(
             MessageStore.addMessage(room.jid, optimisticMessage)
             android.util.Log.d("ChatRoomViewModel", "Created optimistic message before send, ID: $messageId")
 
-            // Serialize the actual transport call. xmppClient.sendMessage returns
-            // as soon as the stanza is written to the socket (it does not wait
-            // for the server echo), so the lock is held for ~one socket write —
-            // fast, but enough to guarantee tap order is wire order. A single
-            // retry absorbs transient failures (presence backoff, brief
-            // disconnect blip) so the bubble doesn't flip to "Sending failed"
-            // for what is really a recoverable race.
-            val sentMessageId = sendMutex.withLock {
-                var attempt = xmppClient?.sendMessage(
-                    roomJID = room.jid,
-                    messageBody = finalText,
-                    firstName = currentUser.firstName,
-                    lastName = currentUser.lastName,
-                    photo = currentUser.profileImage,
-                    walletAddress = currentUser.walletAddress,
-                    isReply = finalParentMessageId != null,
-                    mainMessage = finalParentMessageId,
-                    customId = messageId
-                )
-                if (attempt == null) {
-                    android.util.Log.w("ChatRoomViewModel", "sendMessage returned null, retrying once after 400ms")
-                    kotlinx.coroutines.delay(400)
-                    attempt = xmppClient?.sendMessage(
-                        roomJID = room.jid,
-                        messageBody = finalText,
-                        firstName = currentUser.firstName,
-                        lastName = currentUser.lastName,
-                        photo = currentUser.profileImage,
-                        walletAddress = currentUser.walletAddress,
-                        isReply = finalParentMessageId != null,
-                        mainMessage = finalParentMessageId,
-                        customId = messageId
-                    )
-                }
-                attempt
-            }
+            val sentMessageId = xmppClient?.sendMessage(
+                roomJID = room.jid,
+                messageBody = finalText,
+                firstName = currentUser.firstName,
+                lastName = currentUser.lastName,
+                photo = currentUser.profileImage,
+                walletAddress = currentUser.walletAddress,
+                isReply = finalParentMessageId != null,
+                mainMessage = finalParentMessageId,
+                customId = messageId
+            )
 
             if (sentMessageId != null) {
                 // Web parity (useSendMessage.tsx L316-317): fast-ack immediately,
@@ -385,40 +325,21 @@ class ChatRoomViewModel(
                 )
             } else {
                 android.util.Log.e("ChatRoomViewModel", "Failed to send message - sendMessage returned null")
-                // Only fail-fast if XMPP is genuinely disconnected. While we're
-                // still connected, a null return is almost always a recoverable
-                // race (presence backoff window, brief socket hiccup) — let the
-                // 15 s pending timeout in MessageStore be the final arbiter.
-                // Without this guard, rapid spam causes presence backoff to
-                // fire on a couple of messages and the user sees spurious
-                // "Sending failed" bubbles even though the wire is healthy.
-                val stillConnected = xmppClient?.isFullyConnected() == true
-                if (!stillConnected) {
-                    MessageStore.updateMessage(
-                        room.jid,
-                        optimisticMessage.copy(pending = false, sendFailed = true)
+                // Mark the optimistic row as send-failed so the bubble switches
+                // immediately to the "Sending failed. Tap to retry or delete."
+                // state without waiting for the 6 s pending-timeout.
+                MessageStore.updateMessage(
+                    room.jid,
+                    optimisticMessage.copy(pending = false, sendFailed = true)
+                )
+                ChatEventDispatcher.emit(
+                    ChatEvent.MessageFailed(
+                        roomJid = room.jid,
+                        messageType = MessageType.TEXT,
+                        text = finalText,
+                        error = IllegalStateException("sendMessage returned null")
                     )
-                    ChatEventDispatcher.emit(
-                        ChatEvent.MessageFailed(
-                            roomJid = room.jid,
-                            messageType = MessageType.TEXT,
-                            text = finalText,
-                            error = IllegalStateException("sendMessage returned null (offline)")
-                        )
-                    )
-                } else {
-                    // Stay pending — the catchup poll + pending timeout will
-                    // either recover (echo arrives) or eventually mark failed.
-                    schedulePendingFallback(messageId)
-                    ChatEventDispatcher.emit(
-                        ChatEvent.MessageFailed(
-                            roomJid = room.jid,
-                            messageType = MessageType.TEXT,
-                            text = finalText,
-                            error = IllegalStateException("sendMessage returned null (will retry via timeout)")
-                        )
-                    )
-                }
+                )
             }
         }
     }
@@ -648,7 +569,42 @@ class ChatRoomViewModel(
      * Queue media for durable upload + XMPP send. The optimistic message stays
      * visible while the queue retries across reconnects and app foregrounds.
      */
-    fun sendMedia(file: File, mimeType: String, retryCount: Int = 0) {
+    /**
+     * Combo send: queue the media exactly like [sendMedia], and ask the
+     * queue processor to dispatch [caption] as a follow-up text message
+     * AFTER the XMPP media send succeeds. This guarantees the receiver
+     * sees `[image][caption]` in order — previously the two sends raced
+     * because the text-only path is a single stanza while the media path
+     * has to upload first, and the text usually won.
+     *
+     * Falls back to the plain caption-less path when [caption] is blank.
+     */
+    fun sendMediaWithCaption(
+        file: File,
+        mimeType: String,
+        caption: String,
+        replyToMessageId: String? = null
+    ) {
+        val trimmed = caption.trim()
+        if (trimmed.isEmpty()) {
+            sendMedia(file, mimeType)
+            return
+        }
+        sendMedia(
+            file = file,
+            mimeType = mimeType,
+            caption = trimmed,
+            replyToMessageId = replyToMessageId
+        )
+    }
+
+    fun sendMedia(
+        file: File,
+        mimeType: String,
+        retryCount: Int = 0,
+        caption: String? = null,
+        replyToMessageId: String? = null
+    ) {
         viewModelScope.launch {
             try {
                 val config = ChatStore.getConfig()
@@ -751,6 +707,36 @@ class ChatRoomViewModel(
                 android.util.Log.d("ChatRoomViewModel", "Created optimistic media message with pending=true, ID: $messageId")
                 schedulePendingFallback(messageId)
 
+                // Optimistic CAPTION bubble — added now, not after the upload
+                // completes, so the user sees their text immediately in the
+                // "sending" state. When the upload finally fires the XMPP
+                // text send, we reuse this id as `customId` so the echo
+                // merges into THIS row instead of appending a second one.
+                val trimmedCaption = caption?.trim()?.takeIf { it.isNotEmpty() }
+                val captionMessageId = if (trimmedCaption != null) {
+                    val captionId = "send-text-message:${UUID.randomUUID()}"
+                    // Use optimisticTs+1 so the caption sorts AFTER the media
+                    // in the timestamp-ordered list (web parity: media
+                    // bubble first, caption second).
+                    val captionTs = optimisticTs + 1
+                    val captionMessage = Message(
+                        id = captionId,
+                        body = trimmedCaption,
+                        user = currentUser,
+                        date = Date(captionTs),
+                        timestamp = captionTs,
+                        roomJid = room.jid,
+                        pending = true,
+                        xmppId = captionId,
+                        xmppFrom = "${room.jid}/${currentUser.id}",
+                        isReply = replyToMessageId != null,
+                        mainMessage = replyToMessageId
+                    )
+                    MessageStore.addMessage(room.jid, captionMessage)
+                    schedulePendingFallback(captionId)
+                    captionId
+                } else null
+
                 PendingMediaSendQueue.enqueue(
                     PendingMediaSend(
                         roomJid = room.jid,
@@ -758,7 +744,10 @@ class ChatRoomViewModel(
                         localFilePath = uploadFile.absolutePath,
                         fileName = uploadFile.name,
                         mimeType = uploadMimeType,
-                        createdAt = optimisticTs
+                        createdAt = optimisticTs,
+                        caption = trimmedCaption,
+                        replyToMessageId = replyToMessageId,
+                        captionMessageId = captionMessageId
                     )
                 )
                 processPendingMediaQueue()
@@ -864,7 +853,53 @@ class ChatRoomViewModel(
                 }
 
                 if (sent) {
+                    // Dispatch any companion caption text BEFORE removing the
+                    // queue entry, so that if the dispatch throws / the
+                    // ViewModel is cancelled, the caption isn't silently lost.
+                    val pendingCaption = working.caption
+                    val pendingReply = working.replyToMessageId
+                    val pendingCaptionId = working.captionMessageId
                     PendingMediaSendQueue.remove(working.id, deleteLocalFile = true)
+                    if (!pendingCaption.isNullOrBlank() && !pendingCaptionId.isNullOrBlank()) {
+                        // The optimistic caption bubble was already added
+                        // at send-tap time (see `sendMedia`). Transmit the
+                        // XMPP stanza with `customId = pendingCaptionId` so
+                        // the server's echo merges into THAT row instead of
+                        // creating a second one. If the transport rejects,
+                        // mark only the caption row as failed.
+                        viewModelScope.launch {
+                            val sentId = try {
+                                client.sendMessage(
+                                    roomJID = room.jid,
+                                    messageBody = pendingCaption,
+                                    firstName = currentUser.firstName,
+                                    lastName = currentUser.lastName,
+                                    photo = currentUser.profileImage,
+                                    walletAddress = currentUser.walletAddress,
+                                    isReply = pendingReply != null,
+                                    mainMessage = pendingReply,
+                                    customId = pendingCaptionId
+                                )
+                            } catch (e: Exception) {
+                                android.util.Log.e(
+                                    "ChatRoomViewModel",
+                                    "Caption send threw after media XMPP send succeeded",
+                                    e
+                                )
+                                null
+                            }
+                            if (sentId == null) {
+                                val existing = MessageStore.getMessagesForRoom(room.jid)
+                                    .firstOrNull { it.id == pendingCaptionId }
+                                if (existing != null) {
+                                    MessageStore.updateMessage(
+                                        room.jid,
+                                        existing.copy(pending = false, sendFailed = true)
+                                    )
+                                }
+                            }
+                        }
+                    }
                     viewModelScope.launch { triggerFastAckFetch() }
                     ChatEventDispatcher.emit(
                         ChatEvent.MessageSent(
@@ -1113,14 +1148,6 @@ class ChatRoomViewModel(
     }
 
     companion object {
-        private data class PendingMediaQueueTrigger(
-            val hasPendingForRoom: Boolean,
-            val isOnline: Boolean,
-            val hasUser: Boolean,
-            val hasToken: Boolean,
-            val hasClient: Boolean
-        )
-
         // Room-keyed "last fast-ack" timestamps — shared across ViewModel
         // instances so switching chats doesn't reset the 600 ms throttle.
         private val fastAckLastByRoom = java.util.concurrent.ConcurrentHashMap<String, Long>()

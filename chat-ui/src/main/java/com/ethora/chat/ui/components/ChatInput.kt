@@ -40,6 +40,17 @@ import java.io.FileOutputStream
 fun ChatInput(
     onSendMessage: (String, String?) -> Unit,
     onSendMedia: ((File, String) -> Unit)? = null,
+    /**
+     * Optional combo send. When the user types a caption alongside an
+     * attachment and taps Send, this lambda receives the file, mime type,
+     * caption, and reply target as a single dispatch — the SDK then
+     * uploads the media first and only sends the caption text once the
+     * media's XMPP stanza has been accepted. Hosts that wire this in get
+     * "image + caption" ordering for free; hosts that don't fall back to
+     * the old parallel-dispatch behavior (one `onSendMedia` + one
+     * `onSendMessage`) without any code change.
+     */
+    onSendMediaWithCaption: ((File, String, String, String?) -> Unit)? = null,
     onStartTyping: (() -> Unit)? = null,
     onStopTyping: (() -> Unit)? = null,
     editText: String? = null,
@@ -409,13 +420,30 @@ fun ChatInput(
                                     onSendMessage(pendingText, replyId)
                                 }
                             } else {
-                                if (pendingFile != null && onSendMedia != null) {
+                                // Combo: media + caption + reply. Prefer the
+                                // serialized callback so the caption text rides
+                                // behind the media upload (web parity:
+                                // `[image][caption]` order). Falls back to the
+                                // legacy two-dispatch path when the host hasn't
+                                // wired `onSendMediaWithCaption`.
+                                if (pendingFile != null && pendingText != null && onSendMediaWithCaption != null) {
                                     selectedFile = null
-                                    onSendMedia(pendingFile.first, pendingFile.second)
-                                }
-                                if (pendingText != null) {
                                     text = ""
-                                    onSendMessage(pendingText, replyId)
+                                    onSendMediaWithCaption(
+                                        pendingFile.first,
+                                        pendingFile.second,
+                                        pendingText,
+                                        replyId
+                                    )
+                                } else {
+                                    if (pendingFile != null && onSendMedia != null) {
+                                        selectedFile = null
+                                        onSendMedia(pendingFile.first, pendingFile.second)
+                                    }
+                                    if (pendingText != null) {
+                                        text = ""
+                                        onSendMessage(pendingText, replyId)
+                                    }
                                 }
                             }
                         },

@@ -45,6 +45,28 @@ class MessageContextMenuTest {
         isDeleted = isDeleted,
     )
 
+    private fun mediaMessage(
+        body: String = "media",
+        isMediafile: String? = "true",
+        location: String? = "https://cdn.example.com/photo.jpg",
+        fileName: String? = "photo.jpg",
+        mimetype: String? = "image/jpeg",
+        pending: Boolean? = null,
+        sendFailed: Boolean? = null,
+    ) = Message(
+        id = "media-${body.hashCode()}",
+        user = User(id = "u-1", firstName = "Alice"),
+        date = Date(),
+        body = body,
+        roomJid = "room-1@conference.xmpp.example.com",
+        isMediafile = isMediafile,
+        location = location,
+        fileName = fileName,
+        mimetype = mimetype,
+        pending = pending,
+        sendFailed = sendFailed,
+    )
+
     @Test
     fun rendersNothingWhenInvisible() {
         composeTestRule.setContent {
@@ -197,6 +219,71 @@ class MessageContextMenuTest {
         composeTestRule.onNodeWithText("Copy").performClick()
         assert(copyFired) { "Expected onCopy to fire" }
         assert(dismissed) { "Expected onDismiss to fire after tap (auto-close)" }
+    }
+
+    @Test
+    fun ownMediaMessageHidesEditButKeepsCopyAndDelete() {
+        // Media bubbles must not offer Edit — the edit path only
+        // rewrites the text body, which would desync from the
+        // uploaded asset (image/file/audio). Delete is still allowed
+        // so the user can retract a wrong photo entirely.
+        composeTestRule.setContent {
+            MessageContextMenu(
+                message = mediaMessage(),
+                isUser = true,
+                visible = true,
+                tapX = 0f, tapY = 0f,
+                boundsLeft = 0f, boundsTop = 0f, boundsRight = 100f, boundsBottom = 100f,
+                onDismiss = {}, onCopy = {}, onEdit = {}, onDelete = {},
+            )
+        }
+        composeTestRule.onNodeWithText("Copy").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Delete").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Edit").assertDoesNotExist()
+        composeTestRule.onNodeWithText("Retry").assertDoesNotExist()
+    }
+
+    @Test
+    fun ownMediaMessageWithOnlyLocationStillHidesEdit() {
+        // Be defensive: a media bubble that arrived from the wire
+        // without `isMediafile = "true"` but with a `location` URL
+        // is still media — the edit path would silently lose the
+        // photo if we let it through.
+        composeTestRule.setContent {
+            MessageContextMenu(
+                message = mediaMessage(
+                    isMediafile = null,
+                    fileName = null,
+                    location = "https://cdn.example.com/photo.jpg",
+                ),
+                isUser = true,
+                visible = true,
+                tapX = 0f, tapY = 0f,
+                boundsLeft = 0f, boundsTop = 0f, boundsRight = 100f, boundsBottom = 100f,
+                onDismiss = {}, onCopy = {}, onEdit = {}, onDelete = {},
+            )
+        }
+        composeTestRule.onNodeWithText("Edit").assertDoesNotExist()
+    }
+
+    @Test
+    fun pendingMediaMessageOffersRetryNotEdit() {
+        // Failed media uploads should still offer Retry. Edit
+        // remains hidden regardless of the pending/failed state —
+        // we never edit a media bubble.
+        composeTestRule.setContent {
+            MessageContextMenu(
+                message = mediaMessage(pending = true),
+                isUser = true,
+                visible = true,
+                tapX = 0f, tapY = 0f,
+                boundsLeft = 0f, boundsTop = 0f, boundsRight = 100f, boundsBottom = 100f,
+                onDismiss = {}, onCopy = {}, onEdit = {}, onDelete = {},
+                onResend = {},
+            )
+        }
+        composeTestRule.onNodeWithText("Retry").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Edit").assertDoesNotExist()
     }
 
     @Test

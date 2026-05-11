@@ -176,6 +176,83 @@ class MessageSpamTest {
     }
 
     @Test
+    fun `late echo via addMessage clears sendFailed and keeps a single row`() {
+        // Bug F: when the 6 s pending-timeout already fired (or the WS
+        // transport returned null on the first attempt), the row sits with
+        // pending=false / sendFailed=true. The auto-retry — or a late
+        // server echo for the *original* send that actually went out — then
+        // calls addMessage with the matching id. Before the fix this hit
+        // the "already exists, skip duplicate" branch and the failed bubble
+        // stayed in the UI forever; after the fix the failure flag is
+        // cleared and the row reflects the delivered message.
+        val optId = "opt-late-echo"
+        MessageStore.addMessage(room, optimistic(optId, "late one"))
+        // Simulate the timeout firing without an echo.
+        MessageStore.updateMessage(
+            room,
+            MessageStore.getMessagesForRoom(room).single().copy(pending = false, sendFailed = true)
+        )
+        val flagged = MessageStore.getMessagesForRoom(room).single()
+        assertTrue("precondition: row must be in failed state", flagged.sendFailed == true)
+        assertFalse("precondition: row must not be pending", flagged.pending == true)
+
+        // Now the auto-retry / late echo arrives.
+        val matched = MessageStore.addMessage(room, echo(optId, "late one"))
+        assertTrue("echo for a sendFailed row should be reconciled, not skipped", matched)
+
+        val rows = MessageStore.getMessagesForRoom(room)
+        assertEquals("must not duplicate the row when the echo arrives", 1, rows.size)
+        val row = rows.single()
+        assertNull("sendFailed must clear once the echo lands", row.sendFailed)
+        assertFalse("pending must be false after reconciliation", row.pending == true)
+        assertEquals("body must reflect the delivered echo", "late one", row.body)
+    }
+
+    @Test
+    fun `late echo via addMessages batch clears sendFailed without duplicating`() {
+        // Same contract as the single-echo case but through the bulk MAM
+        // path (post-send catchup poll: `scheduleAckCatchup` calls
+        // `getHistory` and feeds the results to `addMessages`). The dedup
+        // branch previously skipped any id match unconditionally, so the
+        // failed bubble survived even after the message was archived on
+        // the server.
+        val optId = "opt-late-mam"
+        MessageStore.addMessage(room, optimistic(optId, "mam echo"))
+        MessageStore.updateMessage(
+            room,
+            MessageStore.getMessagesForRoom(room).single().copy(pending = false, sendFailed = true)
+        )
+
+        MessageStore.addMessages(room, listOf(echo(optId, "mam echo")))
+
+        val rows = MessageStore.getMessagesForRoom(room)
+        assertEquals(1, rows.size)
+        assertNull(rows.single().sendFailed)
+        assertFalse(rows.single().pending == true)
+    }
+
+    @Test
+    fun `successfully-delivered echo still skips when row is already confirmed`() {
+        // Guard rail for the Bug F fix: we only want the sendFailed→clear
+        // path to override the duplicate-skip. A normal confirmed row
+        // (pending=false, sendFailed=null) plus a re-arriving echo from a
+        // MAM catchup must still be a no-op — we don't want to re-write
+        // the row on every MAM page.
+        val optId = "opt-confirmed"
+        MessageStore.addMessage(room, optimistic(optId, "confirmed body"))
+        MessageStore.addMessage(room, echo(optId, "confirmed body")) // resolves the pending row
+
+        val before = MessageStore.getMessagesForRoom(room).single()
+        assertNull(before.sendFailed)
+        assertFalse(before.pending == true)
+
+        // A repeated MAM-page echo for the same message should be a no-op.
+        MessageStore.addMessages(room, listOf(echo(optId, "confirmed body", serverId = "srv-second-pass")))
+        val rows = MessageStore.getMessagesForRoom(room)
+        assertEquals(1, rows.size)
+    }
+
+    @Test
     fun `pending message with no echo eventually flips to sendFailed via timeout`() {
         // Inverse guard: the spam-recovery path must NOT accidentally
         // disable the genuine timeout. If a message truly never
