@@ -45,6 +45,20 @@ android {
         compose = true
     }
 
+    testOptions {
+        unitTests {
+            // Default to returning Java/Kotlin zero-values for any
+            // android.* API the SUT touches (the most common one is
+            // android.util.Log.d/.w/.e — logging from production
+            // code path otherwise throws "Method not mocked" and
+            // makes every test that exercises those code paths
+            // fail in JVM unit-test mode. Robolectric is the heavier
+            // alternative; this flag is sufficient for our pure-logic
+            // tests).
+            isReturnDefaultValues = true
+        }
+    }
+
     publishing {
         singleVariant("release") {
             withSourcesJar()
@@ -64,6 +78,24 @@ android {
             assets.srcDirs(
                 "../chat-core/src/main/assets",
                 "../chat-ui/src/main/assets"
+            )
+        }
+        // chat-core and chat-ui are not Gradle subprojects — their
+        // src/main is aggregated above. Their src/test and
+        // src/androidTest directories must be wired into the test
+        // sourceSets here too, otherwise Kotlin files under
+        // chat-core/src/test/ and chat-ui/src/androidTest/ never
+        // reach the compiler and the tests silently don't run.
+        getByName("test") {
+            java.srcDirs(
+                "../chat-core/src/test/java",
+                "../chat-ui/src/test/java"
+            )
+        }
+        getByName("androidTest") {
+            java.srcDirs(
+                "../chat-core/src/androidTest/java",
+                "../chat-ui/src/androidTest/java"
             )
         }
     }
