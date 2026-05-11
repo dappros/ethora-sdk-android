@@ -528,6 +528,17 @@ class ChatRoomViewModel(
                 )
                 
                 xmppClient?.let { client ->
+                    if (!client.isFullyConnected()) {
+                        val reconnected = client.ensureConnected(5_000)
+                        if (!reconnected) {
+                            android.util.Log.w(
+                                "ChatRoomViewModel",
+                                "Skipping loadMoreMessages: client not connected for ${room.jid}"
+                            )
+                            return@let
+                        }
+                    }
+                    client.promoteRoomHistory(room.jid)
                     val history = client.getHistory(room.jid, max = 30, beforeMessageId = beforeId)
                     android.util.Log.d("ChatRoomViewModel", "  Received ${history.size} older messages")
                     
@@ -541,9 +552,15 @@ class ChatRoomViewModel(
                         android.util.Log.d("ChatRoomViewModel", "   UI updated: ${updated.size} total messages")
                     }
 
-                    if (history.isEmpty()) {
-                        android.util.Log.d("ChatRoomViewModel", "   No more messages available (empty response)")
+                    val historyComplete = RoomStore.getRoomByJid(room.jid)?.historyComplete == true
+                    if (historyComplete) {
+                        android.util.Log.d("ChatRoomViewModel", "   No more messages available (historyComplete=true)")
                         _hasMoreMessages.value = false
+                    } else if (history.isEmpty()) {
+                        android.util.Log.w(
+                            "ChatRoomViewModel",
+                            "   Empty pagination response before historyComplete for ${room.jid}; keeping hasMoreMessages=true"
+                        )
                     }
                 } ?: run {
                     android.util.Log.w("ChatRoomViewModel", "   XMPP client is null")
