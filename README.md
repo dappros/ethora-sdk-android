@@ -649,9 +649,9 @@ LogoutService.setOnLogoutCallback {
 
 ## Testing
 
-The SDK uses a **two-layer testing strategy**, with each layer pinned to
-the codebase it tests so changes ship in the same PR as the test that
-exercises them.
+The SDK uses a **two-layer testing strategy**, with each layer pinned
+to the codebase it tests so changes ship in the same PR as the test
+that exercises them.
 
 This Android SDK is one of four runtime targets that share a single
 selector contract — Compose `testTag` strings here match SwiftUI
@@ -660,23 +660,150 @@ on Web, so a Maestro YAML flow drives all three platforms by the same
 ID. See [Cross-platform testing overview](#cross-platform-testing-overview)
 at the end of this section.
 
+### Quickstart — run the tests before shipping a change
+
+Always run these two before opening a PR. If either fails, your
+change either broke an existing contract or your new test caught a
+real bug — investigate before merging.
+
+```bash
+# 1. JVM unit tests — fast (~30s), no emulator needed.
+#    Covers reducers, parsers, state machines, formatters, persistence
+#    caps, and the LogoutService cross-store cleanup contract.
+./gradlew :ethora-component:testDebugUnitTest
+
+# 2. Compose UI tests on an emulator — slower (~1min), needs a running
+#    AVD. Covers the chat-component visual contract.
+./gradlew :ethora-component:connectedDebugAndroidTest
+```
+
+**Compose UI test environment requirement.** Use an emulator at **API
+34 (Android 14)** or below. API 35/36 ship a changed
+`InputManager.getInstance` signature that the current Compose UI Test
+infrastructure (`androidx.compose.ui:ui-test-junit4`) hasn't caught up
+with — tests crash with `NoSuchMethodException` before assertions
+run. JVM unit tests are unaffected.
+
+To set up an AVD:
+
+1. Android Studio → **Tools → Device Manager** → **+ Create Device**
+2. Pick any Pixel profile (Pixel 6 is fine)
+3. System Image: **Android 14 / API 34 / Google APIs** (arm64-v8a on
+   Apple Silicon, x86_64 on Intel). Download if needed (~700 MB).
+4. Name it anything, finish.
+
+Boot the AVD before running the connected tests:
+
+```bash
+# Replace with your AVD name from Device Manager
+$ANDROID_HOME/emulator/emulator -avd Pixel_6_API_34 -no-snapshot-load &
+adb wait-for-device
+./gradlew :ethora-component:connectedDebugAndroidTest
+```
+
 ### Layer 1 — Unit + Compose UI tests (this repo)
 
-Live alongside the source they exercise; surfaced under Studio's "Tests"
-tab so they don't clutter main source.
+`chat-core/` and `chat-ui/` are not standalone Gradle modules — their
+sources aggregate into `:ethora-component` via the `sourceSets` block
+in `ethora-component/build.gradle.kts`. Tests live under
+`ethora-component/src/test/` (JVM unit) and
+`ethora-component/src/androidTest/` (Compose UI), matching standard
+Android conventions and removing the need for custom srcDir wiring.
 
 | Where | What | Run with |
 |-------|------|----------|
-| `chat-core/src/test/` | Pure-JVM unit tests — JID parsing, message serializers, store reducers, networking helpers | `./gradlew :chat-core:test` |
-| `chat-ui/src/androidTest/` | Compose UI tests using `androidx.compose.ui.test` — render a composable in isolation, drive it with callbacks, assert behavior | `./gradlew :chat-ui:connectedDebugAndroidTest` |
-| `ethora-component/src/test/` | Aggregate-module unit tests covering cross-module behavior (UnreadObserver, single-room support, XMPP client ownership, file size formatting, DNS fallback, pending-media queue, log export formatter) | `./gradlew :ethora-component:test` |
+| `ethora-component/src/test/` | Pure-JVM unit tests — JID parsing, message serializers, store reducers, networking helpers, persistence caps, LogoutService | `./gradlew :ethora-component:testDebugUnitTest` |
+| `ethora-component/src/androidTest/` | Compose UI tests using `androidx.compose.ui.test` — render a composable in isolation, drive it with callbacks, assert behavior. Requires a connected emulator/device (API 26-34) | `./gradlew :ethora-component:connectedDebugAndroidTest` |
 
-The Compose UI tests run on a connected emulator or device (API 26+).
-They're hermetic — no network, no XMPP, no FCM. End-to-end flows that
-need a real server go in Layer 2.
+The Compose UI tests are hermetic — no network, no XMPP, no FCM.
+End-to-end flows that need a real server go in Layer 2.
 
-`chat-ui/src/androidTest/java/com/ethora/chat/ui/components/ChatInputTest.kt`
+`ethora-component/src/androidTest/java/com/ethora/chat/ui/components/ChatInputTest.kt`
 is the canonical example to copy when adding a new Compose UI test.
+
+#### Test inventory
+
+As of the current main, **107 JVM unit tests + 19 Compose UI tests = 126 tests** across 13 files. All pass under
+`./gradlew :ethora-component:testDebugUnitTest` and
+`./gradlew :ethora-component:connectedDebugAndroidTest`.
+
+**JVM unit tests:**
+
+| Test class | Tests | What it covers |
+|------------|-------|----------------|
+| `RoomStoreTest` | 35 | Reducer semantics: add/update/upsert/remove, presenceReady stickiness, `setCurrentRoom` transitions A→B→A, per-room loading isolation, `lastViewedTimestamp` bump on switch, unread counter math (active=0, lastViewed=0 counts all, excludes own/pending/system, caps at 99 with `unreadCapped`, lastViewed boundary), multi-room concurrent receive (current pointer + lastMessage isolation), pending count, composing per-room |
+| `MessageStoreTest` | 18 | `setMessagesForRoom`/`getMessagesForRoom` round-trip + per-room isolation, `addMessage` new-append, MAM-replay idempotency, pending-merge bidirectional ID matching (load-bearing reconciliation between optimistic UUID and server-assigned id), rapid-send order, cross-room independence, bulk `addMessages` dedup + chronological order, tombstone-on-delete, persistence cap at 100 |
+| `TimestampUtilsTest` | 15 | s/ms/µs/ns ladder, ISO-8601 + XEP-0091 parsing, embedded-digit extraction, null/Date/Number/String dispatch, zero-clamping on invalid input |
+| `XmppXmlUtilsTest` | 14 | `extractDataElement` (self-closing vs open-close, malformed), `extractAttribute` (double/single/unquoted; entity decoding for `&amp;`/`&lt;`/`&gt;`/`&quot;`/`&apos;` — anchored on the signed-URL thumbnail regression) |
+| `PendingMediaSendQueueTest` | 5 | Queue add/remove/clear, persistence across instantiations |
+| `ChatConfigurationTest` | 4 | Fail-loud on missing `baseUrl`, missing `xmppSettings`, non-websocket `xmppServerUrl` scheme; configured values returned unchanged |
+| `UnreadObserverTest` | 3 | Aggregate `EthoraChatBootstrap.hasUnread()` flow + Java listener registration |
+| `ChatXMPPClientOwnershipTest` | 3 | Shared bootstrap client not disconnected on Chat dispose; non-shared is; missing client is a no-op |
+| `SingleRoomSupportTest` | 3 | Single-room mode constraints |
+| `LogoutServiceTest` | 3 | `performLogout` clears UserStore + RoomStore + MessageStore + invokes callback; idempotent re-entry on already-empty session |
+| `FileSizeFormatterTest` | 2 | Byte → human string conversion (B/KB/MB/GB) |
+| `DnsFallbackTest` | 1 | Override map lookup |
+| `LogExportFormatterTest` | 1 | Log line serialisation shape |
+
+**Compose UI tests:**
+
+| Component | Tests | Asserts |
+|-----------|-------|---------|
+| `ChatInput` | 4 | Send callback fires on tap; empty input → disabled Send + no callback; `editText` prop pre-populates field; reply preview + Cancel callback |
+| `LogsView` | 2 | Filter field + log entries render; filter input hides non-matching entries |
+| `MessageBubble` | 4 | Outgoing body text; incoming bubble shows author + body; deleted message shows tombstone copy (not original body); send-failed state composes |
+| `MessageContextMenu` | 9 | Visible/invisible short-circuits; own-message Copy/Edit/Delete; received-only Copy; pending + `onResend` → Retry replaces Edit; auto-timer sendFailed → Retry; missing `onResend` falls back to Edit; tap Copy fires both `onCopy` and `onDismiss`; regression guard for exactly 3 menu items |
+
+**Test dependencies** (declared in `gradle/libs.versions.toml` and
+`ethora-component/build.gradle.kts`):
+
+- `junit:junit` — base test runner
+- `org.mockito:mockito-core` 5.5.0 — inline mocking by default
+- `org.mockito.kotlin:mockito-kotlin` 5.4.0 — Kotlin DSL +
+  `onBlocking` for suspend-function stubbing
+- `kotlinx-coroutines-test` — `runTest`, `UnconfinedTestDispatcher`,
+  `Dispatchers.setMain` / `resetMain`. Required for async tests that
+  bounce through `Dispatchers.Main` + `Dispatchers.IO` (LogoutService,
+  persistence cap)
+
+**Gradle build-test wiring** that's load-bearing for the test layer
+(`ethora-component/build.gradle.kts`):
+
+- `testOptions.unitTests.isReturnDefaultValues = true` — JVM unit
+  tests don't run on an Android device, so calls to `android.util.Log`
+  in production code paths would throw "Method not mocked". This flag
+  returns zero-values for any `android.*` API the SUT touches,
+  silencing logging in tests.
+- `packaging.resources.excludes` — strips duplicate `META-INF`
+  manifests from `androidTest` merge so
+  `connectedDebugAndroidTest` doesn't fail in
+  `mergeDebugAndroidTestJavaResource`.
+
+#### Gaps still to cover
+
+File an issue + a test in the same PR when you tackle one:
+
+- `RoomListView` — search behavior, active-room highlight, badge
+  counts
+- `FullScreenImageViewer` — zoom + pan + close
+- `PDFViewer` — page navigation + render-on-low-memory fallback
+- `ChatInfoScreen` — participants list, leave-room flow
+- `chat-core` `XMPPClient` state machines — BIND-result handling,
+  MAM subscription, reconnect on socket drop (testable with a stubbed
+  transport)
+- `chat-core` send-failed timeout path in
+  `MessageStore.schedulePendingTimeout` (uses real
+  `kotlinx.coroutines.delay` — needs a `TestScheduler` override on
+  the private `pendingScope`)
+- LogoutService → XMPPClient.disconnect() call assertion (currently
+  the tests exercise the null-client "skipping disconnect" branch
+  only; mocking the final `XMPPClient` class is doable with mockito
+  inline + IO coordination but adds surface beyond the test value)
+
+The cross-platform [QA Scenarios catalog](https://github.com/dappros/ethora/blob/main/QA_SCENARIOS.md)
+in the monorepo lists 12 failure-mode clusters distilled from field
+reports and maps each to its recommended test layer — useful when
+scoping the next round of coverage.
 
 #### Current Compose UI coverage
 
