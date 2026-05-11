@@ -45,6 +45,42 @@ android {
         compose = true
     }
 
+    packaging {
+        resources {
+            // androidTest variant merges every dep's META-INF; multiple
+            // OSGi-style jars (logging-interceptor, jspecify, smack-*)
+            // ship the same MANIFEST.MF under /META-INF/versions/9/OSGI-INF/
+            // and AGP's mergeDebugAndroidTestJavaResource fails on the
+            // duplicate. The sample-android build has the same exclusion;
+            // mirror it here so :ethora-component:connectedDebugAndroidTest
+            // gets through the merge step.
+            excludes += setOf(
+                "/META-INF/{AL2.0,LGPL2.1}",
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+                "META-INF/versions/*/OSGI-INF/MANIFEST.MF",
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+            )
+        }
+    }
+
+    testOptions {
+        unitTests {
+            // Default to returning Java/Kotlin zero-values for any
+            // android.* API the SUT touches (the most common one is
+            // android.util.Log.d/.w/.e — logging from production
+            // code path otherwise throws "Method not mocked" and
+            // makes every test that exercises those code paths
+            // fail in JVM unit-test mode. Robolectric is the heavier
+            // alternative; this flag is sufficient for our pure-logic
+            // tests).
+            isReturnDefaultValues = true
+        }
+    }
+
     publishing {
         singleVariant("release") {
             withSourcesJar()

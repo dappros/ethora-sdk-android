@@ -647,6 +647,140 @@ LogoutService.setOnLogoutCallback {
 - Current builds use native `PdfRenderer`; no hosted PDF.js page is required.
 - Confirm the file URL returns valid PDF bytes and is reachable from the device.
 
+## Testing
+
+The SDK uses a **two-layer testing strategy**, with each layer pinned to
+the codebase it tests so changes ship in the same PR as the test that
+exercises them.
+
+This Android SDK is one of four runtime targets that share a single
+selector contract — Compose `testTag` strings here match SwiftUI
+`accessibilityIdentifier` strings on iOS and `data-testid` attributes
+on Web, so a Maestro YAML flow drives all three platforms by the same
+ID. See [Cross-platform testing overview](#cross-platform-testing-overview)
+at the end of this section.
+
+### Layer 1 — Unit + Compose UI tests (this repo)
+
+Live alongside the source they exercise; surfaced under Studio's "Tests"
+tab so they don't clutter main source.
+
+| Where | What | Run with |
+|-------|------|----------|
+| `chat-core/src/test/` | Pure-JVM unit tests — JID parsing, message serializers, store reducers, networking helpers | `./gradlew :chat-core:test` |
+| `chat-ui/src/androidTest/` | Compose UI tests using `androidx.compose.ui.test` — render a composable in isolation, drive it with callbacks, assert behavior | `./gradlew :chat-ui:connectedDebugAndroidTest` |
+| `ethora-component/src/test/` | Aggregate-module unit tests covering cross-module behavior (UnreadObserver, single-room support, XMPP client ownership, file size formatting, DNS fallback, pending-media queue, log export formatter) | `./gradlew :ethora-component:test` |
+
+The Compose UI tests run on a connected emulator or device (API 26+).
+They're hermetic — no network, no XMPP, no FCM. End-to-end flows that
+need a real server go in Layer 2.
+
+`chat-ui/src/androidTest/java/com/ethora/chat/ui/components/ChatInputTest.kt`
+is the canonical example to copy when adding a new Compose UI test.
+
+#### Current Compose UI coverage
+
+| Component | Test | Asserts |
+|-----------|------|---------|
+| `ChatInput` | `rendersInputAndFiresCallbackOnSend` | Type → tap Send → `onSendMessage` callback fires with the typed text |
+| `ChatInput` | `emptyInputShowsSendIconWithoutFiringCallback` | Empty field shows a disabled Send icon; tap is a no-op |
+| `ChatInput` | `editModePrePopulatesText` | `editText="..."` prop is rendered in the field on first composition |
+| `ChatInput` | `replyPreviewShowsAndCancelFiresCallback` | `replyingToMessage` → preview body visible → "Cancel reply" fires `onReplyCancel` |
+| `LogsView` | `rendersFilterFieldAndLogEntries` | Entries pushed via `LogStore.info(...)` render with the "Filter logs" field visible |
+| `LogsView` | `queryFilterHidesNonMatchingEntries` | Typing into the filter hides non-matching entries |
+| `MessageBubble` | `rendersBodyText` | Outgoing bubble renders its body text |
+| `MessageBubble` | `rendersAuthorNameForIncomingMessage` | Incoming bubble (`isUser=false`) shows author + body |
+| `MessageBubble` | `rendersDeletedTombstone` | Bubble composes without crashing for `isDeleted=true` |
+| `MessageBubble` | `rendersSendFailedState` | Bubble composes without crashing for `sendFailed=true` |
+| `MessageContextMenu` | `rendersNothingWhenInvisible` | `visible=false` short-circuits — no Copy/Edit/Delete labels in composition |
+| `MessageContextMenu` | `rendersNothingForDeletedMessage` | `isDeleted=true` short-circuits even with `visible=true` |
+| `MessageContextMenu` | `ownMessageShowsCopyEditDelete` | `isUser=true` + non-pending → Copy, Edit, Delete; no Retry |
+| `MessageContextMenu` | `receivedMessageShowsCopyOnly` | `isUser=false` → Copy only, no Edit/Delete |
+| `MessageContextMenu` | `pendingOwnMessageWithResendHandlerOffersRetry` | `pending=true` + `onResend!=null` → Retry replaces Edit |
+| `MessageContextMenu` | `sendFailedOwnMessageOffersRetry` | `sendFailed=true` → Retry replaces Edit (auto-timer path) |
+| `MessageContextMenu` | `pendingMessageWithoutResendHandlerOffersEditNotRetry` | Missing `onResend` → falls back to Edit |
+| `MessageContextMenu` | `tappingCopyFiresOnCopyAndOnDismiss` | Tap Copy → both `onCopy` and `onDismiss` callbacks fire (auto-close) |
+| `MessageContextMenu` | `ownMessageRendersExactlyThreeMenuItems` | Regression guard: own-message menu has exactly 3 items (Copy, Edit, Delete) |
+
+##### chat-core unit tests
+
+Pure-JVM, no emulator. Run with `./gradlew :chat-core:test`.
+
+| Module | Test class | Asserts |
+|--------|------------|---------|
+| `chat-core` | `TimestampUtilsTest` | 14 tests covering the s/ms/µs/ns ladder, ISO-8601 + XEP-0091 string parsing, embedded-digit extraction, null/Date/Number/String type dispatch, and zero-clamping on invalid input |
+| `chat-core` | `XmppXmlUtilsTest` | 14 tests covering `extractDataElement` (self-closing vs open-close, malformed input) and `extractAttribute` (double-quoted, single-quoted, unquoted; missing attribute; entity decoding for `&amp;` / `&lt;` / `&gt;` / `&quot;` / `&apos;`). Anchored on the historical bug where signed-URL thumbnails broke because `&amp;` wasn't decoded back to `&` in MAM-replayed messages |
+| `chat-core` | `RoomStoreTest` | 15 tests covering `setRooms` (full replace), `addRoom` (append vs merge by id / jid), `updateRoom` (replace + `presenceReady` stickiness — incoming `false` doesn't clear an already-`true` flag, regression-guarded), `removeRoom` (by id or jid; clears `currentRoom` when active room is removed), `setCurrentRoom`, `getRoomById` / `getRoomByJid`, `upsertRoom`, `clear` |
+| `chat-core` | `MessageStoreTest` | 11 tests covering `setMessagesForRoom` / `getMessagesForRoom` (per-room isolation), `addMessage` new-append (returns `false`), `addMessage` non-pending duplicate dropped (MAM-replay idempotency), `addMessage` pending-merge bidirectional ID matching (incoming `id` vs existing `xmppId` AND existing `id` vs incoming `xmppId` — the load-bearing reconciliation between optimistic UUID and server-assigned id), `clearMessagesForRoom`, `clear` |
+
+**Gaps** still to cover at this layer (file an issue + a test in the
+same PR when you tackle one):
+
+- `RoomListView` — search behavior, active-room highlight, badge counts
+- `FullScreenImageViewer` — zoom + pan + close
+- `PDFViewer` — page navigation + render-on-low-memory fallback
+- `ChatInfoScreen` — participants list, leave-room flow
+- `chat-core` `XMPPClient` state machines — BIND-result handling, MAM
+  subscription, reconnect on socket drop (testable with a stubbed
+  transport)
+- `chat-core` send-failed timeout path in `MessageStore.schedulePendingTimeout`
+  (uses `kotlinx.coroutines.delay` — needs a coroutine TestScheduler)
+- Tombstone / failed-state explicit string assertions on `MessageBubble`
+  (TODOs in `MessageBubbleTest.kt` flag where to tighten once the SDK
+  exposes stable strings)
+
+### Layer 2 — End-to-end smoke flows (`ethora-sample-android`)
+
+Maestro YAML scenarios that drive the sample app on a real
+emulator/device against `chat-qa.ethora.com`: login → list rooms → send
+text → receive text → reconnect → push intent → logout. Live in
+[`ethora-sample-android/.maestro/`](https://github.com/dappros/ethora-sample-android/tree/main/.maestro)
+because they need a built APK, not SDK source.
+
+These run on the sample's CI on every release tag of the SDK — that's
+the gate that catches integration regressions like config drift,
+preset URL breakage, or feature parity gaps with iOS/Web.
+
+### Adding a test for a fix or new feature
+
+- **Behavior bug in `chat-core` or `chat-ui`** → add a unit / Compose
+  UI test in this repo, in the same PR as the fix.
+- **Integration bug** (something the SDK exposes but the sample
+  consumes) → add a Maestro flow in `ethora-sample-android/.maestro/`,
+  in a paired PR to that repo.
+- **Cross-platform parity gap** → add the matching test to all three
+  (Android Maestro, iOS Maestro, Web Playwright). The selector
+  contract below makes the test bodies near-identical across
+  platforms.
+
+### Cross-platform testing overview
+
+Four runtime targets, one selector contract. Same test intent runs
+against any of them via Maestro (mobile) or Playwright (web).
+
+| Layer 1 (hermetic) | Layer 2 (E2E) |
+|--------------------|----------------|
+| `ethora-sdk-android` — Compose UI tests in `chat-ui/src/androidTest/` (this repo) | `ethora-sample-android/.maestro/` — 19 Maestro flows on Android emulator |
+| `ethora-sdk-swift` — XCTest in `Tests/XMPPChatCoreTests/` + `accessibilityIdentifier` markers in `XMPPChatUI/` | `ethora-sample-swift/.maestro/` — same 19 Maestro flows on iOS Simulator |
+| `ethora-chat-component` — Vitest + RTL in `src/**/*.test.tsx` with `data-testid` attrs | `ethora-app-reactjs/tests/e2e/` — Playwright on chromium |
+
+Selector parity (a Maestro `id: "chat_input"` matches all of these):
+
+| String | Android (`*TestTags`) | iOS (`*AccessibilityID`) | Web (`*TestIds`) |
+|--------|----------------------|--------------------------|------------------|
+| `chat_input` | `ChatInputTestTags.INPUT_FIELD` | `ChatInputAccessibilityID.inputField` | `ChatInputTestIds.inputField` |
+| `chat_send_button` | `ChatInputTestTags.SEND_BUTTON` | `ChatInputAccessibilityID.sendButton` | `ChatInputTestIds.sendButton` |
+| `chat_attach_button` | `ChatInputTestTags.ATTACH_BUTTON` | `ChatInputAccessibilityID.attachButton` | `ChatInputTestIds.attachButton` |
+| `chat_message_image` | `MessageBubbleTestTags.MEDIA_CONTENT` | `MessageBubbleAccessibilityID.mediaContent` | `MessageBubbleTestIds.mediaContent` |
+| `rooms_list` | `RoomListViewTestTags.ROOMS_LIST` | `RoomListAccessibilityID.roomsList` | `RoomListTestIds.roomsList` |
+| `room_row` | `RoomListViewTestTags.ROOM_ROW` | `RoomListAccessibilityID.roomRow` | `RoomListTestIds.roomRow` |
+| `rooms_search_input` | `RoomListViewTestTags.SEARCH_INPUT` | (system search bar, no ID) | `RoomListTestIds.searchInput` |
+| `create_room_button` | `RoomListViewTestTags.CREATE_ROOM_BUTTON` | `RoomListAccessibilityID.createRoomButton` | `RoomListTestIds.createRoomButton` |
+
+Changing any value above is a 4-repo change. The cost of that
+coupling is the benefit — a renamed tag breaks four CI runs the
+same week, not silently rotting in one of them.
+
 ## Production Checklist
 
 - Always provide your own `baseUrl`, `appId`, `xmppSettings`, and production token values.
