@@ -20,6 +20,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalUriHandler
@@ -231,7 +232,9 @@ fun MessageBubble(
                                     message = message,
                                     isUser = isUser,
                                     onMediaClick = { msg -> onMediaClick?.invoke(msg) },
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+                                    modifier = Modifier
+                                        .padding(horizontal = 8.dp, vertical = 8.dp)
+                                        .testTag(MessageBubbleTestTags.MEDIA_CONTENT)
                                 )
                             } else {
                                 // Show text message with formatting
@@ -790,4 +793,14 @@ private fun ReactionsRow(
 private fun formatTime(date: java.util.Date): String {
     val formatter = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
     return formatter.format(date)
+}
+
+/**
+ * Stable testTag identifiers exposed by [MessageBubble] for UI tests.
+ * See [ChatInputTestTags] for the rationale; both layers (Compose UI
+ * tests in this repo + Maestro flows in `ethora-sample-android`)
+ * resolve nodes by these tags.
+ */
+object MessageBubbleTestTags {
+    const val MEDIA_CONTENT = "chat_message_image"
 }
