@@ -73,7 +73,12 @@ fun MessageBubble(
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 2.dp)
             .onGloballyPositioned { rowCoordinates = it }
-            .pointerInput(message.id) {
+            // Key on body too — after an edit, only `body` changes (id is
+            // stable), and without re-keying the gesture detector keeps the
+            // original closure with the pre-edit `message`. That stale capture
+            // is what caused long-press → Copy to put the OLD text on the
+            // clipboard after an edit.
+            .pointerInput(message.id, message.body) {
                 detectTapGestures(
                     onTap = { offset ->
                         if (sendFailed && onFailedClick != null) {

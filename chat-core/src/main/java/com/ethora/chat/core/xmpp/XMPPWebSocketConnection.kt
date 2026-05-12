@@ -1405,10 +1405,14 @@ class XMPPWebSocketConnection(
 
         val id = "edit-message-${System.currentTimeMillis()}"
         val escapedText = escapeXml(newText)
-        
-        val stanza = """<message to="$fixedRoomJid" type="groupchat" id="$id">
-            |<replace id="$messageId" text="$escapedText"/>
-            |</message>""".trimMargin()
+
+        // Compact single line, NO whitespace text nodes between elements —
+        // same gotcha as the MAM `requestMamHistory` stanza: Ejabberd with
+        // strict XML parsing treats indentation between `<message>` and
+        // `<replace/>` as text-children and silently drops the edit instead
+        // of applying it. Byte-equivalent to what the web SDK's `@xmpp/xml`
+        // serialiser emits for `editMessage.xmpp.ts`.
+        val stanza = """<message to="$fixedRoomJid" type="groupchat" id="$id"><replace id="$messageId" text="$escapedText"/></message>"""
         sendRaw(stanza)
         Log.d(TAG, "✏️ Sent edit message to $fixedRoomJid: messageId=$messageId, newText=${newText.take(50)}")
     }
