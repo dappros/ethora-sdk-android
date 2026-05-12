@@ -37,6 +37,15 @@ class XMPPWebSocketConnection(
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        // WebSocket-frame-level keepalive. Without it OkHttp has no way to
+        // notice a half-open connection — after a spam burst the server can
+        // silently rate-limit / drop our socket without sending FIN, and
+        // `onFailure`/`onClosed` never fire. Outbound writes keep "succeeding"
+        // into the OS buffer but nothing comes back: typing indicators stop,
+        // incoming messages stop, edit echoes don't return. With pingInterval
+        // OkHttp sends a WS PING frame every 20 s; missing PONG triggers
+        // `onFailure`, which already routes through to our reconnect logic.
+        .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
     init {

@@ -317,8 +317,16 @@ object MessageStore {
                     // already strictly monotonic per allocateOptimisticTimestamp(),
                     // so preserving it gives stable tap-order display.
                     val preservedTs = existingMessage.timestamp ?: existingMessage.date.time
+                    // Take id from the server echo (stanza-id / archive-id), NOT the
+                    // local optimistic UUID. Web does `deepMerge(existing, incoming)`
+                    // — incoming wins on `id`, and that's what edit/delete `<replace>`
+                    // and `<delete>` stanzas reference. Keeping the optimistic id
+                    // here meant `<replace id="OPT-UUID">` went out, web stored the
+                    // message under `archive-id`, and the edit echo arrived but had
+                    // nothing to match against → edits never propagated across
+                    // clients. Keep the optimistic id in `xmppId` for any code that
+                    // still needs it.
                     val updatedMessage = message.copy(
-                        id = existingMessage.id, // Keep original optimistic ID
                         pending = false,
                         sendFailed = null, // Echo arrived — clear any prior failure flag.
                         timestamp = preservedTs,
@@ -551,8 +559,12 @@ object MessageStore {
             // server timestamps are wall-clock-on-arrival and would leapfrog still-pending
             // siblings, producing the visible reshuffle during rapid spam.
             val preservedTs = pendingMessage.timestamp ?: pendingMessage.date.time
+            // Take id from the server echo (stanza-id / archive-id), NOT the
+            // local optimistic UUID — see addMessage for the full rationale.
+            // tl;dr: web stores incoming.id, so edits/deletes reference that
+            // id, and keeping the optimistic id on Android made <replace>
+            // echoes silently no-op on the receiver.
             val updatedMessage = receivedMessage.copy(
-                id = pendingMessage.id, // Keep original optimistic ID
                 pending = false,
                 sendFailed = null,
                 timestamp = preservedTs,
@@ -635,10 +647,10 @@ object MessageStore {
                     val matched = roomMessages[matchIdx]
                     if (matched.sendFailed == true) {
                         // Preserve the optimistic timestamp — see addMessage
-                        // for rationale.
+                        // for rationale. Take id from the incoming echo (web
+                        // parity) so cross-client edits/deletes can land.
                         val preservedTs = matched.timestamp ?: matched.date.time
                         val cleared = incoming.copy(
-                            id = matched.id,
                             pending = false,
                             sendFailed = null,
                             timestamp = preservedTs,
@@ -671,9 +683,10 @@ object MessageStore {
                 if (pendingIdx >= 0) {
                     val pending = roomMessages[pendingIdx]
                     // Preserve the optimistic timestamp — see addMessage for rationale.
+                    // Take id from the incoming echo (web parity) so cross-client
+                    // edits/deletes can land.
                     val preservedTs = pending.timestamp ?: pending.date.time
                     val merged = incoming.copy(
-                        id = pending.id, // keep original optimistic ID for any callers that held onto it
                         pending = false,
                         sendFailed = null,
                         timestamp = preservedTs,
