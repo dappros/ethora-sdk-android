@@ -323,7 +323,23 @@ object MessageStore {
         java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     )
 
-    private fun schedulePendingTimeout(roomJid: String, messageId: String, timeoutMs: Long = 6000L) {
+    /**
+     * Default pending-timeout window before flipping a stuck optimistic row
+     * to `sendFailed = true`. Bumped from 6 s to 30 s after field reports of
+     * "message goes red, then becomes sent ~10–15 s later" on slow / lossy
+     * networks. At 6 s the timer was firing well before the server-side
+     * MAM index had a chance to surface the message, so the bubble flashed
+     * "Sending failed" and only the next echo (real-time or a triggered
+     * MAM fetch) could clear it. 30 s tolerates a degraded transport
+     * round-trip while still giving the user a definitive failure signal
+     * when the message truly never lands.
+     *
+     * The companion `schedulePendingFallback` deadline in
+     * `ChatRoomViewModel` is sized to match so polling stays alive across
+     * the same window — if these drift apart, "messages stuck on sending"
+     * regressions re-appear.
+     */
+    private fun schedulePendingTimeout(roomJid: String, messageId: String, timeoutMs: Long = 30_000L) {
         val key = "$roomJid|$messageId"
         if (!pendingTimeoutScheduled.add(key)) return
         pendingScope.launch {
@@ -515,7 +531,20 @@ object MessageStore {
             }
             if (matchIdx >= 0) {
                 val matched = roomMessages[matchIdx]
-                if (matched.sendFailed == true) {
+                // Reconcile when the local row is still in flight — either
+                // `pending = true` (the 700 ms ack-catchup poll is racing the
+                // 6 s pending-timeout) or `sendFailed = true` (the timeout
+                // already fired or the transport returned null). Both branches
+                // must clear the in-flight flags, otherwise:
+                //   • a still-pending row stays pending until the 6 s timer
+                //     flips it to `sendFailed`, even though MAM proved the
+                //     message is delivered — visible as "stuck on sending /
+                //     eventually shows 'Sending failed' for a delivered msg",
+                //   • a `sendFailed` row stays failed forever if the catchup
+                //     window already closed before the echo arrived.
+                // Confirmed rows (pending=false, sendFailed=null) are still
+                // a no-op: we never downgrade sent → error on a late echo.
+                if (matched.pending == true || matched.sendFailed == true) {
                     val cleared = incoming.copy(
                         id = matched.id,
                         pending = false,
@@ -533,8 +562,8 @@ object MessageStore {
                     roomMessages[matchIdx] = cleared
                     pendingResolved.add(cleared)
                 }
-                // Either we cleared the failure or the row is already a
-                // confirmed duplicate — in both cases skip the "add as new".
+                // Either we cleared the in-flight state or the row is already
+                // a confirmed duplicate — in both cases skip the "add as new".
                 continue
             }
 
@@ -580,6 +609,15 @@ object MessageStore {
     }
 
     private fun findMatchingPending(roomMessages: List<Message>, incoming: Message): Int {
+        // [roomMessages] is the post-`sortedForUi` list (timestamp ascending
+        // with pending-last tiebreaker). `indexOfFirst` therefore returns
+        // the OLDEST still-in-flight match — the deterministic policy under
+        // duplicate-body spam (10 × "q" send in 2 s): the first echo lands
+        // on the oldest pending row, the second echo lands on the next, and
+        // so on. Bodies are identical, so the visible chat is unchanged
+        // even if echoes arrive out of order; we only rely on this fallback
+        // when id/xmppId correlation has already failed (origin-id stripped
+        // by a non-conformant server).
         val now = System.currentTimeMillis()
         return roomMessages.indexOfFirst { existing ->
             // Reconcile both still-pending rows AND already-failed rows.
@@ -667,6 +705,46 @@ object MessageStore {
     }
 
     /**
+     * Flip [messageId] in [roomJid] to `sendFailed = true` only when the row is
+     * still in flight. Used by the transport-level failure paths
+     * (`xmppClient.sendMessage(...)` returning null, caption follow-up reject,
+     * media upload error). Critical guard rail per the bug spec:
+     *
+     *   "If message is already sent/delivered/read: do nothing.
+     *    A delayed timeout must never override a successful send confirmation."
+     *
+     * Returns `true` if the row was flipped, `false` if it was already a
+     * confirmed bubble (pending=false, sendFailed=null) — in which case the
+     * caller's signal arrived AFTER the server echo and must be discarded.
+     */
+    fun markSendFailedIfStillPending(roomJid: String, messageId: String): Boolean {
+        val currentMessages = _messages.value.toMutableMap()
+        val roomMessages = currentMessages[roomJid]?.toMutableList() ?: return false
+        val index = roomMessages.indexOfFirst { it.id == messageId }
+        if (index < 0) return false
+        val existing = roomMessages[index]
+        // Already-confirmed row: never downgrade. The server has the message;
+        // the local failure signal is stale.
+        if (existing.pending != true && existing.sendFailed != true) {
+            android.util.Log.d(
+                "MessageStore",
+                "🛡️ Skip sendFailed flip for $messageId in $roomJid — row already confirmed"
+            )
+            return false
+        }
+        // Idempotent flip — pending → failed, or refresh an already-failed row.
+        val updated = existing.copy(pending = false, sendFailed = true)
+        roomMessages[index] = updated
+        val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
+        currentMessages[roomJid] = sorted
+        _messages.value = currentMessages
+        persistMessage(roomJid, updated)
+        updateRoomLastMessage(roomJid, sorted)
+        com.ethora.chat.core.store.RoomStore.updatePendingCount(roomJid, sorted)
+        return true
+    }
+
+    /**
      * Update message
      */
     fun updateMessage(roomJid: String, message: Message) {
@@ -709,6 +787,12 @@ object MessageStore {
         val currentMessages = _messages.value.toMutableMap()
         currentMessages.remove(roomJid)
         _messages.value = currentMessages
+        // Drop any scheduled pending-timeout entries for this room. The dedup
+        // keys are formed as "$roomJid|$messageId", so a prefix match
+        // isolates the room. Without this, the set grew across leave/clear
+        // cycles and could refuse to re-arm a timer for a re-sent message id.
+        val prefix = "$roomJid|"
+        pendingTimeoutScheduled.removeIf { it.startsWith(prefix) }
     }
 
     /**
@@ -716,6 +800,9 @@ object MessageStore {
      */
     fun clear() {
         _messages.value = emptyMap()
+        // Reset the pending-timeout dedup set so a fresh login can re-arm
+        // timers cleanly even if the previous session left stale entries.
+        pendingTimeoutScheduled.clear()
         // Clear persistence (background)
         persistenceScope.launch {
             messageCache?.clearAllMessages()

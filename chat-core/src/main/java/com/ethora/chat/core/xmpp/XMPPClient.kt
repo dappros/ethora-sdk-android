@@ -1049,7 +1049,14 @@ class XMPPClient(
                 messageId.isNotBlank() -> messageId
                 else -> timestamp.toString()
             }
+            // XEP-0359 origin-id from the forwarded inner stanza: this is
+            // the sender-attached correlation handle we set when transmitting
+            // the message. Prefer it over the stanza `id` attribute because
+            // some servers / routers rewrite `id` while forwarding origin-id
+            // verbatim. Falls back to stanza id → result id → archive id.
+            val originId = extractOriginId(messageXml)
             val stanzaMessageId = when {
+                !originId.isNullOrBlank() -> originId
                 messageId.isNotBlank() -> messageId
                 resultId.isNotBlank() -> resultId
                 else -> archiveMessageId

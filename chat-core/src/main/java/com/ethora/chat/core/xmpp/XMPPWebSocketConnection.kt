@@ -766,6 +766,12 @@ class XMPPWebSocketConnection(
         val xml = unwrapMucSubInnerMessage(rawXml)
         try {
             val messageId = extractAttribute(xml, "id") ?: ""
+            // XEP-0359 origin-id: sender-assigned correlation id we attached
+            // when transmitting. Servers MUST forward it verbatim, so this
+            // is the most resilient handle for matching the echo to the
+            // local pending row — survives MUC-SUB wrappers and any router
+            // that rewrites the stanza `id` attribute.
+            val originId = extractOriginId(xml)
             // For consistency with MAM history IDs, prefer server archive stanza-id when available.
             val stanzaIdStart = xml.indexOf("<stanza-id")
             val stanzaIdEnd = xml.indexOf(">", stanzaIdStart)
@@ -865,7 +871,16 @@ class XMPPWebSocketConnection(
             // Check if message is deleted (has <deleted> element)
             val isDeleted = xml.contains("<deleted") || xml.contains("<deleted>")
             
-            // Create Message object with media fields
+            // Create Message object with media fields.
+            // xmppId precedence: origin-id > stanza id > archive id.
+            // origin-id is the only handle a sender controls end-to-end;
+            // bidirectional reconciliation in MessageStore.addMessage(s)
+            // hits it first when both sides have it.
+            val correlationId = when {
+                !originId.isNullOrBlank() -> originId
+                messageId.isNotBlank() -> messageId
+                else -> effectiveMessageId
+            }
             val message = Message(
                 id = effectiveMessageId,
                 user = user,
@@ -873,7 +888,7 @@ class XMPPWebSocketConnection(
                 body = body,
                 roomJid = roomJid,
                 timestamp = effectiveTimestamp,
-                xmppId = if (messageId.isNotBlank()) messageId else effectiveMessageId,
+                xmppId = correlationId,
                 xmppFrom = from,
                 pending = false, // Real-time messages are not pending
                 isDeleted = isDeleted,
@@ -1240,16 +1255,31 @@ class XMPPWebSocketConnection(
         // XMPP extensions ignore elements under unexpected namespaces.
         // Matches sdk-reactjs/.../xmppClient.ts: sendTextMessageStanza.
         val dataElement = """<data senderFirstName="$escapedFirstName" senderLastName="$escapedLastName" fullName="$escapedFullName" photoURL="$escapedPhotoURL" senderJID="$escapedSenderJID" senderWalletAddress="$escapedWalletAddress" roomJid="$escapedRoomJid" isSystemMessage="false" tokenAmount="0" quickReplies="" notDisplayedValue="" showInChannel="${showInChannel}" isReply="${isReply}" mainMessage="$escapedMainMessage" push="true"/>"""
-        
-        val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$dataElement<body>$escapedBody</body></message>"""
+
+        // XEP-0359 origin-id: a sender-assigned correlation id the server
+        // MUST forward verbatim on every echo (live MUC stanza, MAM result,
+        // MUC-SUB pubsub event). This is the primary correlation handle in
+        // the reconciler — even if a server downstream rewrites the
+        // `<message id>` attribute (some routers do), the `<origin-id>`
+        // survives unchanged. We mirror it from `messageId` so existing
+        // bidirectional id/xmppId matching keeps working without extra
+        // bookkeeping.
+        val originIdElement = """<origin-id xmlns="urn:xmpp:sid:0" id="$messageId"/>"""
+
+        val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$originIdElement$dataElement<body>$escapedBody</body></message>"""
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMessage() to $fixedRoomJid")
         // Surface OkHttp queue rejection (the silent-drop root cause behind
-        // "spam 15 messages, 2 don't go"). One short retry to ride out a
-        // momentarily-inconsistent socket — same pattern as sendMediaMessage
-        // a few methods down.
+        // "spam 15 messages, 2 don't go"). Three attempts with tiny exp.
+        // backoff (0/60/160 ms): the buffer self-drains on every WS read,
+        // so a 200 ms total window is well above the typical contention
+        // tail and well below the user-visible "stuck on sending" feel.
         var sent = sendRaw(message)
         if (!sent) {
-            kotlinx.coroutines.delay(50)
+            kotlinx.coroutines.delay(60)
+            sent = sendRaw(message)
+        }
+        if (!sent) {
+            kotlinx.coroutines.delay(160)
             sent = sendRaw(message)
         }
         if (!sent) {
@@ -1315,22 +1345,33 @@ class XMPPWebSocketConnection(
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
             .replace("'", "&apos;")
+        // XEP-0359 origin-id mirrors the same correlation handle for media
+        // echoes — see sendMessage() above for the rationale. Without it,
+        // media echoes that come back through MUC-SUB rewrites would have
+        // to fall through to the heuristic content match (location/fileName
+        // body windowing).
+        val originIdElement = """<origin-id xmlns="urn:xmpp:sid:0" id="$safeId"/>"""
         // Matches web version: includes from attribute and store hint
-        val message = """<message id="$safeId" type="groupchat"$fromAttribute to="$fixedRoomJid"><body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
+        val message = """<message id="$safeId" type="groupchat"$fromAttribute to="$fixedRoomJid">$originIdElement<body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMediaMessage() to $fixedRoomJid")
         val ws = webSocket
         if (ws == null) {
             Log.e(TAG, "❌ Failed to send media message: WebSocket is null (isConnected=$isConnected, isAuthenticated=$isAuthenticated)")
             return false
         }
+        // Mirror sendMessage() retry profile — 3 attempts with 0/60/160 ms
+        // backoff so a transient socket-buffer rejection doesn't translate
+        // into a user-visible failure on the very first try.
         var sent = ws.send(message)
         if (!sent) {
-            // One retry: socket state can be briefly inconsistent
-            kotlinx.coroutines.delay(50)
+            kotlinx.coroutines.delay(60)
             val ws2 = webSocket
-            if (ws2 != null) {
-                sent = ws2.send(message)
-            }
+            if (ws2 != null) sent = ws2.send(message)
+        }
+        if (!sent) {
+            kotlinx.coroutines.delay(160)
+            val ws3 = webSocket
+            if (ws3 != null) sent = ws3.send(message)
         }
         if (!sent) {
             Log.e(TAG, "❌ Failed to send media message: WebSocket.send() returned false (socket may be closed; isConnected=$isConnected)")

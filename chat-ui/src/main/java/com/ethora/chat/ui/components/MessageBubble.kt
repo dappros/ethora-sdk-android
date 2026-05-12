@@ -37,6 +37,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.ui.graphics.Color
 import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
@@ -175,12 +177,30 @@ fun MessageBubble(
                 shadowElevation = if (message.isDeleted == true) 0.dp else if (isUser) 3.dp else 1.dp,
                 tonalElevation = 0.dp
             ) {
-                // Sent indicator shows on every own message that the server has
-                // echoed back (no XMPP receipts on the wire yet, so the
-                // double-check means "delivered to the server"). Time renders
-                // inside the bubble too — WhatsApp/Telegram style — and is
-                // gated on `showTimestamp` so grouped messages keep their tick
-                // even when the time label is suppressed.
+                // Per-message status indicators. Each MessageBubble renders its
+                // OWN marker derived from this bubble's own `message` plus the
+                // per-message `sendFailed` / `pendingMediaStatus` props (both
+                // resolved at the call site by id-matching the queue, see
+                // ChatRoomView). There is NO shared "isSending" flag across
+                // bubbles — sending one message must not flip every other own
+                // bubble.
+                //
+                //   pending          → clock icon (in flight)
+                //   sendFailed       → error icon + outside "Sending failed" copy
+                //   confirmed (sent) → green DoneAll
+                //
+                // States are mutually exclusive:
+                //   isPendingState && !sendFailed && !mediaUploadInProgress
+                //   sendFailed (overrides pending)
+                //   showSentIcon = own && !pending && !mediaInFlight && !sendFailed
+                val mediaInFlight = pendingMediaStatus == PendingMediaSendStatus.QUEUED ||
+                    pendingMediaStatus == PendingMediaSendStatus.UPLOADING ||
+                    pendingMediaStatus == PendingMediaSendStatus.READY_TO_SEND
+                val showSendingIcon = isUser
+                    && message.isDeleted != true
+                    && !sendFailed
+                    && (message.pending == true || mediaInFlight)
+                val showFailedIcon = isUser && sendFailed && message.isDeleted != true
                 val showSentIcon = isUser
                     && message.pending != true
                     && pendingMediaStatus == null
@@ -286,12 +306,34 @@ fun MessageBubble(
                                     MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                             }
                         )
+                        if (showSendingIcon) {
+                            Icon(
+                                imageVector = Icons.Default.Schedule,
+                                contentDescription = "Sending",
+                                tint = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .testTag(MessageBubbleTestTags.STATUS_SENDING)
+                            )
+                        }
+                        if (showFailedIcon) {
+                            Icon(
+                                imageVector = Icons.Default.ErrorOutline,
+                                contentDescription = "Send failed",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .testTag(MessageBubbleTestTags.STATUS_FAILED)
+                            )
+                        }
                         if (showSentIcon) {
                             Icon(
                                 imageVector = Icons.Default.DoneAll,
                                 contentDescription = "Sent",
                                 tint = Color(0xFF4CAF50),
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .testTag(MessageBubbleTestTags.STATUS_SENT)
                             )
                         }
                     }
@@ -313,7 +355,13 @@ fun MessageBubble(
             // "Sending failed. Tap to retry or delete." copy doesn't have to
             // squeeze into a small bubble. Timestamp and sent indicator now
             // render inside the bubble (above), WhatsApp-style.
-            if (showTimestamp && isUser && (message.pending == true || pendingMediaStatus != null || sendFailed)) {
+            //
+            // NOT gated on `showTimestamp` — every bubble owns its own
+            // pending/failed marker. The previous gating dropped the failure
+            // copy on any failed message that wasn't the last in a same-sender
+            // group, so a failed bubble sandwiched between confirmed messages
+            // looked identical to a sent one.
+            if (isUser && (message.pending == true || pendingMediaStatus != null || sendFailed)) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     modifier = Modifier.padding(horizontal = 6.dp),
@@ -805,7 +853,16 @@ private fun formatTime(date: java.util.Date): String {
  * See [ChatInputTestTags] for the rationale; both layers (Compose UI
  * tests in this repo + Maestro flows in `ethora-sample-android`)
  * resolve nodes by these tags.
+ *
+ * The STATUS_* tags are scoped per-bubble: each MessageBubble emits at
+ * most ONE of {sending, failed, sent} on its own status row. UI tests
+ * use these to confirm that the per-message marker on a specific
+ * bubble matches the message's own state and is not driven by any
+ * cross-bubble / global flag.
  */
 object MessageBubbleTestTags {
     const val MEDIA_CONTENT = "chat_message_image"
+    const val STATUS_SENDING = "chat_message_status_sending"
+    const val STATUS_FAILED = "chat_message_status_failed"
+    const val STATUS_SENT = "chat_message_status_sent"
 }

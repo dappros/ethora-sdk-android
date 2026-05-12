@@ -64,6 +64,14 @@ class ChatRoomViewModel(
     private val _scrollRestoreAnchor = MutableStateFlow<String?>(null)
     val scrollRestoreAnchor: StateFlow<String?> = _scrollRestoreAnchor.asStateFlow()
 
+    // Coalesced ack-catchup state: at most one polling coroutine per room.
+    // The deadline is the latest "5 s from now" extension seen across all
+    // recent sends. The job reference is consulted under [ackCatchupLock] so
+    // [schedulePendingFallback] doesn't launch a parallel loop.
+    private val ackCatchupLock = Any()
+    @Volatile private var ackCatchupDeadline: Long = 0L
+    private var ackCatchupJob: kotlinx.coroutines.Job? = null
+
     private val _composingUsers = MutableStateFlow<List<String>>(emptyList())
     val composingUsers: StateFlow<List<String>> = _composingUsers.asStateFlow()
     
@@ -327,19 +335,26 @@ class ChatRoomViewModel(
                 android.util.Log.e("ChatRoomViewModel", "Failed to send message - sendMessage returned null")
                 // Mark the optimistic row as send-failed so the bubble switches
                 // immediately to the "Sending failed. Tap to retry or delete."
-                // state without waiting for the 6 s pending-timeout.
-                MessageStore.updateMessage(
-                    room.jid,
-                    optimisticMessage.copy(pending = false, sendFailed = true)
-                )
-                ChatEventDispatcher.emit(
-                    ChatEvent.MessageFailed(
-                        roomJid = room.jid,
-                        messageType = MessageType.TEXT,
-                        text = finalText,
-                        error = IllegalStateException("sendMessage returned null")
+                // state without waiting for the 6 s pending-timeout. Use the
+                // downgrade-safe helper so we don't clobber a row that the
+                // server echo already confirmed during this round-trip — the
+                // spec forbids `sent → error` transitions on stale signals.
+                val flipped = MessageStore.markSendFailedIfStillPending(room.jid, messageId)
+                if (flipped) {
+                    ChatEventDispatcher.emit(
+                        ChatEvent.MessageFailed(
+                            roomJid = room.jid,
+                            messageType = MessageType.TEXT,
+                            text = finalText,
+                            error = IllegalStateException("sendMessage returned null")
+                        )
                     )
-                )
+                } else {
+                    android.util.Log.d(
+                        "ChatRoomViewModel",
+                        "Discarded stale send-null for $messageId — server already echoed it"
+                    )
+                }
             }
         }
     }
@@ -906,14 +921,14 @@ class ChatRoomViewModel(
                                 null
                             }
                             if (sentId == null) {
-                                val existing = MessageStore.getMessagesForRoom(room.jid)
-                                    .firstOrNull { it.id == pendingCaptionId }
-                                if (existing != null) {
-                                    MessageStore.updateMessage(
-                                        room.jid,
-                                        existing.copy(pending = false, sendFailed = true)
-                                    )
-                                }
+                                // Downgrade-safe flip — if the server already
+                                // echoed this caption while we were awaiting
+                                // `sendMessage`, the helper returns false and
+                                // we leave the row in its confirmed state.
+                                MessageStore.markSendFailedIfStillPending(
+                                    room.jid,
+                                    pendingCaptionId
+                                )
                             }
                         }
                     }
@@ -1121,23 +1136,65 @@ class ChatRoomViewModel(
     }
 
     /**
-     * Port of web's `scheduleAckCatchup` — useSendMessage.tsx L205-236.
-     * After a send, aggressively polls MAM (presence + 20-message fetch) until
-     * either the message transitions out of `pending` state or 5 seconds elapse.
-     *   Initial delay: 150 ms
-     *   Poll interval: 700 ms
-     *   Window:        5000 ms (≈ 7 polls)
+     * Coalesced port of web's `scheduleAckCatchup` — useSendMessage.tsx L205-236.
      *
-     * Web's final safety net (forcibly clearing `pending`) is handled for us by
-     * `MessageStore.schedulePendingTimeout` which fires at 6 s regardless of
-     * ViewModel lifecycle.
+     * After a send, polls MAM (presence + 20-message fetch) until either every
+     * pending row in the room transitions out of `pending` state or the
+     * deadline elapses. Each call to this function extends the deadline by
+     * 5 s but does NOT launch a new polling coroutine if one is already
+     * running for this room — the existing loop simply observes the new
+     * deadline on its next iteration.
+     *
+     * Why coalesce: spam-send (the user firing 20+ messages in a few seconds)
+     * previously launched 20 concurrent polling coroutines, each doing its
+     * own presence + 20-message MAM fetch every 700 ms. That hammered the
+     * server, churned the message store CoW, and provided no benefit over a
+     * single shared loop because every poll fetches the same newest page.
+     *
+     * Web's final safety net (forcibly clearing `pending`) is handled for us
+     * by `MessageStore.schedulePendingTimeout` which fires at 6 s regardless
+     * of ViewModel lifecycle.
      */
-    private fun schedulePendingFallback(messageId: String) {
-        viewModelScope.launch {
-            kotlinx.coroutines.delay(150)
-            val started = System.currentTimeMillis()
-            while (System.currentTimeMillis() - started < 5_000) {
-                if (!isStillPending(messageId)) return@launch
+    private fun schedulePendingFallback(@Suppress("UNUSED_PARAMETER") messageId: String) {
+        // 30 s catchup window — matches `MessageStore.schedulePendingTimeout`'s
+        // default so the polling stays alive until the same moment the
+        // optimistic row would be flipped to `sendFailed`. The previous 5 s
+        // window left a 25 s gap between "polling stops" and "timeout fires"
+        // during which a slow server echo could only be reconciled by a
+        // separate user-driven trigger (another send, room re-entry). Field
+        // reports of "message flashes failed, then becomes sent ~15 s later"
+        // map directly to that gap.
+        val newDeadline = System.currentTimeMillis() + 30_000L
+        synchronized(ackCatchupLock) {
+            if (newDeadline > ackCatchupDeadline) {
+                ackCatchupDeadline = newDeadline
+            }
+            if (ackCatchupJob?.isActive == true) {
+                // Existing loop will pick up the extended deadline on its next
+                // iteration. No need for a parallel coroutine.
+                return
+            }
+            ackCatchupJob = viewModelScope.launch { runAckCatchupLoop() }
+        }
+    }
+
+    /**
+     * Pollster body for [schedulePendingFallback]. Runs at most one instance
+     * per room. Exits when either the room has no more pending messages or
+     * the deadline (shared, extensible) has elapsed. The trailing
+     * synchronized re-check guards against the race where a new send extends
+     * the deadline AFTER the inner loop has broken but BEFORE we mark the
+     * job inactive — without it, the new send would see `isActive == true`,
+     * skip launching, and its pending row would have no poll cover.
+     */
+    private suspend fun runAckCatchupLoop() {
+        kotlinx.coroutines.delay(150)
+        outer@ while (true) {
+            while (true) {
+                val due = ackCatchupDeadline
+                if (System.currentTimeMillis() >= due) break
+                if (!hasPendingMessagesInRoom()) break
+
                 val client = xmppClient
                 if (client != null && client.isFullyConnected()) {
                     try {
@@ -1153,16 +1210,21 @@ class ChatRoomViewModel(
                         android.util.Log.w("ChatRoomViewModel", "ackCatchup poll failed", e)
                     }
                 }
-                if (!isStillPending(messageId)) return@launch
+                if (!hasPendingMessagesInRoom()) break
                 kotlinx.coroutines.delay(700)
             }
+            // Re-check inside the lock — if a send between our break and now
+            // extended the deadline AND added a pending row, restart the
+            // inner loop instead of letting the gap drop the new bubble.
+            val cont = synchronized(ackCatchupLock) {
+                ackCatchupDeadline > System.currentTimeMillis() && hasPendingMessagesInRoom()
+            }
+            if (!cont) return
         }
     }
 
-    private fun isStillPending(messageId: String): Boolean {
-        return MessageStore.getMessagesForRoom(room.jid)
-            .any { it.id == messageId && it.pending == true }
-    }
+    private fun hasPendingMessagesInRoom(): Boolean =
+        MessageStore.getMessagesForRoom(room.jid).any { it.pending == true }
 
     companion object {
         // Room-keyed "last fast-ack" timestamps — shared across ViewModel

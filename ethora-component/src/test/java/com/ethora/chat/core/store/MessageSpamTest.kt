@@ -253,6 +253,198 @@ class MessageSpamTest {
     }
 
     @Test
+    fun `addMessages clears pending row via xmppId match before the pending timeout fires`() {
+        // Real-world scenario from the bug report:
+        // ChatRoomViewModel.schedulePendingFallback polls MAM every 700 ms for
+        // 5 s after a send, feeding results into the bulk `addMessages` path.
+        // If the bulk path's id-match branch only handled sendFailed rows,
+        // a still-pending row could never be reconciled by the catchup poll —
+        // it had to wait for the 6 s timeout to flip it to sendFailed, after
+        // which the NEXT echo would finally clear it. When that next echo
+        // never came (e.g. it was the last send), the bubble stuck in error
+        // forever even though the server had the message.
+        val optId = "opt-mid-flight"
+        MessageStore.addMessage(room, optimistic(optId, "mid-flight body"))
+
+        // Sanity: row is still pending and not yet failed.
+        val before = MessageStore.getMessagesForRoom(room).single()
+        assertTrue("precondition: row must be pending", before.pending == true)
+        assertNull("precondition: row must not be sendFailed yet", before.sendFailed)
+
+        // MAM catchup arrives BEFORE the 6 s timer — server echo with a
+        // different archive id but the same `xmppId` (= our customId).
+        MessageStore.addMessages(room, listOf(echo(optId, "mid-flight body")))
+
+        val rows = MessageStore.getMessagesForRoom(room)
+        assertEquals("addMessages must not append a duplicate", 1, rows.size)
+        val row = rows.single()
+        assertFalse(
+            "pending must clear once the echo arrives, even via the bulk path",
+            row.pending == true
+        )
+        assertNull("sendFailed must remain null for a successful send", row.sendFailed)
+        // The merge preserves the local optimistic id so any UI ref by id
+        // continues to resolve (same contract as the singular addMessage merge).
+        assertEquals(optId, row.id)
+    }
+
+    @Test
+    fun `markSendFailedIfStillPending will not downgrade a confirmed row`() {
+        // Spec rule: "If message is already sent/delivered/read: do nothing.
+        //             A delayed timeout must never override a successful send
+        //             confirmation."
+        // Concretely: ChatRoomViewModel.sendMessage flips the row to sendFailed
+        // when the WebSocket send returns null. If the server echo already
+        // arrived in the (tiny) window between transmit and the rejection
+        // signal, the local optimistic row is already pending=false /
+        // sendFailed=null. Re-flagging it as failed would be a wrong
+        // sent → error transition.
+        val optId = "opt-fast-echo-then-null"
+        MessageStore.addMessage(room, optimistic(optId, "fast"))
+        MessageStore.addMessage(room, echo(optId, "fast")) // server confirms
+
+        val confirmed = MessageStore.getMessagesForRoom(room).single()
+        assertNull(confirmed.sendFailed)
+        assertFalse(confirmed.pending == true)
+
+        // Now the late "send returned null" path fires.
+        val flipped = MessageStore.markSendFailedIfStillPending(room, optId)
+        assertFalse(
+            "downgrade guard: must NOT mark a confirmed row as sendFailed",
+            flipped
+        )
+
+        val after = MessageStore.getMessagesForRoom(room).single()
+        assertNull("confirmed row must remain confirmed", after.sendFailed)
+        assertFalse("confirmed row must remain non-pending", after.pending == true)
+    }
+
+    @Test
+    fun `markSendFailedIfStillPending flips a still-pending row`() {
+        // The happy path: WS send returns null while the row is still pending
+        // (server never accepted the stanza). The helper flips pending→failed
+        // and the bubble switches to "Sending failed" without waiting for the
+        // 6 s timeout.
+        val optId = "opt-true-failure"
+        MessageStore.addMessage(room, optimistic(optId, "doomed"))
+
+        val flipped = MessageStore.markSendFailedIfStillPending(room, optId)
+        assertTrue("pending row must be flipped to sendFailed", flipped)
+
+        val after = MessageStore.getMessagesForRoom(room).single()
+        assertTrue("row is now in failed state", after.sendFailed == true)
+        assertFalse("pending must be cleared by the flip", after.pending == true)
+    }
+
+    @Test
+    fun `findMatchingPending pairs duplicate-body echoes oldest-first`() {
+        // Under spam — N pending optimistic rows with the same body (the
+        // user types "q" 5 times quickly) — the content-match fallback in
+        // `findMatchingPending` must walk the list in timestamp order so
+        // each incoming echo lands on the OLDEST still-in-flight row. If
+        // the order isn't stable, two pending bodies could resolve to the
+        // same row (one stays pending forever) or out-of-order resolutions
+        // could leave a row with a stale optimistic timestamp.
+        //
+        // Test path: simulate id-correlation failing (echo has neither the
+        // optimistic id nor the optimistic xmppId) so the bulk addMessages
+        // path must use the content fallback. Verify all rows are reconciled
+        // and no duplicates appear.
+        //
+        // Important: `findMatchingPending` enforces a 60 s recency window
+        // (`now - existing.date.time <= 60_000`), so we anchor every
+        // timestamp to NOW − a few seconds rather than the unix epoch.
+        val now = System.currentTimeMillis()
+        val n = 5
+        val pendings = (1..n).map { i ->
+            optimistic("opt-$i", "q").copy(
+                timestamp = now - 5_000L + i,
+                date = Date(now - 5_000L + i)
+            )
+        }
+        pendings.forEach { MessageStore.addMessage(room, it) }
+        assertEquals(n, MessageStore.getMessagesForRoom(room).count { it.pending == true })
+
+        // Echoes have server-side ids that do NOT match any local id/xmppId,
+        // forcing content fallback. Send them out of order on purpose.
+        fun srvEcho(id: String, offsetMs: Long) = Message(
+            id = id,
+            user = User(id = "sender-1", firstName = "Spammer"),
+            date = Date(now - offsetMs),
+            body = "q",
+            roomJid = room,
+            pending = false,
+            xmppId = id,
+            timestamp = now - offsetMs
+        )
+        val echoBodies = listOf(
+            srvEcho("srv-c", 2_500L),
+            srvEcho("srv-a", 2_700L),
+            srvEcho("srv-e", 2_300L),
+            srvEcho("srv-b", 2_600L),
+            srvEcho("srv-d", 2_400L)
+        )
+        MessageStore.addMessages(room, echoBodies)
+
+        val resolved = MessageStore.getMessagesForRoom(room)
+        assertEquals(
+            "content fallback under spam must produce exactly one row per send",
+            n, resolved.size
+        )
+        assertTrue(
+            "no row stays pending when echoes match by body",
+            resolved.none { it.pending == true }
+        )
+        assertTrue(
+            "no row is flagged sendFailed after a successful body-match reconciliation",
+            resolved.none { it.sendFailed == true }
+        )
+        // The optimistic ids are preserved (the merge keeps existing.id),
+        // so a UI ref by id (e.g. someone tapped Retry on opt-3 before the
+        // echo arrived) still resolves to the same row.
+        val resolvedIds = resolved.map { it.id }.toSet()
+        assertEquals(setOf("opt-1", "opt-2", "opt-3", "opt-4", "opt-5"), resolvedIds)
+    }
+
+    @Test
+    fun `clearMessagesForRoom drops pending-timeout dedup entries for that room`() {
+        // After a room is cleared (logout, leave, programmatic reset), the
+        // `pendingTimeoutScheduled` dedup set must drop its entries for
+        // that room so a subsequent send re-using the same message id can
+        // arm a fresh timeout. Without the cleanup, the set leaked across
+        // sessions and could refuse to re-arm a timer — letting a row sit
+        // in `pending` indefinitely after a logout/login cycle.
+        val optId = "opt-leaked"
+        MessageStore.addMessage(room, optimistic(optId, "before clear"))
+        assertEquals(1, MessageStore.getMessagesForRoom(room).size)
+
+        MessageStore.clearMessagesForRoom(room)
+        assertEquals(0, MessageStore.getMessagesForRoom(room).size)
+
+        // Adding the same optimistic id post-clear must take a fresh path
+        // (no "duplicate" skip from the timeout-scheduled set).
+        MessageStore.addMessage(room, optimistic(optId, "after clear"))
+        val rows = MessageStore.getMessagesForRoom(room)
+        assertEquals("a re-used id must be acceptable after clearMessagesForRoom", 1, rows.size)
+        assertTrue(
+            "freshly re-added optimistic row must still be pending so the timer can fire",
+            rows.single().pending == true
+        )
+    }
+
+    @Test
+    fun `clear drops pending-timeout dedup entries entirely`() {
+        // Same contract as the per-room variant but at the whole-store
+        // level (used on logout / fresh-login).
+        MessageStore.addMessage(room, optimistic("opt-x", "body"))
+        MessageStore.clear()
+        // Re-using the id post-clear must be accepted.
+        MessageStore.addMessage(room, optimistic("opt-x", "second life"))
+        assertEquals(1, MessageStore.getMessagesForRoom(room).size)
+        assertTrue(MessageStore.getMessagesForRoom(room).single().pending == true)
+    }
+
+    @Test
     fun `pending message with no echo eventually flips to sendFailed via timeout`() {
         // Inverse guard: the spam-recovery path must NOT accidentally
         // disable the genuine timeout. If a message truly never

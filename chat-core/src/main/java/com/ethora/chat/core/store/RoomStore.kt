@@ -448,8 +448,21 @@ object RoomStore {
      *     immediately and the per-room dot never appeared on first app open.
      *   • Non-active + lastViewed > 0 → count countable messages whose
      *     timestamp > lastViewed.
-     * "Countable" excludes: delimiter-new, pending, system, and messages from
-     * the current user.
+     *
+     * "Countable" excludes:
+     *   - the synthetic "New Messages" delimiter row
+     *   - system messages
+     *   - deleted-tombstone rows
+     *   - any own-user message in ANY in-flight or terminal-failure state
+     *     (`pending`, `sendFailed`) AND any echoed own message — own
+     *     messages must NEVER count as unread regardless of status.
+     *
+     * The own-message check goes through the multi-field `isOwnMessage`
+     * helper. Previous code compared only `msg.user.id.substringBefore("@")`
+     * to the current user's `xmppUsername.substringBefore("@")`. That fails
+     * for optimistic / send-failed rows because they carry `user = currentUser`
+     * (so `user.id` is the Ethora user id, not the XMPP local part) — those
+     * own-user failures were leaking into the unread counter.
      */
     fun updateUnreadCount(roomJid: String, messages: List<com.ethora.chat.core.models.Message>) {
         val room = getRoomByJid(roomJid) ?: return
@@ -463,19 +476,23 @@ object RoomStore {
             return
         }
 
-        val currentUserXmppUsername = UserStore.currentUser.value?.xmppUsername
-        val userLocal = currentUserXmppUsername?.substringBefore("@")?.takeIf { it.isNotBlank() }
+        val currentUser = UserStore.currentUser.value
         val lastViewed = room.lastViewedTimestamp ?: 0L
 
         val countable = messages.count { msg ->
             if (msg.id == "delimiter-new") return@count false
             if (msg.pending == true) return@count false
+            if (msg.sendFailed == true) return@count false
+            if (msg.isDeleted == true) return@count false
             if (msg.isSystemMessage == "true") return@count false
 
-            // Skip own messages (web: toLocal(msg.user.id) === toLocal(currentXmppUsername))
-            val msgLocal = msg.user.id.substringBefore("@").takeIf { it.isNotBlank() }
-            if (userLocal != null && msgLocal != null &&
-                msgLocal.equals(userLocal, ignoreCase = true)) return@count false
+            // Skip every flavour of "this is from me" — the helper checks
+            // user.id, user.xmppUsername, user.userJID, xmppFrom against the
+            // current user's id / xmppUsername / userJID / username. Covers
+            // the mismatch between optimistic rows (user.id = Ethora id) and
+            // server echoes (user.id = XMPP local part) that the old single-
+            // field check would miss.
+            if (isOwnMessage(msg, currentUser)) return@count false
 
             val ts = msg.timestamp ?: msg.date.time
             if (ts <= 0) return@count false
