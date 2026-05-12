@@ -14,9 +14,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -70,6 +73,49 @@ fun MessageBubble(
     var bubbleCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var surfaceCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
 
+    // Press-feedback scale. While the finger is down on this bubble, scale
+    // up slightly so the user can tell *which* bubble they're holding —
+    // resolves the "context menu opens for the wrong message" feel when
+    // bubbles are stacked tightly. Spring keeps it cheap and natural.
+    var isPressed by remember { mutableStateOf(false) }
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 1.04f else 1f,
+        animationSpec = spring(dampingRatio = 0.6f, stiffness = 400f),
+        label = "bubble-press-scale"
+    )
+
+    // Long-press dispatcher. The Row's `pointerInput` calls this with the
+    // real finger offset; child composables (e.g. the text body) that have
+    // their own gesture detectors and would otherwise swallow long-press
+    // can call this with `tapOffset = null` to use the bubble centre as
+    // the synthetic origin. Either way, the menu lands at sensible
+    // coordinates because the bounds come from `surfaceCoordinates`.
+    val triggerLongPress: (tapOffset: Offset?) -> Unit = trigger@{ tapOffset ->
+        val handler = onLongPress ?: return@trigger
+        val rowCoords = rowCoordinates
+        val coordsForBounds = surfaceCoordinates ?: bubbleCoordinates ?: rowCoords
+        if (coordsForBounds != null) {
+            val topLeft = coordsForBounds.localToRoot(Offset(0f, 0f))
+            val bottomRight = coordsForBounds.localToRoot(
+                Offset(coordsForBounds.size.width.toFloat(), coordsForBounds.size.height.toFloat())
+            )
+            val tapRoot = if (tapOffset != null && rowCoords != null) {
+                rowCoords.localToRoot(tapOffset)
+            } else {
+                Offset((topLeft.x + bottomRight.x) / 2f, (topLeft.y + bottomRight.y) / 2f)
+            }
+            handler.invoke(
+                tapRoot.x, tapRoot.y,
+                topLeft.x, topLeft.y, bottomRight.x, bottomRight.y
+            )
+        } else if (tapOffset != null) {
+            handler.invoke(
+                tapOffset.x, tapOffset.y,
+                tapOffset.x, tapOffset.y, tapOffset.x, tapOffset.y
+            )
+        }
+    }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -82,6 +128,10 @@ fun MessageBubble(
             // clipboard after an edit.
             .pointerInput(message.id, message.body) {
                 detectTapGestures(
+                    onPress = {
+                        isPressed = true
+                        try { tryAwaitRelease() } finally { isPressed = false }
+                    },
                     onTap = { offset ->
                         if (sendFailed && onFailedClick != null) {
                             val rowCoords = rowCoordinates
@@ -97,21 +147,7 @@ fun MessageBubble(
                             }
                         }
                     },
-                    onLongPress = { offset ->
-                        val rowCoords = rowCoordinates
-                        val coordsForBounds = surfaceCoordinates ?: bubbleCoordinates ?: rowCoords
-                        if (coordsForBounds != null) {
-                            val tapRoot = (rowCoords ?: coordsForBounds).localToRoot(Offset(offset.x, offset.y))
-                            val topLeft = coordsForBounds.localToRoot(Offset(0f, 0f))
-                            val bottomRight = coordsForBounds.localToRoot(Offset(coordsForBounds.size.width.toFloat(), coordsForBounds.size.height.toFloat()))
-                            onLongPress?.invoke(
-                                tapRoot.x, tapRoot.y,
-                                topLeft.x, topLeft.y, bottomRight.x, bottomRight.y
-                            )
-                        } else {
-                            onLongPress?.invoke(offset.x, offset.y, offset.x, offset.y, offset.x, offset.y)
-                        }
-                    }
+                    onLongPress = { offset -> triggerLongPress(offset) }
                 )
             },
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
@@ -155,6 +191,7 @@ fun MessageBubble(
             
             Surface(
                 modifier = Modifier
+                    .scale(pressScale)
                     .clip(
                         RoundedCornerShape(
                             topStart = 20.dp,
@@ -270,7 +307,9 @@ fun MessageBubble(
                                         MaterialTheme.colorScheme.onPrimary
                                     else
                                         MaterialTheme.colorScheme.onSurfaceVariant,
-                                    lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4
+                                    lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4,
+                                    onLongPress = { triggerLongPress(null) },
+                                    onPressChange = { isPressed = it }
                                 )
                                 val firstUrl = remember(message.body) { extractFirstUrl(message.body) }
                                 if (!firstUrl.isNullOrBlank()) {
@@ -479,34 +518,56 @@ fun UserAvatar(
 }
 
 /**
- * Formatted message text with Markdown and autolink support
+ * Formatted message text with Markdown and autolink support.
+ *
+ * Uses plain `Text` + a single `pointerInput` (instead of `ClickableText`)
+ * so that long-press anywhere on the bubble's text reaches the bubble-level
+ * long-press handler. `ClickableText` registers a `detectTapGestures` block
+ * even when only `onTap` is provided, which consumes the full press-and-
+ * hold lifecycle and prevents the parent Row's detector from firing — the
+ * symptom users reported as "context menu only opens when I long-press the
+ * timestamp or the padding, not the text itself."
  */
 @Composable
 private fun FormattedMessageText(
     text: String,
     modifier: Modifier = Modifier,
     textColor: androidx.compose.ui.graphics.Color,
-    lineHeight: androidx.compose.ui.unit.TextUnit
+    lineHeight: androidx.compose.ui.unit.TextUnit,
+    onLongPress: (() -> Unit)? = null,
+    onPressChange: ((Boolean) -> Unit)? = null
 ) {
     val uriHandler = LocalUriHandler.current
     val annotatedText = remember(text) {
         buildFormattedText(text, textColor)
     }
+    var layoutResult by remember { mutableStateOf<androidx.compose.ui.text.TextLayoutResult?>(null) }
 
-    ClickableText(
+    Text(
         text = annotatedText,
-        modifier = modifier,
+        modifier = modifier.pointerInput(annotatedText, onLongPress, onPressChange) {
+            detectTapGestures(
+                onPress = {
+                    onPressChange?.invoke(true)
+                    try { tryAwaitRelease() } finally { onPressChange?.invoke(false) }
+                },
+                onLongPress = { onLongPress?.invoke() },
+                onTap = { tapOffset ->
+                    val layout = layoutResult ?: return@detectTapGestures
+                    val charOffset = layout.getOffsetForPosition(tapOffset)
+                    annotatedText.getStringAnnotations(tag = "URL", start = charOffset, end = charOffset)
+                        .firstOrNull()
+                        ?.let { annotation ->
+                            runCatching { uriHandler.openUri(annotation.item) }
+                        }
+                }
+            )
+        },
         style = MaterialTheme.typography.bodyMedium.copy(
             lineHeight = lineHeight,
             color = textColor
         ),
-        onClick = { offset ->
-            annotatedText.getStringAnnotations(tag = "URL", start = offset, end = offset)
-                .firstOrNull()
-                ?.let { annotation ->
-                    runCatching { uriHandler.openUri(annotation.item) }
-                }
-        }
+        onTextLayout = { layoutResult = it }
     )
 }
 

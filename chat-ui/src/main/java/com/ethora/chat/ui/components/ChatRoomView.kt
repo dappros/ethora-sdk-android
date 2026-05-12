@@ -333,6 +333,11 @@ fun ChatRoomView(
             }
         }
         lastMessageCount = messages.size
+        // Advance the tail anchor — otherwise `previousTailId` stays at the
+        // first-load tail forever, every later emission re-counts the same
+        // gap and `unreadCount` accumulates as 1+2+3+… → "99+" badge after
+        // ~14 messages. The badge has to count strictly NEW arrivals.
+        lastTailId = newTailId
     }
 
     // ---- Scroll after the user sends a message — ALWAYS ----
