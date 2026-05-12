@@ -4,6 +4,26 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.05.12] — JitPack `v1.0.36`
+
+- **Fixed:** MUC room joins now succeed against stricter ejabberd `mod_muc` configs that enforce `nickname == bare-jid-localpart`. `resolveOccupantNick()` no longer appends the device resource suffix (`-android-<id>`) to the user's xmppUsername when constructing the join presence — that was the Android outlier vs web/iOS and caused every `presenceInRoom` to come back `<forbidden><text>wrong nickname</text></forbidden>` on self-hosted deployments, leaving rooms "authenticated but never joined" with messages stuck `pending`. Multi-device disambiguation is unaffected (the full JID's resource still carries the device suffix).
+- **Fixed:** Rapid-fire ("spam") sends now land in submission order and every stanza in a burst reaches the server. `MessageStore` reconciliation tracks server-assigned XEP-0359 `<stanza-id>` separately from the client-generated send id, so an edit issued immediately after a burst targets the right bubble instead of failing with `Message <id> not found in <jid> to edit`.
+- **Fixed:** Editing a message after a back-to-back send burst replaces the original bubble in place — siblings stay intact and no stale "Sending failed" bubble lingers when the late server echo arrives. Edit/delete now resolves the correct message even when the user-issued id and the server archive id differ.
+- **Fixed:** The "scroll to bottom" FAB unread badge stays consistent when re-entering a room: `lastViewedTimestamp` is zeroed and the unread counter recomputes once per room open, not on every recomposition.
+- **Fixed:** Chat scroll-view no longer jumps under the input row when the IME opens during a long transcript; the active-message highlight no longer flickers when the FAB is tapped.
+- **New:** `Message.archiveId: String?` — exposes the server-assigned XEP-0359 stanza-id captured from the realtime echo / MAM result. Populated by `parseAndHandleRealtimeMessage` and `parseMAMResult`; preserved through `MessageStore.reconcile` via `.copy()`. Defaults to `null`, so existing call sites compile unchanged.
+- **New:** `Room.unreadBaselineTimestamp: Long?` — frozen baseline used by `RoomStore.computeUnreadForRoom` when the room has never been opened on this device but the server reported a cross-device "last read at" marker. Brings unread-counter parity with `@ethora/chat-component@26.3.20`. Defaults to `null`; safe additive change.
+- **Improved:** `LogsView` shows richer diagnostic context (per-room stanza counts, last reconcile reason) when debugging unread / send / edit issues against a live server.
+- **Tests:** Added `MessageSpamTest` (5-send burst ordering), `MessageStoreReconciliationTest` (echo-vs-client-id reconcile), `UnreadRecomputeTest` (baseline + view-side reset), and `XmppXmlUtilsTest` (XEP-0359 stanza-id extraction); expanded `MessageBubbleTest` for edit/delete affordances.
+
+---
+
+## [26.05.11] — JitPack `v1.0.35`
+
+- **Build:** `:sample-chat-app` removed from the root `settings.gradle.kts`. This build is the SDK only (`chat-core` + `chat-ui` source sets collected under `:ethora-component`); the sample app is now a fully self-contained Gradle build under `sample-chat-app/` with its own wrapper. JitPack consumers see no change — the published artifact is still `com.github.dappros:ethora-sdk-android:vX.Y.Z`. Note: `v1.0.36` is a no-source-change retag of the same commit, published only to retrigger the JitPack build.
+
+---
+
 ## [26.05.11] — JitPack `v1.0.34`
 
 - **Fixed:** Room-history pagination is more resilient. `ChatRoomViewModel.loadMoreMessages(...)` now reconnects before requesting older MAM pages, promotes the room history cursor, and no longer treats a transient empty page as end-of-history until `Room.historyComplete == true`.
