@@ -267,20 +267,37 @@ object MessageStore {
                 // asked to echo it. Missing ANY of these (isMediafile/originalName/
                 // body) causes the UI to render the message as plain text because
                 // MessageBubble gates on `isMediafile == "true"`.
-                val updatedMessage = message.copy(
-                    id = existingMessage.id, // Keep original optimistic ID
-                    pending = false,
-                    sendFailed = null, // Echo arrived — clear any prior failure flag.
-                    body = if (message.body.isNotBlank()) message.body else existingMessage.body,
-                    isMediafile = message.isMediafile ?: existingMessage.isMediafile,
-                    location = message.location?.takeIf { it.isNotBlank() } ?: existingMessage.location,
-                    locationPreview = message.locationPreview?.takeIf { it.isNotBlank() } ?: existingMessage.locationPreview,
-                    fileName = message.fileName ?: existingMessage.fileName,
-                    mimetype = message.mimetype ?: existingMessage.mimetype,
-                    originalName = message.originalName ?: existingMessage.originalName,
-                    size = message.size ?: existingMessage.size,
-                    waveForm = message.waveForm ?: existingMessage.waveForm
-                )
+                //
+                // BUT: if the user deleted the row locally while it was still
+                // pending (markMessageAsDeleted set isDeleted=true + replaced
+                // body with the tombstone string), the echo must NOT re-add
+                // the original body/media. Preserve the deletion state and
+                // skip the per-field overwrite. Without this guard the echo
+                // arrives, the merge takes incoming.body (= original text)
+                // and resets isDeleted, "resurrecting" the deleted message —
+                // exactly the field-reported "deletion stopped working when
+                // I delete right after sending" regression.
+                val updatedMessage = if (existingMessage.isDeleted == true) {
+                    existingMessage.copy(
+                        pending = false,
+                        sendFailed = null
+                    )
+                } else {
+                    message.copy(
+                        id = existingMessage.id, // Keep original optimistic ID
+                        pending = false,
+                        sendFailed = null, // Echo arrived — clear any prior failure flag.
+                        body = if (message.body.isNotBlank()) message.body else existingMessage.body,
+                        isMediafile = message.isMediafile ?: existingMessage.isMediafile,
+                        location = message.location?.takeIf { it.isNotBlank() } ?: existingMessage.location,
+                        locationPreview = message.locationPreview?.takeIf { it.isNotBlank() } ?: existingMessage.locationPreview,
+                        fileName = message.fileName ?: existingMessage.fileName,
+                        mimetype = message.mimetype ?: existingMessage.mimetype,
+                        originalName = message.originalName ?: existingMessage.originalName,
+                        size = message.size ?: existingMessage.size,
+                        waveForm = message.waveForm ?: existingMessage.waveForm
+                    )
+                }
                 roomMessages[existingIndex] = updatedMessage
                 android.util.Log.d("MessageStore", "✅ Updated pending message ${existingMessage.id} (matched by ID/xmppId)")
 
@@ -469,19 +486,27 @@ object MessageStore {
             // Must preserve every upload-side attribute the client already set — missing
             // any one (isMediafile in particular) causes the UI to treat the message as
             // plain text and drop the photo.
-            val updatedMessage = receivedMessage.copy(
-                id = pendingMessage.id, // Keep original optimistic ID
-                pending = false,
-                body = if (receivedMessage.body.isNotBlank()) receivedMessage.body else pendingMessage.body,
-                isMediafile = receivedMessage.isMediafile ?: pendingMessage.isMediafile,
-                location = receivedMessage.location?.takeIf { it.isNotBlank() } ?: pendingMessage.location,
-                locationPreview = receivedMessage.locationPreview?.takeIf { it.isNotBlank() } ?: pendingMessage.locationPreview,
-                fileName = receivedMessage.fileName ?: pendingMessage.fileName,
-                mimetype = receivedMessage.mimetype ?: pendingMessage.mimetype,
-                originalName = receivedMessage.originalName ?: pendingMessage.originalName,
-                size = receivedMessage.size ?: pendingMessage.size,
-                waveForm = receivedMessage.waveForm ?: pendingMessage.waveForm
-            )
+            //
+            // Delete-while-pending guard: same rationale as `addMessage` / `addMessages`.
+            // If the user already tombstoned the row locally, do NOT let the content-
+            // matched echo resurrect the body/media; just clear the in-flight flags.
+            val updatedMessage = if (pendingMessage.isDeleted == true) {
+                pendingMessage.copy(pending = false, sendFailed = null)
+            } else {
+                receivedMessage.copy(
+                    id = pendingMessage.id, // Keep original optimistic ID
+                    pending = false,
+                    body = if (receivedMessage.body.isNotBlank()) receivedMessage.body else pendingMessage.body,
+                    isMediafile = receivedMessage.isMediafile ?: pendingMessage.isMediafile,
+                    location = receivedMessage.location?.takeIf { it.isNotBlank() } ?: pendingMessage.location,
+                    locationPreview = receivedMessage.locationPreview?.takeIf { it.isNotBlank() } ?: pendingMessage.locationPreview,
+                    fileName = receivedMessage.fileName ?: pendingMessage.fileName,
+                    mimetype = receivedMessage.mimetype ?: pendingMessage.mimetype,
+                    originalName = receivedMessage.originalName ?: pendingMessage.originalName,
+                    size = receivedMessage.size ?: pendingMessage.size,
+                    waveForm = receivedMessage.waveForm ?: pendingMessage.waveForm
+                )
+            }
             roomMessages[pendingIndex] = updatedMessage
             android.util.Log.d("MessageStore", "✅ Matched pending message ${pendingMessage.id} with received message ${receivedMessage.id} (${if (isFromCurrentUser) "current user" else "content match"})")
 
@@ -545,20 +570,28 @@ object MessageStore {
                 // Confirmed rows (pending=false, sendFailed=null) are still
                 // a no-op: we never downgrade sent → error on a late echo.
                 if (matched.pending == true || matched.sendFailed == true) {
-                    val cleared = incoming.copy(
-                        id = matched.id,
-                        pending = false,
-                        sendFailed = null,
-                        body = if (incoming.body.isNotBlank()) incoming.body else matched.body,
-                        isMediafile = incoming.isMediafile ?: matched.isMediafile,
-                        location = incoming.location?.takeIf { it.isNotBlank() } ?: matched.location,
-                        locationPreview = incoming.locationPreview?.takeIf { it.isNotBlank() } ?: matched.locationPreview,
-                        fileName = incoming.fileName ?: matched.fileName,
-                        mimetype = incoming.mimetype ?: matched.mimetype,
-                        originalName = incoming.originalName ?: matched.originalName,
-                        size = incoming.size ?: matched.size,
-                        waveForm = incoming.waveForm ?: matched.waveForm
-                    )
+                    // Same delete-while-pending guard as `addMessage` (see the
+                    // big comment there). If the user already marked the row
+                    // deleted locally, just clear the in-flight flags — do
+                    // NOT re-introduce the original body/media from the echo.
+                    val cleared = if (matched.isDeleted == true) {
+                        matched.copy(pending = false, sendFailed = null)
+                    } else {
+                        incoming.copy(
+                            id = matched.id,
+                            pending = false,
+                            sendFailed = null,
+                            body = if (incoming.body.isNotBlank()) incoming.body else matched.body,
+                            isMediafile = incoming.isMediafile ?: matched.isMediafile,
+                            location = incoming.location?.takeIf { it.isNotBlank() } ?: matched.location,
+                            locationPreview = incoming.locationPreview?.takeIf { it.isNotBlank() } ?: matched.locationPreview,
+                            fileName = incoming.fileName ?: matched.fileName,
+                            mimetype = incoming.mimetype ?: matched.mimetype,
+                            originalName = incoming.originalName ?: matched.originalName,
+                            size = incoming.size ?: matched.size,
+                            waveForm = incoming.waveForm ?: matched.waveForm
+                        )
+                    }
                     roomMessages[matchIdx] = cleared
                     pendingResolved.add(cleared)
                 }
@@ -574,20 +607,25 @@ object MessageStore {
             val pendingIdx = findMatchingPending(roomMessages, incoming)
             if (pendingIdx >= 0) {
                 val pending = roomMessages[pendingIdx]
-                val merged = incoming.copy(
-                    id = pending.id, // keep original optimistic ID for any callers that held onto it
-                    pending = false,
-                    sendFailed = null,
-                    body = if (incoming.body.isNotBlank()) incoming.body else pending.body,
-                    isMediafile = incoming.isMediafile ?: pending.isMediafile,
-                    location = incoming.location?.takeIf { it.isNotBlank() } ?: pending.location,
-                    locationPreview = incoming.locationPreview?.takeIf { it.isNotBlank() } ?: pending.locationPreview,
-                    fileName = incoming.fileName ?: pending.fileName,
-                    mimetype = incoming.mimetype ?: pending.mimetype,
-                    originalName = incoming.originalName ?: pending.originalName,
-                    size = incoming.size ?: pending.size,
-                    waveForm = incoming.waveForm ?: pending.waveForm
-                )
+                // Same delete-while-pending guard as the id-match branch.
+                val merged = if (pending.isDeleted == true) {
+                    pending.copy(pending = false, sendFailed = null)
+                } else {
+                    incoming.copy(
+                        id = pending.id, // keep original optimistic ID for any callers that held onto it
+                        pending = false,
+                        sendFailed = null,
+                        body = if (incoming.body.isNotBlank()) incoming.body else pending.body,
+                        isMediafile = incoming.isMediafile ?: pending.isMediafile,
+                        location = incoming.location?.takeIf { it.isNotBlank() } ?: pending.location,
+                        locationPreview = incoming.locationPreview?.takeIf { it.isNotBlank() } ?: pending.locationPreview,
+                        fileName = incoming.fileName ?: pending.fileName,
+                        mimetype = incoming.mimetype ?: pending.mimetype,
+                        originalName = incoming.originalName ?: pending.originalName,
+                        size = incoming.size ?: pending.size,
+                        waveForm = incoming.waveForm ?: pending.waveForm
+                    )
+                }
                 roomMessages[pendingIdx] = merged
                 pendingResolved.add(merged)
             } else {

@@ -1291,10 +1291,42 @@ class ChatRoomViewModel(
     /**
      * Delete message.
      *
-     * - Queued media (never sent): drop from queue + remove locally.
-     * - Pending or send-failed (never reached server): remove locally only —
-     *   no XMPP delete because the server has nothing to delete.
-     * - Otherwise: optimistic mark-as-deleted, then send the XMPP delete.
+     * Field reports: "deletion stopped working when I delete right after
+     * sending / when I send media+caption / just delete in general". Root
+     * cause: the previous branch for pending/sendFailed rows used
+     * `removeMessage` (wipes the row entirely) and did NOT send the XMPP
+     * `<delete/>` stanza. The race was:
+     *
+     *   1. Send "hello"  → optimistic row {id=X, pending=true}
+     *   2. Delete         → removeMessage wipes the row, no delete stanza sent
+     *   3. Server echoes the original send
+     *   4. addMessage finds no local row to merge → adds it as a NEW row
+     *   5. The "deleted" message reappears
+     *
+     * Worse, the server still holds the message — peers see it un-deleted.
+     *
+     * Old code only papered over this because the pending window was 6 s,
+     * so step 2 had to happen in a sliver. Extending the pending window to
+     * 30 s for slow networks turned the same race into a routine bug.
+     *
+     * New behaviour:
+     *   • Queued-media row where the file has NOT been uploaded yet
+     *     (server has no idea this message exists): keep the old fast path
+     *     — drop the queue entry, remove locally, done.
+     *   • Queued caption (media still queued, caption send hasn't fired):
+     *     null the caption fields on the queue entry so the caption never
+     *     gets transmitted; remove the optimistic caption row locally.
+     *   • Everything else, including still-pending text and send-failed:
+     *     mark-as-deleted locally (so the merge in `addMessage` doesn't
+     *     un-delete on echo) AND fire the XMPP `<delete/>` stanza. The
+     *     server processes stanzas in send order, so even if the original
+     *     send is still in-flight, the delete lands right after it and
+     *     the peers see the tombstone.
+     *
+     * Paired guard in `MessageStore.addMessage` / `addMessages`: the
+     * merge branch now preserves `isDeleted = true` on the existing
+     * optimistic row so a late echo cannot resurrect a locally-deleted
+     * message.
      */
     fun deleteMessage(messageId: String) {
         val existing = MessageStore.getMessagesForRoom(room.jid)
@@ -1305,10 +1337,21 @@ class ChatRoomViewModel(
             MessageStore.removeMessage(room.jid, messageId)
             return
         }
-        if (existing?.pending == true || existing?.sendFailed == true) {
+        // Was this id the captionMessageId of a queue entry whose media hasn't
+        // sent yet? If so, just suppress the caption — server hasn't seen it.
+        val queuedCaption = PendingMediaSendQueue.items.value
+            .firstOrNull { it.captionMessageId == messageId }
+        if (queuedCaption != null) {
+            PendingMediaSendQueue.update(queuedCaption.id) {
+                it.copy(caption = null, captionMessageId = null)
+            }
             MessageStore.removeMessage(room.jid, messageId)
             return
         }
+        // Server-side path: pending, sendFailed, or fully-confirmed — all
+        // three need the tombstone applied locally AND the XMPP delete
+        // dispatched so peers converge. The merge guard in MessageStore
+        // keeps the local deletion sticky against the in-flight echo.
         MessageStore.markMessageAsDeleted(room.jid, messageId)
         ChatEventDispatcher.emit(
             ChatEvent.MessageDeleted(

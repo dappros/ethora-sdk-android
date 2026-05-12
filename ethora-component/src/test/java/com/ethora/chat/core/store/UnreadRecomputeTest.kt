@@ -31,6 +31,10 @@ class UnreadRecomputeTest {
 
     @Test
     fun `restoring current user recomputes unread counts for own messages`() {
+        // Plant a read baseline before the message lands — web's AT()
+        // returns 0 unread when there is no baseline at all, so we need a
+        // real one for the own-message exclusion to be the deciding factor.
+        RoomStore.setLastViewedTimestamp(roomJid, 500L)
         MessageStore.addMessages(
             roomJid,
             listOf(
@@ -58,6 +62,29 @@ class UnreadRecomputeTest {
     }
 
     @Test
+    fun `unread is zero when both lastViewed and baseline are zero (web parity)`() {
+        // Web `AT()` contract: `const a = r > 0 ? r : s; ... return l <= 0 || a <= 0 ? false : l > a`.
+        // No marker anywhere → 0 unread. The previous Android logic
+        // counted EVERY message as unread in this state, which made fresh
+        // rooms show wrong badge counts until the user opened them.
+        UserStore.setUser(User(id = "user-123", xmppUsername = "alice@example.com"))
+        MessageStore.addMessages(
+            roomJid,
+            listOf(
+                Message(
+                    id = "from-peer-1",
+                    user = User(id = "bob@example.com", xmppUsername = "bob@example.com"),
+                    date = Date(1_000L),
+                    body = "incoming",
+                    roomJid = roomJid,
+                    timestamp = 1_000L
+                )
+            )
+        )
+        assertEquals(0, RoomStore.getRoomByJid(roomJid)?.unreadMessages)
+    }
+
+    @Test
     fun `own optimistic row carrying Ethora user id does not count as unread`() {
         // Bug 3 scenario: ChatRoomViewModel.sendMessage creates an optimistic
         // row with `user = currentUser`, which means `user.id` is the Ethora
@@ -72,6 +99,10 @@ class UnreadRecomputeTest {
                 xmppUsername = "alice@example.com"
             )
         )
+        // Plant a baseline so the only thing that can make the unread
+        // counter drop to 0 here is the own-message exclusion (otherwise
+        // we'd be measuring the "baseline=0 → 0 unread" branch instead).
+        RoomStore.setLastViewedTimestamp(roomJid, 500L)
 
         MessageStore.addMessages(
             roomJid,
@@ -114,6 +145,7 @@ class UnreadRecomputeTest {
                 xmppUsername = "alice@example.com"
             )
         )
+        RoomStore.setLastViewedTimestamp(roomJid, 500L)
 
         MessageStore.addMessages(
             roomJid,
