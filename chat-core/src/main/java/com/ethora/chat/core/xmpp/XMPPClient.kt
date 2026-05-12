@@ -1121,7 +1121,8 @@ class XMPPClient(
                 fileName = fileName,
                 originalName = originalName,
                 size = size,
-                waveForm = waveForm
+                waveForm = waveForm,
+                archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId
             )
             
             messages.add(message)

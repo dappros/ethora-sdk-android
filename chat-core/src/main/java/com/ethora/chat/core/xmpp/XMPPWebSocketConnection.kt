@@ -899,7 +899,8 @@ class XMPPWebSocketConnection(
                 isMediafile = isMediafile,
                 originalName = originalName,
                 size = size,
-                waveForm = waveForm
+                waveForm = waveForm,
+                archiveId = archiveId?.takeIf { it.isNotBlank() }
             )
             
             // Add to MessageStore with pending reconciliation
@@ -1475,11 +1476,12 @@ class XMPPWebSocketConnection(
         }
 
         val id = "deleteMessageStanza"
-        
-        val stanza = """<message to="$fixedRoomJid" type="groupchat" id="$id">
-            |<body>wow</body>
-            |<delete id="$messageId"/>
-            |</message>""".trimMargin()
+
+        // Compact single line, NO whitespace text nodes between elements —
+        // same fix as editMessage. Ejabberd with strict XML parsing treats
+        // newlines between `<message>`, `<body>` and `<delete/>` as text-
+        // children and drops the delete silently.
+        val stanza = """<message to="$fixedRoomJid" type="groupchat" id="$id"><body>wow</body><delete id="$messageId"/></message>"""
         sendRaw(stanza)
         Log.d(TAG, "🗑️ Sent delete message to $fixedRoomJid: messageId=$messageId")
     }

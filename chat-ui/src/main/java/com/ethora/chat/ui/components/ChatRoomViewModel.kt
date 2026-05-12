@@ -1250,11 +1250,51 @@ class ChatRoomViewModel(
         )
         viewModelScope.launch {
             try {
-                xmppClient?.editMessage(room.jid, messageId, newText)
+                // If the row is still pending, its id is the optimistic UUID
+                // we generated locally — the server matches `<replace>` by
+                // its own stanza-id (which becomes `Message.id` only after
+                // the echo's reconcile). Sending now would silently no-op,
+                // which is the "edit right after send doesn't work" bug.
+                // Wait for reconcile, then use the row's CURRENT id.
+                val wireId = awaitReconciledId(messageId) ?: messageId
+                xmppClient?.editMessage(room.jid, wireId, newText)
             } catch (e: Exception) {
                 android.util.Log.e("ChatRoomViewModel", "Error editing message", e)
             }
         }
+    }
+
+    /**
+     * Wait until the row identified by [originalId] is no longer pending and
+     * return the id Ethora's server uses for `<replace>` / `<delete>`
+     * lookups — namely its XEP-0359 stanza-id (in `Message.archiveId`).
+     *
+     * The reconcile in `MessageStore` keeps `Message.id` as the local
+     * optimistic UUID for UI stability, so we can't rely on `id` for the
+     * wire. The parser fills `archiveId` from the `<stanza-id>` element of
+     * the echo / archive — that's the value the server indexes against.
+     *
+     * Looks up the row by `id` OR `xmppId` so we find it regardless of
+     * reconcile stage. Returns `null` after [timeoutMs] — callers should
+     * fall back to the original id (best effort; the server almost
+     * certainly won't match an optimistic UUID, but at least the local
+     * state is right).
+     */
+    private suspend fun awaitReconciledId(
+        originalId: String,
+        timeoutMs: Long = 5000L
+    ): String? {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            val row = MessageStore.getMessagesForRoom(room.jid).firstOrNull {
+                it.id == originalId || it.xmppId == originalId
+            }
+            if (row != null && row.pending != true) {
+                return row.archiveId?.takeIf { it.isNotBlank() } ?: row.id
+            }
+            kotlinx.coroutines.delay(50)
+        }
+        return null
     }
 
     /**
@@ -1361,7 +1401,12 @@ class ChatRoomViewModel(
         )
         viewModelScope.launch {
             try {
-                xmppClient?.deleteMessage(room.jid, messageId)
+                // Same defer-until-reconciled rationale as `editMessage` —
+                // `<delete>` is matched server-side by stanza-id, not by the
+                // optimistic UUID. Sending while still pending is a silent
+                // no-op for peers.
+                val wireId = awaitReconciledId(messageId) ?: messageId
+                xmppClient?.deleteMessage(room.jid, wireId)
             } catch (e: Exception) {
                 android.util.Log.e("ChatRoomViewModel", "Error deleting message", e)
             }
