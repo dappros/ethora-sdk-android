@@ -962,8 +962,19 @@ class XMPPWebSocketConnection(
         val base = currentUser?.xmppUsername?.substringBefore("@")
             ?: username.substringBefore("@")
         val normalizedBase = base.ifBlank { "user" }.replace("[^A-Za-z0-9._-]".toRegex(), "")
-        // Keep a per-connection suffix so the same account can join room from multiple devices.
-        return "$normalizedBase-$resource"
+        // MUC nickname is the bare xmppUsername — matches the web
+        // `presenceInRoom.xmpp.ts` shape (`to: ${roomJID}/${client.jid?.getLocal()}`).
+        // Earlier this appended `-$resource` to disambiguate multi-device
+        // joins, but stricter ejabberd `mod_muc` configs (observed on
+        // self-hosted deployments) enforce `nickname == bare-jid local
+        // part` and reject the suffixed form with
+        // <error type="auth"><forbidden/><text>wrong nickname</text></error>
+        // on every join — the symptom is no room presence + auto-resend
+        // loops keep messages stuck `pending`. Multi-device-from-same-
+        // account is supported at the XMPP layer via the full JID's
+        // resource (the device suffix in /<resource>); the MUC nickname
+        // doesn't need to carry it too.
+        return normalizedBase
     }
     
     /**
