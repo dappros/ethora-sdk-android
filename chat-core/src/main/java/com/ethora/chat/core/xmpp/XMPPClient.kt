@@ -969,11 +969,29 @@ class XMPPClient(
             }
             
             val messageXml = forwardedXml.substring(messageStart, messageEnd)
-            
+
             // Parse message attributes
             val from = extractAttribute(messageXml, "from") ?: ""
             val messageId = extractAttribute(messageXml, "id") ?: ""
             val type = extractAttribute(messageXml, "type") ?: "groupchat"
+
+            // Skip the delete-message stanza we send for tombstoning.
+            if (messageId == "deleteMessageStanza" ||
+                Regex("<delete(\\s|/?>)").containsMatchIn(messageXml)
+            ) {
+                val deleteIdMatch = Regex(
+                    "<delete\\b[^>]*\\bid=['\"]([^'\"]+)['\"]"
+                ).find(messageXml)
+                val deletedId = deleteIdMatch?.groupValues?.get(1)
+                if (!deletedId.isNullOrBlank()) {
+                    val actualRoomJid = from.split("/").firstOrNull() ?: roomJID
+                    com.ethora.chat.core.store.MessageStore.markMessageAsDeleted(
+                        actualRoomJid, deletedId
+                    )
+                    Log.d(TAG, "🗑️ MAM replay marked $deletedId deleted in $actualRoomJid")
+                }
+                return emptyList()
+            }
 
             // Port of web getDataFromXml messageTimestampMs resolution:
             //   delayStamp || stanzaIdValue || xmppId || id
@@ -1049,7 +1067,14 @@ class XMPPClient(
                 messageId.isNotBlank() -> messageId
                 else -> timestamp.toString()
             }
+            // XEP-0359 origin-id from the forwarded inner stanza: this is
+            // the sender-attached correlation handle we set when transmitting
+            // the message. Prefer it over the stanza `id` attribute because
+            // some servers / routers rewrite `id` while forwarding origin-id
+            // verbatim. Falls back to stanza id → result id → archive id.
+            val originId = extractOriginId(messageXml)
             val stanzaMessageId = when {
+                !originId.isNullOrBlank() -> originId
                 messageId.isNotBlank() -> messageId
                 resultId.isNotBlank() -> resultId
                 else -> archiveMessageId
@@ -1096,7 +1121,8 @@ class XMPPClient(
                 fileName = fileName,
                 originalName = originalName,
                 size = size,
-                waveForm = waveForm
+                waveForm = waveForm,
+                archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId
             )
             
             messages.add(message)

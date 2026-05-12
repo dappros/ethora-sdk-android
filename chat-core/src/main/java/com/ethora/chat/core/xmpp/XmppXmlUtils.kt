@@ -75,6 +75,25 @@ internal fun unwrapMucSubInnerMessage(xml: String): String {
 }
 
 /**
+ * Extract the `id` attribute of a `<origin-id xmlns="urn:xmpp:sid:0" .../>`
+ * element if present. This is the XEP-0359 sender-assigned id we attach to
+ * every outgoing stanza — servers MUST forward it verbatim, so it survives
+ * MUC-SUB pubsub wrapping, MAM re-serialisation, and `<message id>` rewrites
+ * that some routers do. We use it as the primary correlation handle in the
+ * pending-row reconciler, falling back to the stanza `id` attribute only
+ * when origin-id is absent (legacy server / older sender).
+ *
+ * The regex is anchored on the `<origin-id` open tag so a `<stanza-id>` (a
+ * different XEP-0359 element, server-assigned and namespaced the same way)
+ * is not picked up here.
+ */
+internal fun extractOriginId(xml: String): String? {
+    if (xml.isEmpty()) return null
+    val match = Regex("<origin-id\\b[^>]*\\bid=['\"]([^'\"]+)['\"]").find(xml) ?: return null
+    return decodeXmlEntities(match.groupValues[1])
+}
+
+/**
  * Extract the textual contents of the first `<body>...</body>` element.
  *
  * Tolerates every body shape ejabberd / Smack hands back through MAM:

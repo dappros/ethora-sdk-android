@@ -39,8 +39,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -75,12 +80,51 @@ fun LogsView(modifier: Modifier = Modifier) {
         }
     }
 
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     Column(modifier = modifier.fillMaxSize()) {
         TopAppBar(
             title = { Text("Application Logs") },
             actions = {
                 IconButton(onClick = {
-                    clipboardManager.setText(AnnotatedString(LogStore.copyAllLogs()))
+                    // The previous one-liner serialised 2000 log entries on
+                    // the main thread, then handed a multi-MB string to the
+                    // system clipboard via Binder IPC. Both legs of that
+                    // would kill the app on a busy log buffer:
+                    //   - Synchronous JoinToString on the main thread →
+                    //     ANR (system kills the app after ~5 s no-frame).
+                    //   - ClipboardManager.setPrimaryClip carries the data
+                    //     over a Binder transaction with a ~1 MB ceiling
+                    //     → TransactionTooLargeException on large dumps.
+                    //
+                    // The new path builds the truncated export on a worker
+                    // thread, then bounces back to the main thread for the
+                    // (now safely-bounded) clipboard write — and falls back
+                    // to a Toast on any clipboard failure instead of letting
+                    // the throw propagate.
+                    scope.launch {
+                        val payload = withContext(Dispatchers.Default) {
+                            runCatching { LogStore.copyAllLogsForClipboard() }
+                                .getOrDefault("")
+                        }
+                        if (payload.isEmpty()) {
+                            android.widget.Toast.makeText(
+                                context,
+                                "No logs to copy",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                            return@launch
+                        }
+                        val ok = runCatching {
+                            clipboardManager.setText(AnnotatedString(payload))
+                        }.isSuccess
+                        android.widget.Toast.makeText(
+                            context,
+                            if (ok) "Logs copied (${payload.length / 1024} KB)"
+                            else "Clipboard rejected the payload",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
                 }) {
                     Icon(Icons.Default.ContentCopy, contentDescription = "Copy all logs")
                 }
@@ -224,7 +268,19 @@ fun LogEntryItem(
                 Text(if (expanded) "Collapse" else "Expand")
             }
             TextButton(
-                onClick = { clipboardManager.setText(AnnotatedString(fullText)) }
+                onClick = {
+                    // Per-entry copy: smaller payload, but a single XMPP
+                    // frame can still exceed the Binder transaction ceiling
+                    // for clipboard. Truncate defensively and swallow any
+                    // setText failure so a bad raw frame can't crash the
+                    // app.
+                    val safe = if (fullText.length <= LogStore.MAX_CLIPBOARD_BYTES) {
+                        fullText
+                    } else {
+                        fullText.take(LogStore.MAX_CLIPBOARD_BYTES)
+                    }
+                    runCatching { clipboardManager.setText(AnnotatedString(safe)) }
+                }
             ) {
                 Text("Copy")
             }

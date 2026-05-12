@@ -78,6 +78,20 @@ data class Room(
     val composing: Boolean? = null,
     val composingList: List<String>? = null,
     val lastViewedTimestamp: Long? = null,
+    /**
+     * Web parity (`@ethora/chat-component@26.3.20`, room reducer):
+     *   `unreadBaselineTimestamp: i?.lastViewedTimestamp ?? n.unreadBaselineTimestamp
+     *                              ?? n.lastViewedTimestamp ?? 0`
+     * Frozen baseline used by `computeUnreadForRoom` (a.k.a. web's `AT()`)
+     * when `lastViewedTimestamp` is not yet set on this room — e.g. fresh
+     * room never opened on this device but the server told us when the user
+     * last read it on another device. Without this field, the unread
+     * counter could only ever fall back to "0 if lastViewed is unset" OR
+     * "all messages are unread" — both wrong. The baseline lets us
+     * preserve the cross-device read marker until the user actually
+     * opens the room locally.
+     */
+    val unreadBaselineTimestamp: Long? = null,
     val unreadMessages: Int = 0,
     val pendingMessages: Int = 0,
     val unreadCapped: Boolean = false,
@@ -139,6 +153,7 @@ fun createRoomFromApi(apiRoom: ApiRoom, conferenceDomain: String, usersArrayLeng
         composing = null,
         composingList = null,
         lastViewedTimestamp = 0,
+        unreadBaselineTimestamp = 0,
         unreadMessages = 0,
         pendingMessages = 0,
         unreadCapped = false,

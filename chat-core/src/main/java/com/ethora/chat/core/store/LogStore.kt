@@ -124,6 +124,21 @@ object LogStore {
         }
     }
 
+    /**
+     * Hard ceiling on what we are willing to pass to the system clipboard.
+     * Android's clipboard is exposed over a Binder IPC channel whose default
+     * transaction limit is ~1 MB; pushing a string anywhere near that limit
+     * throws `TransactionTooLargeException` from `ClipboardManager.setPrimaryClip`
+     * and tears the calling app down. Even short of the hard limit, the
+     * marshalling + IPC happens synchronously on the main thread when called
+     * from a Compose `onClick`, which can ANR a busy app.
+     *
+     * 500 KB sits well under both ceilings and is enough for ~500 lines of
+     * typical XMPP-frame logs. Past this point we truncate from the head
+     * (oldest first) and append a banner explaining the cut.
+     */
+    const val MAX_CLIPBOARD_BYTES = 500_000
+
     fun copyAllLogs(): String = exportText(_logs.value)
 
     fun getAllLogsAsText(): String = copyAllLogs()
@@ -147,5 +162,23 @@ object LogStore {
                     }
                 }
             }
+    }
+
+    /**
+     * Produce a clipboard-safe export. Builds [exportText] off the caller's
+     * thread, truncates to [MAX_CLIPBOARD_BYTES] (cuts from the head — older
+     * lines — so the freshest events are preserved), and prepends a one-line
+     * banner when truncation happened so the receiver knows the dump is a tail.
+     */
+    fun copyAllLogsForClipboard(): String {
+        val full = exportText(_logs.value)
+        val approxBytes = full.length // UTF-16 char count is the upper bound for ASCII; close enough as a guard.
+        if (approxBytes <= MAX_CLIPBOARD_BYTES) return full
+        // Keep the tail (newest entries land at the head of `exportText`'s
+        // output because we `asReversed()` there — so to keep the freshest
+        // events we take the LEADING bytes).
+        val truncated = full.take(MAX_CLIPBOARD_BYTES)
+        val banner = "[...truncated to ${MAX_CLIPBOARD_BYTES / 1024} KB; ${_logs.value.size} total log entries...]\n"
+        return banner + truncated
     }
 }

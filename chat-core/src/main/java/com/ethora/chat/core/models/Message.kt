@@ -40,7 +40,17 @@ data class Message(
     val size: String? = null,
     val xmppId: String? = null,
     val xmppFrom: String? = null,
-    val waveForm: String? = null // Waveform data for audio messages
+    val waveForm: String? = null, // Waveform data for audio messages
+    /** Server-assigned XEP-0359 stanza-id (the value carried inside the
+     *  `<stanza-id>` element of the echo / archive). This is what Ethora's
+     *  server uses to look up messages for `<replace>` and `<delete>`
+     *  stanzas, NOT the original `<message id>` attribute we send with the
+     *  send stanza. Populated by `parseAndHandleRealtimeMessage` and
+     *  `parseMAMResult`; preserved through reconcile via `.copy()` because
+     *  it's not in any override list. Not persisted to the Room DB — after
+     *  app restart, messages come back from MAM with `id = archive-id`
+     *  directly, so this field is only needed for the in-session window. */
+    val archiveId: String? = null
 )
 
 /**

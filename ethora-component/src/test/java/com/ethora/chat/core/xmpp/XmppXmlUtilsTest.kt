@@ -292,4 +292,47 @@ class XmppXmlUtilsTest {
             extractAttribute(xml, "url")
         )
     }
+
+    // --- extractOriginId (XEP-0359) ------------------------------------
+
+    @Test
+    fun `extractOriginId returns null when no origin-id element`() {
+        assertNull(extractOriginId("<message id='abc'><body>hi</body></message>"))
+    }
+
+    @Test
+    fun `extractOriginId returns null for empty input`() {
+        assertNull(extractOriginId(""))
+    }
+
+    @Test
+    fun `extractOriginId picks up the sender-assigned correlation id`() {
+        val xml = """<message id="srv-1" type="groupchat">""" +
+            """<origin-id xmlns="urn:xmpp:sid:0" id="send-text-message:UUID-1"/>""" +
+            """<body>hi</body></message>"""
+        assertEquals("send-text-message:UUID-1", extractOriginId(xml))
+    }
+
+    @Test
+    fun `extractOriginId tolerates single-quote attribute form`() {
+        // Some XMPP servers / serialisers emit single-quoted attributes.
+        val xml = "<message><origin-id xmlns='urn:xmpp:sid:0' id='custom-42'/></message>"
+        assertEquals("custom-42", extractOriginId(xml))
+    }
+
+    @Test
+    fun `extractOriginId does NOT pick up stanza-id with the same namespace`() {
+        // <stanza-id> is XEP-0359 too — server-assigned — and must not be
+        // confused with the sender-controlled <origin-id>. The xmppId
+        // reconciler uses origin-id; matching stanza-id by mistake would
+        // route the echo to a wrong row when the server rewrote the id.
+        val xml = "<message><stanza-id xmlns=\"urn:xmpp:sid:0\" id=\"server-assigned\"/></message>"
+        assertNull(extractOriginId(xml))
+    }
+
+    @Test
+    fun `extractOriginId decodes XML entities in the id value`() {
+        val xml = "<message><origin-id xmlns=\"urn:xmpp:sid:0\" id=\"id-with-amp-&amp;-here\"/></message>"
+        assertEquals("id-with-amp-&-here", extractOriginId(xml))
+    }
 }

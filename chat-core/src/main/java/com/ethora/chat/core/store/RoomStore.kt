@@ -376,8 +376,16 @@ object RoomStore {
         // Reset BOTH unreadMessages and unreadCapped so the per-room dot
         // AND the "10+" flag disappear atomically. Web zeroes both via
         // the unreadMiddleware setLastViewedTimestamp action.
+        //
+        // Also raise the unread baseline to the new lastViewed value so
+        // a subsequent recompute (e.g. when historic messages arrive via
+        // MAM with timestamps older than the new marker) doesn't backfill
+        // the badge. Web parity: the room reducer mirrors lastViewed
+        // into `unreadBaselineTimestamp` on every update.
+        val newBaseline = maxOf(room.unreadBaselineTimestamp ?: 0L, timestamp)
         val updatedRoom = room.copy(
             lastViewedTimestamp = timestamp,
+            unreadBaselineTimestamp = newBaseline,
             unreadMessages = 0,
             unreadCapped = false
         )
@@ -408,6 +416,7 @@ object RoomStore {
             }
             val updated = room.copy(
                 lastViewedTimestamp = ts,
+                unreadBaselineTimestamp = maxOf(room.unreadBaselineTimestamp ?: 0L, ts),
                 unreadMessages = 0,
                 unreadCapped = false
             )
@@ -439,23 +448,62 @@ object RoomStore {
     
     /**
      * Calculate and update unread messages count for a room.
-     * One-for-one port of `web/src/roomStore/Middleware/unreadMidlleware.tsx`
-     * `computeUnreadForRoom`:
-     *   • Active room → always 0 (the user is looking at it).
-     *   • Non-active + lastViewed missing-or-zero → EVERY countable message is
-     *     unread (fresh room, never opened). Previous Android logic treated
-     *     this branch as "all read" which is why the chat-tab badge went to 0
-     *     immediately and the per-room dot never appeared on first app open.
-     *   • Non-active + lastViewed > 0 → count countable messages whose
-     *     timestamp > lastViewed.
-     * "Countable" excludes: delimiter-new, pending, system, and messages from
-     * the current user.
+     *
+     * One-for-one port of web SDK's `AT(room, _, activeJid, currentUserKey)`
+     * (a.k.a. `computeUnreadForRoom`), from `@ethora/chat-component@26.3.20`:
+     *
+     * ```js
+     * AT = (e, t, n, i) => {
+     *   if (!e) return { unread: 0, unreadCapped: false };
+     *   if (n === t) return { unread: 0, unreadCapped: false };
+     *   const r = Xe(e.lastViewedTimestamp);
+     *   const s = Xe(e.unreadBaselineTimestamp);
+     *   const a = r > 0 ? r : s;
+     *   const o = (e.messages || []).filter((u) => {
+     *     if (!oT(u) || ($c(u?.user?.id) !== "" && $c(u?.user?.id) === $c(i))) return false;
+     *     const l = l0(u);
+     *     return l <= 0 || a <= 0 ? false : l > a;
+     *   });
+     *   ...
+     * }
+     * // helpers:
+     * oT = (m) => !!m && m.id !== "delimiter-new" && !m.pending && String(m?.isSystemMessage || "") !== "true"
+     * $c = (s) => s ? String(s).split("@")[0] : ""
+     * l0 = (m) => Xe(m?.date) || Xe(m?.timestamp) || Xe(m?.id)
+     * ```
+     *
+     * Key contract differences from the previous Android implementation:
+     *   • Web returns `unread = 0` when both `lastViewedTimestamp` and
+     *     `unreadBaselineTimestamp` are zero (fresh room, no read marker
+     *     anywhere). The old Android code returned ALL messages as unread
+     *     in that branch, which surfaced as a wrong "everything is unread"
+     *     badge on rooms the user had never opened — and never recovered
+     *     until the user opened-and-closed each one to plant a real
+     *     lastViewed marker. The current code now mirrors web: no marker
+     *     → no unread.
+     *   • Web uses `unreadBaselineTimestamp` as the secondary baseline
+     *     (typically synced from the server's private store on app
+     *     launch). The new [Room.unreadBaselineTimestamp] field carries
+     *     it; falls back to `lastViewedTimestamp` until the server-side
+     *     read marker is loaded.
+     *   • Strict ">" inequality (web's `l > a`) is preserved — a message
+     *     whose timestamp equals the baseline is NOT unread.
+     *
+     * Own-message detection uses [isOwnMessage] (multi-field identity
+     * match across `user.id`, `user.xmppUsername`, `user.userJID`,
+     * `xmppFrom`). Optimistic outgoing rows carry the Ethora user id in
+     * `user.id`, server echoes carry the XMPP local part — a single-field
+     * comparison would let one of those slip through.
+     *
+     * `sendFailed` and `isDeleted` are filtered explicitly (web hides
+     * them at the render layer; we hide them at the count layer for the
+     * same effect on the badge).
      */
     fun updateUnreadCount(roomJid: String, messages: List<com.ethora.chat.core.models.Message>) {
         val room = getRoomByJid(roomJid) ?: return
         val activeJid = _currentRoom.value?.jid
 
-        // Active room → always 0 unread
+        // Active room → always 0 unread. Web: `n === t`.
         if (roomJid == activeJid) {
             if (room.unreadMessages != 0 || room.unreadCapped) {
                 updateRoom(room.copy(unreadMessages = 0, unreadCapped = false))
@@ -463,24 +511,29 @@ object RoomStore {
             return
         }
 
-        val currentUserXmppUsername = UserStore.currentUser.value?.xmppUsername
-        val userLocal = currentUserXmppUsername?.substringBefore("@")?.takeIf { it.isNotBlank() }
+        val currentUser = UserStore.currentUser.value
         val lastViewed = room.lastViewedTimestamp ?: 0L
+        val baseline = room.unreadBaselineTimestamp ?: 0L
+        // Web: `const a = r > 0 ? r : s;`
+        val effectiveBaseline = if (lastViewed > 0L) lastViewed else baseline
 
         val countable = messages.count { msg ->
+            // Web's `oT(u)` predicate — plus our own extensions for sendFailed
+            // and isDeleted which web hides at render time.
             if (msg.id == "delimiter-new") return@count false
             if (msg.pending == true) return@count false
+            if (msg.sendFailed == true) return@count false
+            if (msg.isDeleted == true) return@count false
             if (msg.isSystemMessage == "true") return@count false
 
-            // Skip own messages (web: toLocal(msg.user.id) === toLocal(currentXmppUsername))
-            val msgLocal = msg.user.id.substringBefore("@").takeIf { it.isNotBlank() }
-            if (userLocal != null && msgLocal != null &&
-                msgLocal.equals(userLocal, ignoreCase = true)) return@count false
+            // Skip every flavour of "this is from me" — see helper docs.
+            if (isOwnMessage(msg, currentUser)) return@count false
 
+            // Web: `const l = l0(u); return l <= 0 || a <= 0 ? false : l > a;`
             val ts = msg.timestamp ?: msg.date.time
-            if (ts <= 0) return@count false
-            if (lastViewed <= 0) return@count true
-            ts > lastViewed
+            if (ts <= 0L) return@count false
+            if (effectiveBaseline <= 0L) return@count false
+            ts > effectiveBaseline
         }
 
         val unread = countable.coerceAtMost(MAX_UNREAD_COUNT)
