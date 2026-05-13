@@ -332,6 +332,30 @@ object EthoraChatBootstrap {
                 android.util.Log.w(TAG, "InitBeforeLoadFlow.run failed", e)
             }
 
+            // 6b. Seed read marker for rooms the chatjson merge didn't cover.
+            //     `createRoomFromApi` initialises both `lastViewedTimestamp`
+            //     and `unreadBaselineTimestamp` to 0; `updateUnreadCount`
+            //     short-circuits to "not unread" whenever the effective
+            //     baseline is <= 0. For users with no prior chatjson entry
+            //     (e.g. first install, or never opened that room from any
+            //     device) this would otherwise leave `hasUnread()` pinned at
+            //     false forever — both during preload and for live messages
+            //     arriving while the bootstrap-only badge listener is wired.
+            //     Mirrors what `ChatPersistenceManager.loadRooms()` already
+            //     does for the cache path. After this, "unread" means
+            //     "arrived after bootstrap completed" for any room the user
+            //     hasn't read from another device.
+            try {
+                val now = System.currentTimeMillis()
+                RoomStore.rooms.value.forEach { room ->
+                    if ((room.lastViewedTimestamp ?: 0L) <= 0L) {
+                        RoomStore.setLastViewedTimestamp(room.jid, now)
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "Seeding lastViewedTimestamp baselines failed", e)
+            }
+
             // 7. Full history preload — this is the web `runHistoryPreloadScheduler`
             //    equivalent. Loads 30 messages per room in batches of 5. Must run
             //    here (not via a delegate callback) because the delegate-driven
