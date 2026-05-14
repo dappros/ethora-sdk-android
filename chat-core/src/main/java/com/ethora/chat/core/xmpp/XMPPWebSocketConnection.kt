@@ -103,6 +103,23 @@ class XMPPWebSocketConnection(
     private fun randomPrivateStoreId(prefix: String): String =
         "$prefix:${System.currentTimeMillis()}"
 
+    internal companion object {
+        // <chatjson xmlns="chatjson:store" value="{...}"/> — the prosody mod
+        // echoes the stored payload back with single-quoted attributes, so
+        // accept both quote styles. Returns null when no chatjson element is
+        // present (truly empty private store).
+        private val CHATJSON_VALUE_REGEX = Regex("<chatjson\\b[^>]*\\bvalue=([\"'])(.*?)\\1")
+
+        internal fun parseChatjsonValue(xml: String): String? {
+            return CHATJSON_VALUE_REGEX.find(xml)?.groupValues?.get(2)
+                ?.replace("&amp;", "&")
+                ?.replace("&lt;", "<")
+                ?.replace("&gt;", ">")
+                ?.replace("&quot;", "\"")
+                ?.replace("&apos;", "'")
+        }
+    }
+
     /**
      * Fetches the private-store chatjson blob. Returns the `value` attribute
      * (JSON string) or null when the store is empty / the request errored or
@@ -118,14 +135,7 @@ class XMPPWebSocketConnection(
                 return@collector
             }
             val xml = stanza.xml ?: ""
-            // <chatjson xmlns="chatjson:store" value="{...}"/>
-            val chatjsonRegex = Regex("<chatjson\\b[^>]*\\bvalue=\"([^\"]*)\"")
-            val value = chatjsonRegex.find(xml)?.groupValues?.get(1)
-                ?.replace("&amp;", "&")
-                ?.replace("&lt;", "<")
-                ?.replace("&gt;", ">")
-                ?.replace("&quot;", "\"")
-                ?.replace("&apos;", "'")
+            val value = parseChatjsonValue(xml)
             if (!deferred.isCompleted) deferred.complete(value)
         }
         val stanza = "<iq type=\"get\" id=\"$id\">" +
@@ -1610,9 +1620,18 @@ class XMPPWebSocketConnection(
             val iqId = extractAttribute(xml, "id") ?: ""
             val type = extractAttribute(xml, "type") ?: ""
             
-            // Route IQ responses to pending collectors (MUC-SUB, etc.)
+            // Route IQ responses to pending collectors (MUC-SUB, etc.).
+            // Pass through the raw XML so collectors that parse extension
+            // elements (e.g. <chatjson> in the private-store reply) can see
+            // the full stanza body, not just the iq attributes.
             if (iqId.isNotEmpty() && mamCollectors.containsKey(iqId)) {
-                val stanza = XMPPStanza(type = type, id = iqId, from = extractAttribute(xml, "from"), to = extractAttribute(xml, "to"))
+                val stanza = XMPPStanza(
+                    type = type,
+                    id = iqId,
+                    from = extractAttribute(xml, "from"),
+                    to = extractAttribute(xml, "to"),
+                    xml = xml
+                )
                 mamCollectors[iqId]?.invoke(stanza)
             }
 

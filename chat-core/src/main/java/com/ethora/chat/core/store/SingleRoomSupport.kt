@@ -45,6 +45,7 @@ fun mergeSingleRoomPlaceholder(room: Room, existing: Room?): Room {
     return room.copy(
         role = room.role ?: existing.role,
         lastViewedTimestamp = room.lastViewedTimestamp ?: existing.lastViewedTimestamp,
+        unreadBaselineTimestamp = room.unreadBaselineTimestamp ?: existing.unreadBaselineTimestamp,
         unreadMessages = room.unreadMessages.takeIf { it > 0 } ?: existing.unreadMessages,
         pendingMessages = room.pendingMessages.takeIf { it > 0 } ?: existing.pendingMessages,
         messageStats = room.messageStats ?: existing.messageStats,

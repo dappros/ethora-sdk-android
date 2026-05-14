@@ -4,6 +4,16 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.05.14] — JitPack `v1.0.38`
+
+- **Fixed:** `EthoraChatBootstrap.addUnreadListener` now reliably emits `hasUnread=true` after the bootstrap completes. The 8-second XMPP wait was returning `false` in ~2 ms because `XMPPClient.ensureConnected` early-exited on `status == OFFLINE`, but `initializeClient()` runs on a separate coroutine and hasn't transitioned the status yet when the wait starts. The bootstrap aborted before `InitBeforeLoadFlow.run`, the `v1.0.37` post-bootstrap baseline seed, the history preload, or the incremental catchup ever ran — host apps just saw the synchronous `hasUnread=false` initial callback and no further updates. `ensureConnected` now treats only `ERROR` as terminal and polls through `OFFLINE` (still bails immediately if a later transition lands in `ERROR`), so the launched connect coroutine has time to flip the status and the rest of the 8-stage bootstrap completes.
+- **Fixed:** Cross-device read-marker sync against ejabberd `mod_private`. The chatjson parser only matched double-quoted XML attributes, but the server echoes the stored payload back with single quotes (`value='...'`), so `getChatsPrivateStore()` returned `null` on every real response and `InitBeforeLoadFlow` logged "Private store empty — nothing to merge". As a result, unread state never reconciled with what the user had already read on web/iOS. The regex now accepts both quote styles; extracted to a testable `parseChatjsonValue` helper.
+- **Fixed:** Routed IQ responses now carry their raw XML to MAM-style collectors. `parseAndHandleIQ` built the `XMPPStanza` for collectors without the `xml` field, so any extension-element parser hooked through `mamCollectors` (chatjson, future XEPs) saw `stanza.xml = null` and bailed. Even with the regex above fixed, chatjson stayed empty until this was passed through.
+- **Fixed:** `mergeSingleRoomPlaceholder` now preserves `unreadBaselineTimestamp` from the existing persisted room when an API-sourced room is merged over it (e.g. during a `/chats/my` refresh). Previously the baseline was silently dropped to `null`, which `v1.0.37`'s `lastViewedTimestamp` seed masked but did not fix — re-exposed whenever a room was open at process exit (`lastViewedTimestamp = 0`) and the next launch hit `effectiveBaseline = 0`. The merge now mirrors the existing `lastViewedTimestamp` preservation pattern.
+- **Tests:** Added `ChatjsonParseTest` (single- and double-quoted attribute extraction, entity-escaped JSON, absent-element fallback) and a `SingleRoomSupportTest` case locking in `unreadBaselineTimestamp` preservation across merges.
+
+---
+
 ## [26.05.12] — JitPack `v1.0.36`
 
 - **Fixed:** MUC room joins now succeed against stricter ejabberd `mod_muc` configs that enforce `nickname == bare-jid-localpart`. `resolveOccupantNick()` no longer appends the device resource suffix (`-android-<id>`) to the user's xmppUsername when constructing the join presence — that was the Android outlier vs web/iOS and caused every `presenceInRoom` to come back `<forbidden><text>wrong nickname</text></forbidden>` on self-hosted deployments, leaving rooms "authenticated but never joined" with messages stuck `pending`. Multi-device disambiguation is unaffected (the full JID's resource still carries the device suffix).

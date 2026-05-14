@@ -182,8 +182,15 @@ class XMPPClient(
      */
     suspend fun ensureConnected(timeoutMs: Long = 15000): Boolean {
         if (isFullyConnected()) return true
-        if (status == ConnectionStatus.OFFLINE || status == ConnectionStatus.ERROR) {
-            Log.w(TAG, "ensureConnected: not connected (status=$status), cannot wait")
+        // ERROR is terminal — don't burn the timeout waiting for a state the
+        // client won't reach on its own. OFFLINE is NOT terminal during the
+        // bootstrap: `initializeClient()` is launched on a separate coroutine
+        // and `ensureConnected` is called immediately after, so we frequently
+        // hit OFFLINE before the connect transition has happened. Poll
+        // through it — if no transition occurs the timeout will still catch
+        // a truly stuck client.
+        if (status == ConnectionStatus.ERROR) {
+            Log.w(TAG, "ensureConnected: status=$status (terminal), cannot wait")
             return false
         }
         val start = System.currentTimeMillis()
@@ -191,6 +198,10 @@ class XMPPClient(
             if (isFullyConnected()) {
                 Log.d(TAG, "ensureConnected: ready after ${System.currentTimeMillis() - start}ms")
                 return true
+            }
+            if (status == ConnectionStatus.ERROR) {
+                Log.w(TAG, "ensureConnected: status transitioned to ERROR, giving up")
+                return false
             }
             kotlinx.coroutines.delay(300)
         }

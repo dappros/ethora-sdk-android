@@ -56,6 +56,34 @@ class SingleRoomSupportTest {
     }
 
     @Test
+    fun `mergeSingleRoomPlaceholder preserves unreadBaselineTimestamp from existing room`() {
+        val existing = Room(
+            id = "room-1",
+            jid = "room@conference.example.com",
+            name = "Room",
+            title = "Room",
+            lastViewedTimestamp = 0L,
+            unreadBaselineTimestamp = 1_700_000_000_000L
+        )
+        val apiRoom = Room(
+            id = "room-1",
+            jid = "room@conference.example.com",
+            name = "Room",
+            title = "Room",
+            lastViewedTimestamp = null,
+            unreadBaselineTimestamp = null
+        )
+
+        val merged = mergeSingleRoomPlaceholder(apiRoom, existing)
+
+        // Baseline must survive the API-room refresh so updateUnreadCount can
+        // compute a non-zero unread count on the next session.
+        assertEquals(1_700_000_000_000L, merged.unreadBaselineTimestamp)
+        // lastViewedTimestamp=0 is falsy so it falls through to existing (null→0).
+        assertEquals(0L, merged.lastViewedTimestamp)
+    }
+
+    @Test
     fun `findRoomByJid matches by full and bare jid`() {
         val room = Room(id = "1", jid = "room@conference.example.com", name = "Room", title = "Room")
 
