@@ -18,11 +18,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.runtime.snapshotFlow
 import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import com.ethora.chat.core.models.Room
@@ -124,13 +127,86 @@ fun ChatRoomView(
         onDispose {
             val currentTime = System.currentTimeMillis()
             com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, currentTime)
-            disposeScope.launch {
-                com.ethora.chat.core.store.InitBeforeLoadFlow.writeCurrentTimestamp(
-                    xmppClient, room.jid, currentTime
-                )
-            }
+            // `disposeScope` from rememberCoroutineScope() is cancelled in the
+            // same tick as the composable disposal, so a suspending XMPP send
+            // launched here usually loses the race. Route through the SDK's
+            // long-lived writeScope instead.
+            com.ethora.chat.core.store.InitBeforeLoadFlow.writeCurrentTimestampAsync(
+                xmppClient, room.jid, currentTime
+            )
             android.util.Log.d("ChatRoomView", "Room closed: ${room.jid}, lastViewedTimestamp=$currentTime")
         }
+    }
+
+    // Auto-detect whether the user is actually VIEWING this room — without
+    // needing the host app to call any explicit API. Three Compose-native
+    // signals are combined:
+    //
+    //   1. `Modifier.onGloballyPositioned` (attached to the root Column below)
+    //      reports the composable's window-clipped bounds. Catches host apps
+    //      that keep `Chat` composed but visually hidden (0-size Box, offscreen
+    //      HorizontalPager page, etc.) — bounds shrink to zero.
+    //   2. `LocalWindowInfo.isWindowFocused` flips to false when a Dialog,
+    //      BottomSheet, system notification shade, etc. takes input focus.
+    //   3. Activity lifecycle ≥ RESUMED — false when the app is backgrounded.
+    //
+    // When all three are true → user is viewing → mark room as active.
+    // Any of them false → user is NOT viewing → flush read marker + drop the
+    // `currentRoom` shortcut so messages received in that state count toward
+    // the unread badge.
+    //
+    // We can't trust `hasViewportBounds` until the first layout pass fires
+    // `onGloballyPositioned`. Until then it's "unknown", not "invisible". The
+    // `firstLayoutDone` gate below delays our reaction until the layout has
+    // produced a real measurement — otherwise a visible composable would
+    // briefly look invisible (wasted server write) and an invisible
+    // composable would never get its initial "not viewing" emission (we'd
+    // stay stuck in the active-room shortcut set by EthoraChat.kt).
+    val windowInfo = LocalWindowInfo.current
+    var hasViewportBounds by remember { mutableStateOf(false) }
+    var firstLayoutDone by remember { mutableStateOf(false) }
+    var isLifecycleResumed by remember(lifecycleOwner) {
+        mutableStateOf(
+            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        )
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { source, _ ->
+            isLifecycleResumed = source.lifecycle.currentState
+                .isAtLeast(Lifecycle.State.RESUMED)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val isActivelyViewed by remember {
+        derivedStateOf {
+            hasViewportBounds && windowInfo.isWindowFocused && isLifecycleResumed
+        }
+    }
+    LaunchedEffect(room.jid, xmppClient, firstLayoutDone) {
+        if (!firstLayoutDone) return@LaunchedEffect
+        // `snapshotFlow` re-emits the current value on (re)subscription, so
+        // the first `collect` reflects the post-layout state without needing
+        // `drop(1)`. Subsequent emissions only fire on actual transitions.
+        snapshotFlow { isActivelyViewed }
+            .collect { active ->
+                if (active) {
+                    com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, 0)
+                    com.ethora.chat.core.store.RoomStore.setCurrentRoom(room)
+                    android.util.Log.d("ChatRoomView", "→ actively viewing room=${room.jid}")
+                } else {
+                    val ts = System.currentTimeMillis()
+                    com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, ts)
+                    com.ethora.chat.core.store.RoomStore.setCurrentRoom(null)
+                    com.ethora.chat.core.store.InitBeforeLoadFlow.writeCurrentTimestampAsync(
+                        xmppClient, room.jid, ts
+                    )
+                    android.util.Log.d(
+                        "ChatRoomView",
+                        "→ no longer viewing — flushed marker room=${room.jid} ts=$ts"
+                    )
+                }
+            }
     }
     
     // Coroutine scope for scroll animations
@@ -460,8 +536,8 @@ fun ChatRoomView(
         }
     }
 
-    // Scroll listener for loading older messages when scrolling to top (like RN/Telegram)
-    // RN: onEndReached when scrolled to top (inverted list). We use firstVisibleIndex <= 2 for easier trigger.
+    val currentViewModel by rememberUpdatedState(newValue = viewModel)
+
     LaunchedEffect(listState) {
         snapshotFlow {
             listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
@@ -481,20 +557,20 @@ fun ChatRoomView(
             val nearTop = firstVisibleIndex <= 2 && firstVisibleOffset < 300
 
             val now = System.currentTimeMillis()
-            val shouldTrigger = nearTop && 
-                               !currentIsLoadingMore && 
+            val shouldTrigger = nearTop &&
+                               !currentIsLoadingMore &&
                                (now - lastLoadTrigger) > 600
 
             if (shouldTrigger) {
                 lastLoadTrigger = now
-                
+
                 // Need ID of OLDEST message (to load messages before it)
                 // messages are sorted ascending: messages.first()=oldest
                 val oldestMessageId = messages
                     .filter { it.id != "delimiter-new" }
                     .firstOrNull()
                     ?.id
-                
+
                 android.util.Log.i("ChatRoomView", "🚀 Load more triggered: firstVisibleIndex=$firstVisibleIndex (nearTop=$nearTop), oldestMessageId=$oldestMessageId")
                 viewModel.loadMoreMessages(idOfMessageBefore = oldestMessageId)
             }
@@ -505,7 +581,18 @@ fun ChatRoomView(
     // Get chat config
     val config by com.ethora.chat.core.store.ChatStore.config.collectAsState()
 
-    Column(modifier = modifier.fillMaxSize()) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .onGloballyPositioned { coords ->
+                // Feeds the `isActivelyViewed` derived state above. Zero
+                // window-clipped bounds → host has hidden us (0-size Box,
+                // offscreen Pager page, etc.) → treat as "not viewing".
+                val bounds = coords.boundsInWindow()
+                hasViewportBounds = bounds.width > 0f && bounds.height > 0f
+                if (!firstLayoutDone) firstLayoutDone = true
+            }
+    ) {
         // Show user profile screen if user is selected
         selectedUser?.let { user ->
             UserProfileScreen(

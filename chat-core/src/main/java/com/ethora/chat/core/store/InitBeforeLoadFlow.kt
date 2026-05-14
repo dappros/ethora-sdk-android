@@ -3,6 +3,7 @@ package com.ethora.chat.core.store
 import android.util.Log
 import com.ethora.chat.core.xmpp.TimestampUtils
 import com.ethora.chat.core.xmpp.XMPPClient
+import kotlinx.coroutines.launch
 
 /**
  * Port of web's `initBeforeLoad` sequence (xmppProvider.tsx L283-304) and its
@@ -24,6 +25,16 @@ object InitBeforeLoadFlow {
 
     /** One-shot guard so the sync only runs once per XMPP connection. */
     @Volatile private var lastCompletedForClient: Int = 0
+
+    /**
+     * Long-lived SDK scope for fire-and-forget XMPP writes that must outlive
+     * the caller (e.g. `ChatRoomView` onDispose — the composable's
+     * `rememberCoroutineScope` gets cancelled mid-dispose and the launched
+     * `writeCurrentTimestamp` stanza never makes it onto the wire).
+     */
+    private val writeScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob()
+    )
 
     suspend fun run(xmppClient: XMPPClient) {
         val clientId = System.identityHashCode(xmppClient)
@@ -77,6 +88,22 @@ object InitBeforeLoadFlow {
      * server so other devices pick it up. Best-effort — failures are logged
      * and ignored.
      */
+    /**
+     * Fire-and-forget variant that runs on the SDK's long-lived [writeScope].
+     * Use from contexts that may be cancelled mid-call (Compose `onDispose`,
+     * lifecycle observers, etc.) — the composable's own scope is cancelled
+     * before the suspend-network call can complete its stanza send.
+     */
+    fun writeCurrentTimestampAsync(
+        xmppClient: XMPPClient?,
+        roomJid: String,
+        timestamp: Long
+    ) {
+        writeScope.launch {
+            writeCurrentTimestamp(xmppClient, roomJid, timestamp)
+        }
+    }
+
     suspend fun writeCurrentTimestamp(
         xmppClient: XMPPClient?,
         roomJid: String,

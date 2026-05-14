@@ -95,9 +95,45 @@ object LogoutService {
      */
     fun performLogout() {
         Log.d(TAG, "🚪 Starting logout process...")
-        
+
+        // Capture before the composable teardown clears it.
+        val capturedRoom = RoomStore.currentRoom.value
+        val capturedClient = synchronized(xmppLock) { xmppClient }
+
         scope.launch {
             try {
+                // 0a. Flush the read marker for the currently-open room while the
+                //     client is still connected. Run in parallel with store clearing
+                //     so the badge drops immediately without waiting for the network.
+                val flushJob = launch(Dispatchers.IO) {
+                    if (capturedClient != null && capturedRoom != null) {
+                        val ts = (capturedRoom.lastViewedTimestamp ?: 0L)
+                            .takeIf { it > 0L } ?: System.currentTimeMillis()
+                        runCatching {
+                            InitBeforeLoadFlow.writeCurrentTimestamp(capturedClient, capturedRoom.jid, ts)
+                            Log.d(TAG, "✅ Flushed read marker on logout room=${capturedRoom.jid} ts=$ts")
+                        }.onFailure { e ->
+                            Log.w(TAG, "⚠️ Failed to flush read marker on logout", e)
+                        }
+                    }
+                }
+
+                // 0b. Clear all in-memory stores immediately so the UI (badge,
+                //     room list) reflects the logged-out state without delay.
+                withContext(Dispatchers.Main) {
+                    Log.d(TAG, "🧹 Clearing stores...")
+                    UserStore.clear()
+                    UserStore.clearSelectedUser()
+                    RoomStore.clear()
+                    MessageStore.clear()
+                    PendingMediaSendQueue.clear(deleteLocalFiles = true)
+                    ScrollPositionStore.clearAll()
+                    Log.d(TAG, "✅ All stores cleared")
+                }
+
+                // Wait for the flush to finish before we disconnect the socket.
+                flushJob.join()
+
                 // 1. Disconnect XMPP client
                 withContext(Dispatchers.IO) {
                     val clientToDisconnect = synchronized(xmppLock) {
@@ -110,29 +146,6 @@ object LogoutService {
                         client.disconnect()
                         Log.d(TAG, "✅ XMPP client disconnected")
                     } ?: Log.w(TAG, "⚠️ XMPP client is null, skipping disconnect")
-                }
-                
-                // 2. Clear all stores
-                withContext(Dispatchers.Main) {
-                    Log.d(TAG, "🧹 Clearing stores...")
-                    
-                    // Clear user store
-                    UserStore.clear()
-                    UserStore.clearSelectedUser()
-                    
-                    // Clear room store
-                    RoomStore.clear()
-                    
-                    // Clear message store
-                    MessageStore.clear()
-
-                    // Clear unsent media queue separately from cached messages.
-                    PendingMediaSendQueue.clear(deleteLocalFiles = true)
-                    
-                    // Clear scroll positions
-                    ScrollPositionStore.clearAll()
-                    
-                    Log.d(TAG, "✅ All stores cleared")
                 }
                 
                 // 3. Clear persistence (background)
