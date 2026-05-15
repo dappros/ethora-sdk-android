@@ -321,9 +321,20 @@ object EthoraChatBootstrap {
             }
 
             // 5. Wait for connection.
-            val ready = try { client.ensureConnected(8_000) } catch (_: Exception) { false }
+            // 30s (was 8s in v1.0.39): on cold/slow backends — e.g. AWS
+            // lambda cold-start, congested networks, or first connect
+            // after the server has been idle — the WebSocket TLS+SASL+bind
+            // sequence routinely takes 10-20 s. The previous 8 s budget
+            // caused bootstrap to abort here, dropping into failure-
+            // cooldown without ever calling InitBeforeLoadFlow.run /
+            // history-preload / catchup. Host apps reading `RoomStore` or
+            // `MessageStore` from outside the `Chat` composable then saw
+            // a permanently-empty store. 30 s is comfortably above the
+            // observed P99 connect time and still well under any user-
+            // visible "this app is dead" threshold.
+            val ready = try { client.ensureConnected(30_000) } catch (_: Exception) { false }
             if (!ready) {
-                android.util.Log.w(TAG, "XMPP did not come online within 8s; leaving bootstrap uncommitted for retry")
+                android.util.Log.w(TAG, "XMPP did not come online within 30s; leaving bootstrap uncommitted for retry")
                 return
             }
 

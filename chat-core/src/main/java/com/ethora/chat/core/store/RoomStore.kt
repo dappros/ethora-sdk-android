@@ -356,6 +356,34 @@ object RoomStore {
     }
     
     /**
+     * Compute the read marker that should be flushed when the user leaves a
+     * room — advance to the latest message the SDK knows about for that
+     * room, NOT to `System.currentTimeMillis()`.
+     *
+     * Why: writing `now()` unconditionally marks every existing message as
+     * "read" even when the user merely tab-swapped through the chat without
+     * scrolling. That breaks host-side unread previews that observe
+     * `Room.lastViewedTimestamp` to render their own "what's new" list (e.g.
+     * an inbox screen rendered outside the `Chat` composable). The host
+     * sees the baseline reset to "now", filters by `ts > now`, and finds
+     * nothing — even when the server still has the room flagged as unread.
+     *
+     * The latest-known-message timestamp matches what the user could
+     * actually have seen on screen: if the latest message is older than
+     * the existing marker, this is a no-op (return existing); if newer,
+     * we advance only to that message's ts, leaving any unread that hasn't
+     * arrived yet (or won't arrive in this session) intact.
+     */
+    fun resolveReadMarkerOnLeave(roomJid: String): Long {
+        val room = getRoomByJid(roomJid) ?: return 0L
+        val existing = room.lastViewedTimestamp ?: 0L
+        val fromRoom = room.lastMessageTimestamp ?: 0L
+        val fromStore = MessageStore.lastKnownTimestamp(roomJid)
+        val latest = maxOf(fromRoom, fromStore)
+        return if (latest > existing) latest else existing
+    }
+
+    /**
      * Set last viewed timestamp for a room (matches web: setLastViewedTimestamp)
      * When a room is opened, set to 0 to mark all messages as read
      * When a room is closed, set to current timestamp

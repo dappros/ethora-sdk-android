@@ -66,7 +66,12 @@ object ChatLifecycleService {
             Log.w(TAG, "onChatPaused: room $resolvedJid not in RoomStore — skipping")
             return
         }
-        val ts = System.currentTimeMillis()
+        // v1.0.40: was `System.currentTimeMillis()` — now resolves to the
+        // latest message the SDK actually knows about for this room (or
+        // keeps the existing marker if there's nothing newer). See
+        // `RoomStore.resolveReadMarkerOnLeave` for the host-side unread-
+        // preview rationale.
+        val ts = RoomStore.resolveReadMarkerOnLeave(room.jid)
         lastActiveRoomJid = room.jid
         isPaused = true
         RoomStore.setLastViewedTimestamp(room.jid, ts)

@@ -125,16 +125,22 @@ fun ChatRoomView(
     val disposeScope = rememberCoroutineScope()
     DisposableEffect(room.jid, xmppClient) {
         onDispose {
-            val currentTime = System.currentTimeMillis()
-            com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, currentTime)
+            // v1.0.40: was `System.currentTimeMillis()` — now resolves to the
+            // latest message the SDK actually knows about for this room
+            // (or keeps the existing marker if there's no newer message).
+            // See `RoomStore.resolveReadMarkerOnLeave` for why "now()" was
+            // destructive for host apps reading unread from outside the
+            // `Chat` composable.
+            val ts = com.ethora.chat.core.store.RoomStore.resolveReadMarkerOnLeave(room.jid)
+            com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, ts)
             // `disposeScope` from rememberCoroutineScope() is cancelled in the
             // same tick as the composable disposal, so a suspending XMPP send
             // launched here usually loses the race. Route through the SDK's
             // long-lived writeScope instead.
             com.ethora.chat.core.store.InitBeforeLoadFlow.writeCurrentTimestampAsync(
-                xmppClient, room.jid, currentTime
+                xmppClient, room.jid, ts
             )
-            android.util.Log.d("ChatRoomView", "Room closed: ${room.jid}, lastViewedTimestamp=$currentTime")
+            android.util.Log.d("ChatRoomView", "Room closed: ${room.jid}, lastViewedTimestamp=$ts")
         }
     }
 
@@ -195,7 +201,10 @@ fun ChatRoomView(
                     com.ethora.chat.core.store.RoomStore.setCurrentRoom(room)
                     android.util.Log.d("ChatRoomView", "→ actively viewing room=${room.jid}")
                 } else {
-                    val ts = System.currentTimeMillis()
+                    // v1.0.40: resolve to latest known message timestamp
+                    // (or keep existing) instead of now(); see
+                    // `RoomStore.resolveReadMarkerOnLeave` rationale.
+                    val ts = com.ethora.chat.core.store.RoomStore.resolveReadMarkerOnLeave(room.jid)
                     com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, ts)
                     com.ethora.chat.core.store.RoomStore.setCurrentRoom(null)
                     com.ethora.chat.core.store.InitBeforeLoadFlow.writeCurrentTimestampAsync(
