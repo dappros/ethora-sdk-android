@@ -1,5 +1,8 @@
 # Ethora SDK for Android (`ethora-component`)
 
+[![JitPack](https://jitpack.io/v/dappros/ethora-sdk-android.svg)](https://jitpack.io/#dappros/ethora-sdk-android)
+[![License](https://img.shields.io/github/license/dappros/ethora-sdk-android.svg)](LICENSE)
+
 Production-ready Android chat SDK built with Kotlin + Jetpack Compose.
 
 This package ships a complete chat experience (room list + room view + media + reactions + typing + push hooks) and exposes host-facing APIs for configuration, connection state, unread counters, event interception, and UI extension.
