@@ -20,6 +20,7 @@ This package ships a complete chat experience (room list + room view + media + r
 - [Custom UI Components](#custom-ui-components)
 - [Push Notifications (FCM)](#push-notifications-fcm)
 - [Persistence and Offline Behavior](#persistence-and-offline-behavior)
+- [Chat Visibility (Read Markers and Unread Accounting)](#chat-visibility-read-markers-and-unread-accounting)
 - [Logout](#logout)
 - [Troubleshooting](#troubleshooting)
 - [Production Checklist](#production-checklist)
@@ -592,6 +593,90 @@ Notes:
   - incremental sync after reconnect
 - DNS fallback map supported via `dnsFallbackOverrides` for emulator/network edge cases. Only explicit host-provided overrides are used — there is no built-in fallback to any Ethora-hosted server.
 
+## Chat visibility (read markers and unread accounting)
+
+The SDK keeps `lastViewedTimestamp` per-room in the XMPP private store
+(XEP-0049 `<chatjson xmlns="chatjson:store"/>`). It's read once at bootstrap
+to seed the unread baseline, and written whenever the user stops actively
+viewing a room so other devices (web, iOS) reconcile against the same
+"last read at" marker.
+
+### Auto-detected — no host code required
+
+The `Chat` composable combines three Compose-native signals to decide whether
+the user is *actively viewing*:
+
+1. `Modifier.onGloballyPositioned` on the chat root — clipped bounds drop to
+   zero when the host hides the composable inside a 0-size `Box`, an
+   off-screen `HorizontalPager` page, etc.
+2. `LocalWindowInfo.isWindowFocused` — flips false on Dialog, BottomSheet,
+   notification shade and other modal-focus takeovers.
+3. `Lifecycle.State >= RESUMED` — false when the app is backgrounded
+   (Home, Recents, screen lock, kill).
+
+When all three are true → room is active, unread is zero, no server traffic.
+Any of them false → local `lastViewedTimestamp` is bumped to `now`,
+`currentRoom` is cleared (so new messages count toward the badge), and the
+read marker is flushed to the XMPP private store on a long-lived SDK scope.
+On return to true the active-room state is restored.
+
+### Manual signal — for host transitions Compose can't see
+
+Some host integrations don't trigger any of the auto-detected signals. The
+two cases that need an explicit call:
+
+- Bottom-nav / tab swap **inside one Activity** that keeps `Chat` composed
+  in another tab as a badge listener — the Activity stays RESUMED, the
+  window stays focused, and Compose only knows the composable is still
+  in the layout tree.
+- Host renders an opaque composable **on top** of `Chat` in the same window
+  (Compose has no z-order awareness for visibility).
+
+For those, route your own visibility events through:
+
+```kotlin
+import com.ethora.chat.core.ChatService
+
+// Host's bottom-nav handler:
+override fun onTabSelected(tab: Tab) {
+    if (tab == Tab.CHAT) ChatService.lifecycle.onChatResumed()
+    else                  ChatService.lifecycle.onChatPaused()
+}
+
+// Or a Fragment with onHiddenChanged:
+override fun onHiddenChanged(hidden: Boolean) {
+    if (hidden) ChatService.lifecycle.onChatPaused()
+    else        ChatService.lifecycle.onChatResumed()
+}
+```
+
+`onChatPaused()` writes the read marker for `RoomStore.currentRoom` to the
+server, drops the active-room shortcut, and remembers the room jid so
+`onChatResumed()` can restore it. Both calls are idempotent and a no-op when
+no room is active.
+
+Badge-listener integrations that never mount the `Chat` composable on the
+listener path (so `RoomStore.currentRoom` is always null from the SDK's
+perspective) can pass the room JID explicitly:
+
+```kotlin
+val listenerRoomJid = "abc..._roomid@conference.xmpp.example.com"
+
+// Host knows its listener room — call with the JID so the SDK doesn't
+// need RoomStore.currentRoom to be set.
+ChatService.lifecycle.onChatPaused(listenerRoomJid)
+ChatService.lifecycle.onChatResumed(listenerRoomJid)
+```
+
+Either form (no-arg + currentRoom, or explicit `roomJid`) flushes through
+`InitBeforeLoadFlow.writeCurrentTimestampAsync` on a long-lived SDK scope
+and reaches the XMPP socket reliably even if the caller's own scope is
+about to be torn down.
+
+You do **not** need to also pass `roomJID = null` to the `Chat` composable —
+that renders "No room configured" and tears down the listener you wanted to
+keep running.
+
 ## Logout
 
 Use public service:
@@ -601,6 +686,14 @@ import com.ethora.chat.core.ChatService
 
 ChatService.logout.performLogout()
 ```
+
+On logout the SDK first flushes the active room's `lastViewedTimestamp` to
+the XMPP private store (in parallel with in-memory store clearing so the
+unread badge drops instantly), then disconnects the XMPP socket, then clears
+persistence. The early-bootstrap on next cold start is gated on the host
+having persisted `isConnected=true`; a clean Disconnect therefore does not
+re-fetch rooms or re-render the unread badge until the host explicitly logs
+in again.
 
 Optional callback:
 

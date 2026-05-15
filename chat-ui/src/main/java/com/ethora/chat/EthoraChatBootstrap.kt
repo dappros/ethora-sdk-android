@@ -327,6 +327,14 @@ object EthoraChatBootstrap {
                 return
             }
 
+            // Register the bootstrap-owned client with LogoutService so SDK
+            // services that need it (ChatLifecycleService, badge-listener
+            // integrations, etc.) can reach it before the Chat composable
+            // mounts. `setXMPPClient` is idempotent for the same instance,
+            // so the later EthoraChat.kt registration when the composable
+            // mounts is a no-op disconnect-free re-register.
+            com.ethora.chat.core.service.LogoutService.setXMPPClient(client)
+
             // 6. Private store (chatjson) → per-room lastViewedTimestamp.
             try { InitBeforeLoadFlow.run(client) } catch (e: Exception) {
                 android.util.Log.w(TAG, "InitBeforeLoadFlow.run failed", e)

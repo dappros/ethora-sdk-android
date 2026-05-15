@@ -47,6 +47,11 @@ object LogoutService {
      * Called by chat component during initialization
      * Internal use only - but needs to be public for Chat component
      */
+    /** SDK-internal accessor for the live XMPP client reference. Used by
+     *  [ChatLifecycleService] to issue private-store writes without
+     *  duplicating the client-reference plumbing. */
+    internal fun peekXMPPClient(): XMPPClient? = synchronized(xmppLock) { xmppClient }
+
     fun setXMPPClient(client: XMPPClient?) {
         val previous = synchronized(xmppLock) {
             val prev = xmppClient
@@ -128,6 +133,7 @@ object LogoutService {
                     MessageStore.clear()
                     PendingMediaSendQueue.clear(deleteLocalFiles = true)
                     ScrollPositionStore.clearAll()
+                    ChatLifecycleService.reset()
                     Log.d(TAG, "✅ All stores cleared")
                 }
 

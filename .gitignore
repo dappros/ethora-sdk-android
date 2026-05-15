@@ -119,3 +119,7 @@ lint-results*.xml
 
 .idea/
 .gradle-home/
+
+# AI assistant per-developer config (never commit)
+.claude/
+.codex/
