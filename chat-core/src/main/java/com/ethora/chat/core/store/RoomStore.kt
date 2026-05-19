@@ -508,6 +508,7 @@ object RoomStore {
             if (room.unreadMessages != 0 || room.unreadCapped) {
                 updateRoom(room.copy(unreadMessages = 0, unreadCapped = false))
             }
+            android.util.Log.d("RoomStoreUnreadDbg", "shortcut: activeJid=$activeJid → unread=0")
             return
         }
 
@@ -517,27 +518,52 @@ object RoomStore {
         // Web: `const a = r > 0 ? r : s;`
         val effectiveBaseline = if (lastViewed > 0L) lastViewed else baseline
 
+        android.util.Log.d("RoomStoreUnreadDbg",
+            "ENTER room=$roomJid activeJid=$activeJid lastViewed=$lastViewed baseline=$baseline " +
+                "effectiveBaseline=$effectiveBaseline msgs=${messages.size} " +
+                "currentUser={id=${currentUser?.id}, xmppUsername=${currentUser?.xmppUsername}, " +
+                "userJID=${currentUser?.userJID}, username=${currentUser?.username}}")
+
         val countable = messages.count { msg ->
             // Web's `oT(u)` predicate — plus our own extensions for sendFailed
             // and isDeleted which web hides at render time.
-            if (msg.id == "delimiter-new") return@count false
-            if (msg.pending == true) return@count false
-            if (msg.sendFailed == true) return@count false
-            if (msg.isDeleted == true) return@count false
-            if (msg.isSystemMessage == "true") return@count false
-
-            // Skip every flavour of "this is from me" — see helper docs.
-            if (isOwnMessage(msg, currentUser)) return@count false
+            val skipReason: String = when {
+                msg.id == "delimiter-new" -> "delimiter"
+                msg.pending == true -> "pending"
+                msg.sendFailed == true -> "sendFailed"
+                msg.isDeleted == true -> "deleted"
+                msg.isSystemMessage == "true" -> "system"
+                isOwnMessage(msg, currentUser) -> "ownMessage"
+                else -> ""
+            }
+            if (skipReason.isNotEmpty()) {
+                android.util.Log.d("RoomStoreUnreadDbg",
+                    "  msg id=${msg.id} body='${msg.body.take(30)}' user={id=${msg.user.id}, " +
+                        "xmpp=${msg.user.xmppUsername}, jid=${msg.user.userJID}} " +
+                        "xmppFrom=${msg.xmppFrom} → SKIP ($skipReason)")
+                return@count false
+            }
 
             // Web: `const l = l0(u); return l <= 0 || a <= 0 ? false : l > a;`
             val ts = msg.timestamp ?: msg.date.time
-            if (ts <= 0L) return@count false
-            if (effectiveBaseline <= 0L) return@count false
-            ts > effectiveBaseline
+            val tsReason: String = when {
+                ts <= 0L -> "ts<=0"
+                effectiveBaseline <= 0L -> "baseline<=0"
+                ts <= effectiveBaseline -> "ts<=baseline (diff=${effectiveBaseline - ts}ms)"
+                else -> ""
+            }
+            val passes = tsReason.isEmpty()
+            android.util.Log.d("RoomStoreUnreadDbg",
+                "  msg id=${msg.id} body='${msg.body.take(30)}' user={id=${msg.user.id}, " +
+                    "xmpp=${msg.user.xmppUsername}} ts=$ts dateTime=${msg.date.time} " +
+                    "effectiveBaseline=$effectiveBaseline → ${if (passes) "COUNT" else "SKIP ($tsReason)"}")
+            passes
         }
 
         val unread = countable.coerceAtMost(MAX_UNREAD_COUNT)
         val capped = countable > MAX_UNREAD_COUNT
+        android.util.Log.d("RoomStoreUnreadDbg",
+            "RESULT room=$roomJid countable=$countable unread=$unread (prev=${room.unreadMessages}) capped=$capped")
 
         if ((room.unreadMessages) != unread || room.unreadCapped != capped) {
             updateRoom(room.copy(unreadMessages = unread, unreadCapped = capped))

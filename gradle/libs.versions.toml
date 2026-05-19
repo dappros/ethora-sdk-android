@@ -16,7 +16,7 @@ activityCompose = "1.9.3"
 navigationCompose = "2.8.5"
 
 # Compose
-composeBom = "2024.10.01"
+composeBom = "2025.04.01"
 # Compose Compiler is now handled by the Kotlin plugin for 2.0+
 # composeCompiler = "1.5.8"
 
