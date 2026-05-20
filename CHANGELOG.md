@@ -4,6 +4,15 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.05.20] — JitPack `v1.0.41`
+
+- **Fixed:** `addUnreadListener` no longer stays pinned at `hasUnread=false` for badge-listener integrations whose room JID collides with the current user identity. `RoomStore.isOwnMessage` previously fed the raw stanza `xmppFrom` (shape `roomJid/senderResource` for MUC) into `identityCandidates`, which split the room JID into bare + local-part and added them as **sender** identity candidates. When the room's local part shared a string with `currentUser.id` / `xmppUsername` — exactly the Ethora layout where rooms are created as `<creatorId>_<uuid>@conference…` — every incoming MUC stanza was misclassified as "own", `updateUnreadCount` filtered it, `RoomStore.rooms` never re-emitted a delta on `hasUnread()`, and the listener appeared dead. `isOwnMessage` now strips the room prefix and matches only the sender resource segment; `user.id` / `user.xmppUsername` (populated by `XMPPWebSocketConnection.parseAndHandleRealtimeMessage` from `senderJID`) carry the actual ownership signal. A new regression test pins the worst-case `user.id == room.local` collision.
+- **Improved:** `ChatService.lifecycle.onChatPaused` and `onChatResumed` now run `RoomStore.recomputeUnreadForAllRooms()` after every visibility transition, instead of relying on the host to call `EthoraChatBootstrap.recomputeUnread()` manually. Closes the failure mode where a message arrived during the transition window — while the active-room shortcut still forced `unread=0` — and never got re-evaluated after `setCurrentRoom(null)`. Same code path the next incoming message would take; cheap, idempotent, safe to call twice. Host integrations no longer need a `try/finally { recomputeUnread() }` belt-and-braces around their `onChatPaused()` calls.
+- **Improved:** When `isOwnMessage` returns true, `RoomStoreUnreadDbg` now logs the **matched candidate set** (`→ isOwnMessage=true matched=[...]`) alongside the existing per-message line. Tells you in one log line whether the collision was on `user.id`, `xmppUsername`, or the `xmppFrom` resource segment — so a misconfigured `currentUser` is spotted at `adb logcat -s RoomStoreUnreadDbg:D` without having to guess.
+- **Tests:** SDK unit tests pass against the rebuilt artifact (`./gradlew :ethora-component:test`). Added `ChatLifecycleServiceUnreadTest` (3 tests) and extended `UnreadRecomputeTest` with the MUC room/user collision case.
+
+---
+
 ## [26.05.19] — JitPack `v1.0.40`
 
 - **New:** `EthoraChatBootstrap.recomputeUnread()` — host-facing safety net that forces an unread recompute across every room from current `MessageStore` state and re-emits on the `hasUnread()` flow. Same code path that incoming messages take (`RoomStore.updateUnreadCount` per room), so the answer is identical to what would arrive on the next real message. Use it when the host suspects the listener is stuck on a stale boolean — e.g. after a manual persistence mutation, an out-of-band message injection, or a race with host-side lifecycle code. Cheap and idempotent.

@@ -71,6 +71,17 @@ object ChatLifecycleService {
         isPaused = true
         RoomStore.setLastViewedTimestamp(room.jid, ts)
         RoomStore.setCurrentRoom(null)
+        // Safety net: re-run `updateUnreadCount` for every room from the
+        // current `MessageStore` state. Closes the failure mode where a
+        // message arrived during the visibility transition (e.g. while
+        // `currentRoom` was still set and the active-room shortcut forced
+        // unread=0) and never got re-evaluated after we cleared the room.
+        // Also catches host listeners that are sitting on a stale
+        // `hasUnread()` boolean because no `RoomStore.rooms` emission
+        // happened to nudge them. Cheap and idempotent — same code path
+        // incoming messages take, so the answer is identical to what would
+        // arrive on the next real message.
+        RoomStore.recomputeUnreadForAllRooms()
         InitBeforeLoadFlow.writeCurrentTimestampAsync(
             xmppClient = LogoutService.peekXMPPClient(),
             roomJid = room.jid,
@@ -104,6 +115,14 @@ object ChatLifecycleService {
         }
         RoomStore.setLastViewedTimestamp(room.jid, 0)
         RoomStore.setCurrentRoom(room)
+        // Mirrors the pause-side safety net (see [onChatPaused]). When the
+        // host re-shows chat, other rooms in the same store may have
+        // accumulated unread that a stuck listener didn't pick up — force a
+        // recompute so the `hasUnread()` boolean reflects current truth.
+        // The active room is unaffected here (active-room shortcut zeroes
+        // it immediately), so the recompute only matters for multi-room
+        // hosts; harmless in single-room.
+        RoomStore.recomputeUnreadForAllRooms()
         isPaused = false
         Log.d(TAG, "onChatResumed: restored room=${room.jid}")
     }

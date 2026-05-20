@@ -590,12 +590,45 @@ object RoomStore {
         )
         if (currentCandidates.isEmpty()) return false
 
+        // For MUC stanzas `xmppFrom` is `roomJid/senderJidOrNick(/optionalRes)`.
+        // Passing it as-is to `identityCandidates` would add the ROOM JID (and
+        // its local part) as a sender candidate, which can falsely match the
+        // current user when the room JID encodes the creator's user id (Ethora
+        // rooms are `<creatorId>_<uuid>@conference…`). When the room JID
+        // collides with the current user (e.g. user opens a 1-1 chat with
+        // themselves, or the host accidentally configures the wrong user
+        // record), every incoming MUC stanza would be classified as "own" and
+        // the unread badge would stay pinned at zero — exactly the symptom in
+        // the field report.
+        //
+        // The XMPP parser already populates `user.id` and `user.xmppUsername`
+        // from the senderJID / from-resource (XMPPWebSocketConnection
+        // L864-879), so dropping the room half of `xmppFrom` loses no
+        // information. Keep the resource segment as a tertiary candidate for
+        // the case where `user.id` is blank (legacy delegate paths).
+        val xmppFromSender = message.xmppFrom?.let { from ->
+            val slashIdx = from.indexOf('/')
+            if (slashIdx >= 0) from.substring(slashIdx + 1) else from
+        }?.takeIf { it.isNotBlank() }
         val messageCandidates = identityCandidates(
             message.user.id,
             message.user.xmppUsername,
-            message.xmppFrom
+            xmppFromSender
         )
-        return messageCandidates.any { it in currentCandidates }
+        val match = messageCandidates.any { it in currentCandidates }
+        if (match) {
+            // Cheap visibility into the false-positive class. Paired with
+            // `RoomStoreUnreadDbg` lines above — when an incoming message in a
+            // non-active room is unexpectedly classified as "own" this prints
+            // exactly which candidate matched, so host integrations can spot
+            // a misconfigured `currentUser` immediately.
+            val overlap = messageCandidates.filter { it in currentCandidates }
+            android.util.Log.d(
+                "RoomStoreUnreadDbg",
+                "  → isOwnMessage=true matched=$overlap msgUser={id=${message.user.id}, xmpp=${message.user.xmppUsername}, from=${message.xmppFrom}}"
+            )
+        }
+        return match
     }
 
     private fun identityCandidates(vararg rawValues: String?): Set<String> {
