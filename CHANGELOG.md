@@ -4,7 +4,7 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
-## [26.05.20] — JitPack `v1.0.41`
+## [26.05.20] — JitPack `v1.0.40`
 
 - **Fixed:** `addUnreadListener` no longer stays pinned at `hasUnread=false` for badge-listener integrations whose room JID collides with the current user identity. `RoomStore.isOwnMessage` previously fed the raw stanza `xmppFrom` (shape `roomJid/senderResource` for MUC) into `identityCandidates`, which split the room JID into bare + local-part and added them as **sender** identity candidates. When the room's local part shared a string with `currentUser.id` / `xmppUsername` — exactly the Ethora layout where rooms are created as `<creatorId>_<uuid>@conference…` — every incoming MUC stanza was misclassified as "own", `updateUnreadCount` filtered it, `RoomStore.rooms` never re-emitted a delta on `hasUnread()`, and the listener appeared dead. `isOwnMessage` now strips the room prefix and matches only the sender resource segment; `user.id` / `user.xmppUsername` (populated by `XMPPWebSocketConnection.parseAndHandleRealtimeMessage` from `senderJID`) carry the actual ownership signal. A new regression test pins the worst-case `user.id == room.local` collision.
 - **Improved:** `ChatService.lifecycle.onChatPaused` and `onChatResumed` now run `RoomStore.recomputeUnreadForAllRooms()` after every visibility transition, instead of relying on the host to call `EthoraChatBootstrap.recomputeUnread()` manually. Closes the failure mode where a message arrived during the transition window — while the active-room shortcut still forced `unread=0` — and never got re-evaluated after `setCurrentRoom(null)`. Same code path the next incoming message would take; cheap, idempotent, safe to call twice. Host integrations no longer need a `try/finally { recomputeUnread() }` belt-and-braces around their `onChatPaused()` calls.
@@ -13,15 +13,11 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
-## [26.05.19] — JitPack `v1.0.40`
+## [26.05.15] — JitPack `v1.0.39`
 
 - **New:** `EthoraChatBootstrap.recomputeUnread()` — host-facing safety net that forces an unread recompute across every room from current `MessageStore` state and re-emits on the `hasUnread()` flow. Same code path that incoming messages take (`RoomStore.updateUnreadCount` per room), so the answer is identical to what would arrive on the next real message. Use it when the host suspects the listener is stuck on a stale boolean — e.g. after a manual persistence mutation, an out-of-band message injection, or a race with host-side lifecycle code. Cheap and idempotent.
 - **Improved:** Verbose diagnostics in `RoomStore.updateUnreadCount` under tag `RoomStoreUnreadDbg`. Logs the entry state (`activeJid`, `lastViewed`, `baseline`, `effectiveBaseline`, current-user identity fields) plus a per-message line showing exactly which filter dropped it (`delimiter` / `pending` / `sendFailed` / `deleted` / `system` / `ownMessage` / `ts<=baseline (diff=Nms)`). Filter at D level: `adb logcat -v time -s RoomStoreUnreadDbg:D RoomStore:D`. Critical when diagnosing host integrations whose unread badge appears stuck — tells you in one log line whether the message was classified as own, dropped by timestamp, or actually counted.
 - **Tests:** SDK unit tests pass against the rebuilt artifact (`./gradlew :ethora-component:test`).
-
----
-
-## [26.05.15] — JitPack `v1.0.39`
 
 - **New:** `ChatService.lifecycle.onChatPaused(roomJid: String? = null)` / `onChatResumed(roomJid)` — host-facing API for signalling chat visibility when the SDK's auto-detection can't see the transition. Call `onChatPaused()` when the host navigates away from the chat surface (bottom-nav tab swap inside the same Activity, host-rendered overlay layered on top, etc.) and `onChatResumed()` when it comes back. Pause flushes the active room's read marker to the XMPP private store (XEP-0049 chatjson), bumps the local `lastViewedTimestamp` to now, and clears `currentRoom` so subsequent arrivals count toward the unread badge. Resume restores `currentRoom` and zeroes the local marker. The optional `roomJid` parameter lets badge-listener integrations (where the `Chat` composable isn't mounted and `RoomStore.currentRoom` may be null) target their listener room explicitly; falls back to the live `currentRoom` when omitted. Idempotent on repeated calls. Internal state reset on logout.
 - **New:** `EthoraChatBootstrap` now registers its shared XMPPClient with `LogoutService.setXMPPClient(...)` as soon as `ensureConnected` returns true, so SDK services that need the live client (`ChatLifecycleService`, host-side callers reaching through `peekXMPPClient`) can find it before the `Chat` composable mounts. The later in-composable registration in `EthoraChat.kt` is a no-op re-register for the same instance and does not disconnect the live socket.
