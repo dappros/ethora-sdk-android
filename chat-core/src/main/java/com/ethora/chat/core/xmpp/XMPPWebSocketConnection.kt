@@ -248,6 +248,12 @@ class XMPPWebSocketConnection(
                     isConnected = false
                     isAuthenticated = false
                     authState = AuthState.NOT_STARTED
+                    // OkHttp contract: ack the server's close frame to complete the
+                    // handshake and progress to onClosed. Without this the socket
+                    // sits half-closed for minutes and reconnect never starts.
+                    try {
+                        webSocket.close(code, reason)
+                    } catch (_: Throwable) {}
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -455,6 +461,33 @@ class XMPPWebSocketConnection(
                     }
                 }
                 AuthState.AUTHENTICATED -> {
+                    // Server-initiated termination: <stream:error/> (e.g. conflict
+                    // "Replaced by new connection" when the same JID logs in
+                    // elsewhere) or <close/> framing. Without this branch the
+                    // stanza fell through to parseAndHandleStanza, which silently
+                    // ignored it, so the SDK stayed in AUTHENTICATED state with a
+                    // dead socket until OkHttp eventually broke ~13 min later.
+                    if (xml.contains("<stream:error") || xml.contains("<close")) {
+                        val cause = when {
+                            xml.contains("conflict") -> "conflict (replaced by new connection)"
+                            xml.contains("system-shutdown") -> "system-shutdown"
+                            xml.contains("policy-violation") -> "policy-violation"
+                            xml.contains("<close") -> "server <close/>"
+                            else -> "stream-error"
+                        }
+                        Log.w(TAG, "⚠️ Server terminating stream: $cause — xml=${xml.take(400)}")
+                        com.ethora.chat.core.store.LogStore.warning(
+                            TAG,
+                            "⚠️ Server terminating stream: $cause — initiating client close to trigger reconnect",
+                            category = "xmpp-transport"
+                        )
+                        isAuthenticated = false
+                        authState = AuthState.NOT_STARTED
+                        try {
+                            webSocket?.close(1000, cause)
+                        } catch (_: Throwable) {}
+                        return
+                    }
                     // Handle normal XMPP stanzas
                     parseAndHandleStanza(xml)
                 }

@@ -269,16 +269,21 @@ fun ChatRoomView(
     )
     
     // Track if scroll to bottom button should be shown
-    var showScrollToBottom by remember { mutableStateOf(false) }
+    var showScrollToBottom by remember(room.jid) { mutableStateOf(false) }
 
-    // Track unread count (messages that arrived while scrolled up)
-    var unreadCount by remember { mutableStateOf(0) }
-    var lastMessageCount by remember { mutableStateOf(messages.size) }
+    // Track unread count (messages that arrived while scrolled up).
+    // Per-room state MUST be keyed by room.jid — otherwise switching rooms
+    // inside the same Chat composable carries stale tail anchors and counter
+    // values into the new room, producing inflated badges (e.g. "23" on a
+    // room that has only 2 unread). initialAutoScrollDone below was already
+    // keyed; these were the leftovers.
+    var unreadCount by remember(room.jid) { mutableStateOf(0) }
+    var lastMessageCount by remember(room.jid) { mutableStateOf(messages.size) }
     // Track the id of the newest (tail) message we've already accounted for.
     // load-more only prepends older messages, so the tail id is unchanged —
     // that's how we distinguish it from a real incoming message arrival.
-    var lastTailId by remember { mutableStateOf(messages.lastOrNull()?.id) }
-    var pendingOwnMessageAutoScroll by remember { mutableStateOf(false) }
+    var lastTailId by remember(room.jid) { mutableStateOf(messages.lastOrNull()?.id) }
+    var pendingOwnMessageAutoScroll by remember(room.jid) { mutableStateOf(false) }
 
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
