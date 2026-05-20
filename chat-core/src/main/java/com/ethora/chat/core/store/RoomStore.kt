@@ -536,6 +536,7 @@ object RoomStore {
             if (room.unreadMessages != 0 || room.unreadCapped) {
                 updateRoom(room.copy(unreadMessages = 0, unreadCapped = false))
             }
+            android.util.Log.d("RoomStoreUnreadDbg", "shortcut: activeJid=$activeJid → unread=0")
             return
         }
 
@@ -545,27 +546,52 @@ object RoomStore {
         // Web: `const a = r > 0 ? r : s;`
         val effectiveBaseline = if (lastViewed > 0L) lastViewed else baseline
 
+        android.util.Log.d("RoomStoreUnreadDbg",
+            "ENTER room=$roomJid activeJid=$activeJid lastViewed=$lastViewed baseline=$baseline " +
+                "effectiveBaseline=$effectiveBaseline msgs=${messages.size} " +
+                "currentUser={id=${currentUser?.id}, xmppUsername=${currentUser?.xmppUsername}, " +
+                "userJID=${currentUser?.userJID}, username=${currentUser?.username}}")
+
         val countable = messages.count { msg ->
             // Web's `oT(u)` predicate — plus our own extensions for sendFailed
             // and isDeleted which web hides at render time.
-            if (msg.id == "delimiter-new") return@count false
-            if (msg.pending == true) return@count false
-            if (msg.sendFailed == true) return@count false
-            if (msg.isDeleted == true) return@count false
-            if (msg.isSystemMessage == "true") return@count false
-
-            // Skip every flavour of "this is from me" — see helper docs.
-            if (isOwnMessage(msg, currentUser)) return@count false
+            val skipReason: String = when {
+                msg.id == "delimiter-new" -> "delimiter"
+                msg.pending == true -> "pending"
+                msg.sendFailed == true -> "sendFailed"
+                msg.isDeleted == true -> "deleted"
+                msg.isSystemMessage == "true" -> "system"
+                isOwnMessage(msg, currentUser) -> "ownMessage"
+                else -> ""
+            }
+            if (skipReason.isNotEmpty()) {
+                android.util.Log.d("RoomStoreUnreadDbg",
+                    "  msg id=${msg.id} body='${msg.body.take(30)}' user={id=${msg.user.id}, " +
+                        "xmpp=${msg.user.xmppUsername}, jid=${msg.user.userJID}} " +
+                        "xmppFrom=${msg.xmppFrom} → SKIP ($skipReason)")
+                return@count false
+            }
 
             // Web: `const l = l0(u); return l <= 0 || a <= 0 ? false : l > a;`
             val ts = msg.timestamp ?: msg.date.time
-            if (ts <= 0L) return@count false
-            if (effectiveBaseline <= 0L) return@count false
-            ts > effectiveBaseline
+            val tsReason: String = when {
+                ts <= 0L -> "ts<=0"
+                effectiveBaseline <= 0L -> "baseline<=0"
+                ts <= effectiveBaseline -> "ts<=baseline (diff=${effectiveBaseline - ts}ms)"
+                else -> ""
+            }
+            val passes = tsReason.isEmpty()
+            android.util.Log.d("RoomStoreUnreadDbg",
+                "  msg id=${msg.id} body='${msg.body.take(30)}' user={id=${msg.user.id}, " +
+                    "xmpp=${msg.user.xmppUsername}} ts=$ts dateTime=${msg.date.time} " +
+                    "effectiveBaseline=$effectiveBaseline → ${if (passes) "COUNT" else "SKIP ($tsReason)"}")
+            passes
         }
 
         val unread = countable.coerceAtMost(MAX_UNREAD_COUNT)
         val capped = countable > MAX_UNREAD_COUNT
+        android.util.Log.d("RoomStoreUnreadDbg",
+            "RESULT room=$roomJid countable=$countable unread=$unread (prev=${room.unreadMessages}) capped=$capped")
 
         if ((room.unreadMessages) != unread || room.unreadCapped != capped) {
             updateRoom(room.copy(unreadMessages = unread, unreadCapped = capped))
@@ -592,12 +618,45 @@ object RoomStore {
         )
         if (currentCandidates.isEmpty()) return false
 
+        // For MUC stanzas `xmppFrom` is `roomJid/senderJidOrNick(/optionalRes)`.
+        // Passing it as-is to `identityCandidates` would add the ROOM JID (and
+        // its local part) as a sender candidate, which can falsely match the
+        // current user when the room JID encodes the creator's user id (Ethora
+        // rooms are `<creatorId>_<uuid>@conference…`). When the room JID
+        // collides with the current user (e.g. user opens a 1-1 chat with
+        // themselves, or the host accidentally configures the wrong user
+        // record), every incoming MUC stanza would be classified as "own" and
+        // the unread badge would stay pinned at zero — exactly the symptom in
+        // the field report.
+        //
+        // The XMPP parser already populates `user.id` and `user.xmppUsername`
+        // from the senderJID / from-resource (XMPPWebSocketConnection
+        // L864-879), so dropping the room half of `xmppFrom` loses no
+        // information. Keep the resource segment as a tertiary candidate for
+        // the case where `user.id` is blank (legacy delegate paths).
+        val xmppFromSender = message.xmppFrom?.let { from ->
+            val slashIdx = from.indexOf('/')
+            if (slashIdx >= 0) from.substring(slashIdx + 1) else from
+        }?.takeIf { it.isNotBlank() }
         val messageCandidates = identityCandidates(
             message.user.id,
             message.user.xmppUsername,
-            message.xmppFrom
+            xmppFromSender
         )
-        return messageCandidates.any { it in currentCandidates }
+        val match = messageCandidates.any { it in currentCandidates }
+        if (match) {
+            // Cheap visibility into the false-positive class. Paired with
+            // `RoomStoreUnreadDbg` lines above — when an incoming message in a
+            // non-active room is unexpectedly classified as "own" this prints
+            // exactly which candidate matched, so host integrations can spot
+            // a misconfigured `currentUser` immediately.
+            val overlap = messageCandidates.filter { it in currentCandidates }
+            android.util.Log.d(
+                "RoomStoreUnreadDbg",
+                "  → isOwnMessage=true matched=$overlap msgUser={id=${message.user.id}, xmpp=${message.user.xmppUsername}, from=${message.xmppFrom}}"
+            )
+        }
+        return match
     }
 
     private fun identityCandidates(vararg rawValues: String?): Set<String> {

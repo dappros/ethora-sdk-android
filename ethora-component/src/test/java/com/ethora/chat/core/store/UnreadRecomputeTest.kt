@@ -167,6 +167,67 @@ class UnreadRecomputeTest {
     }
 
     @Test
+    fun `MUC xmppFrom room prefix is not misclassified as own sender`() {
+        // Regression for the field report: in Ethora MUC rooms the stanza
+        // `from` is `roomJid/senderResource`, and the room's local part is
+        // `<creatorId>_<uuid>`. The previous `identityCandidates(xmppFrom)`
+        // call yielded the bare room JID and its local part as sender
+        // candidates, so a current user whose `id` / `xmppUsername` happened
+        // to overlap with the room's local part would falsely classify every
+        // incoming MUC message as "own" — and `addUnreadListener` would stay
+        // pinned at `false` forever. We strip the room half of `xmppFrom`
+        // before identity matching so only the sender resource contributes.
+        UserStore.setUser(
+            User(
+                // Worst-case collision: the host configures the user record
+                // such that `id` exactly equals the room's local part (the
+                // failure surface we're protecting against — the field bug
+                // looked like this whenever the host accidentally seeded
+                // the user from the room creator record).
+                id = "creator_uuid",
+                xmppUsername = "alice@example.com"
+            )
+        )
+        RoomStore.setLastViewedTimestamp(roomJid, 1_000L)
+        val collidingRoomJid = "creator_uuid@conference.example.com"
+        RoomStore.setRooms(
+            listOf(
+                Room(
+                    id = "room-2",
+                    jid = collidingRoomJid,
+                    name = "muc",
+                    title = "MUC"
+                )
+            )
+        )
+        RoomStore.setLastViewedTimestamp(collidingRoomJid, 1_000L)
+
+        MessageStore.addMessages(
+            collidingRoomJid,
+            listOf(
+                Message(
+                    id = "muc-incoming-1",
+                    // Real sender — distinct from current user.
+                    user = User(id = "bob", xmppUsername = "bob@example.com"),
+                    date = Date(2_000L),
+                    body = "hi from MUC",
+                    roomJid = collidingRoomJid,
+                    timestamp = 2_000L,
+                    // Stanza `from` follows the MUC convention; the room
+                    // half collides with the current user's id.
+                    xmppFrom = "$collidingRoomJid/bob"
+                )
+            )
+        )
+
+        assertEquals(
+            "MUC incoming must not be eaten by room/user-id collision",
+            1,
+            RoomStore.getRoomByJid(collidingRoomJid)?.unreadMessages
+        )
+    }
+
+    @Test
     fun `incoming message from another user past lastViewed still counts`() {
         // Guard rail: the new isOwnMessage-based filter must NOT swallow
         // legitimate incoming messages. Set current user; arrival from

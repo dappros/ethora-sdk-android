@@ -112,6 +112,28 @@ object EthoraChatBootstrap {
     }
 
     /**
+     * Force-recompute unread counts for every room from the current
+     * [MessageStore] state, then re-emit on the [hasUnread] flow. Safety
+     * net for hosts whose listener appears to be stuck on a stale boolean
+     * after a state transition the SDK couldn't observe (e.g. a manual
+     * persistence mutation, an out-of-band message injection, a race with
+     * host-side lifecycle code). The recompute runs the standard
+     * `updateUnreadCount(roomJid, messages)` per room — same code path
+     * incoming messages take — so the answer is identical to what would
+     * arrive on the next real message. Cheap and idempotent.
+     *
+     * Typical use:
+     * ```kotlin
+     * // After your own visibility transition or any state mutation you
+     * // suspect the SDK didn't catch:
+     * EthoraChatBootstrap.recomputeUnread()
+     * ```
+     */
+    fun recomputeUnread() {
+        RoomStore.recomputeUnreadForAllRooms()
+    }
+
+    /**
      * Fire-and-forget entry point — the supported way to kick off the background
      * bootstrap BEFORE any composable mounts, mirroring web's xmppProvider.tsx
      * useEffect that runs on app root mount.
