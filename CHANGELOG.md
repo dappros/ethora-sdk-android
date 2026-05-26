@@ -4,6 +4,16 @@ All notable changes to this package are documented here. For cross-SDK release n
 
 ---
 
+## [26.05.26] — JitPack `v1.0.42`
+
+- **New:** Dark-mode colour overrides across the host-facing theme API. `ChatColors` adds optional `primaryDark` / `secondaryDark`, plus new `headerColor` / `inputBarColor` / `inputTextColor` (with matching `*Dark` siblings) so the toolbar and input row can be tinted independently of Material `surface`. `MessageBubbleStyle` adds `backgroundMessageUserDark`, `backgroundMessageDark`, `colorUserDark`, `colorDark`. `BackgroundChatConfig` adds `colorDark` and `imageDark`. Every new field is nullable and defaults to "use the light value in dark mode", so existing hosts pass through unchanged.
+- **New:** `ChatConfig.forceDarkTheme: Boolean?` — pin the chat surface to a specific mode regardless of system setting (`true` → always dark, `false` → always light, `null` → follow system). Builder mirror is `.forceDarkTheme(value)`. Useful when the host app already owns a theme switcher and wants the SDK to follow it instead of the OS.
+- **New:** `LocalChatThemeOverrides` CompositionLocal + `chatThemeOverrides()` accessor in `chat-ui/.../styling/`. `ChatTheme(..., bubble, background, colors, darkTheme)` resolves the host's hex strings into Compose `Color`s for the current mode once at the top of the tree; downstream composables (`MessageBubble`, `ChatRoomView`, `ChatInfoScreen`, `ChatInput`) read the resolved value with a `?: MaterialTheme...` fallback so a partial override stays partial. Removes the per-component `Color(android.graphics.Color.parseColor(...))` calls that previously each had to re-parse the same string.
+- **Improved:** Hex parsing centralised in `parseHexColor(raw: String?)` — trims whitespace, tolerates a missing leading `#`, returns `null` on `IllegalArgumentException` instead of crashing the recomposition. Dark schemes prefer `primaryDark` / `secondaryDark` over `primary` / `secondary` when both are set, so a host can keep the brand colour in light mode and desaturate in dark without touching their light theme values.
+- **Docs:** README gains a customisation section walking through the new per-mode hooks and the `pick(light, dark)` resolution rule.
+
+---
+
 ## [26.05.20] — JitPack `v1.0.41`
 
 - **Fixed:** `addUnreadListener` no longer stays pinned at `hasUnread=false` for badge-listener integrations whose room JID collides with the current user identity. `RoomStore.isOwnMessage` previously fed the raw stanza `xmppFrom` (shape `roomJid/senderResource` for MUC) into `identityCandidates`, which split the room JID into bare + local-part and added them as **sender** identity candidates. When the room's local part shared a string with `currentUser.id` / `xmppUsername` — exactly the Ethora layout where rooms are created as `<creatorId>_<uuid>@conference…` — every incoming MUC stanza was misclassified as "own", `updateUnreadCount` filtered it, `RoomStore.rooms` never re-emitted a delta on `hasUnread()`, and the listener appeared dead. `isOwnMessage` now strips the room prefix and matches only the sender resource segment; `user.id` / `user.xmppUsername` (populated by `XMPPWebSocketConnection.parseAndHandleRealtimeMessage` from `senderJID`) carry the actual ownership signal. A new regression test pins the worst-case `user.id == room.local` collision.
