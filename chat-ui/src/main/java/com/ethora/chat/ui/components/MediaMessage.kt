@@ -13,6 +13,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import android.util.Log
 import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.util.FileSizeFormatter
@@ -102,6 +103,10 @@ private fun ImageMessage(
     var loadFailed by remember(model) { mutableStateOf(false) }
     val showFallback = model == null || loadFailed
 
+    LaunchedEffect(model, loadFailed) {
+        Log.d("ImageMessage", "imageUrl=$imageUrl previewUrl=$previewUrl rawUrl=$rawUrl model=$model loadFailed=$loadFailed showFallback=$showFallback")
+    }
+
     Surface(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
@@ -116,7 +121,10 @@ private fun ImageMessage(
                     .widthIn(min = 160.dp, max = 300.dp)
                     .heightIn(min = 120.dp, max = 400.dp),
                 contentScale = ContentScale.Fit,
-                onError = { loadFailed = true }
+                onError = { err ->
+                    Log.e("ImageMessage", "Coil load FAILED for model=$model: ${err.result.throwable}", err.result.throwable)
+                    loadFailed = true
+                }
             )
         } else {
             MediaFallbackIcon(fileName = fileName)
