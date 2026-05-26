@@ -47,6 +47,7 @@ import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.store.PendingMediaSendStatus
+import com.ethora.chat.ui.styling.LocalChatThemeOverrides
 import java.util.regex.Pattern
 
 /**
@@ -115,6 +116,12 @@ fun MessageBubble(
             )
         }
     }
+
+    val overrides = LocalChatThemeOverrides.current
+    val outgoingBubbleColor = overrides.outgoingBubbleBackground ?: MaterialTheme.colorScheme.primary
+    val incomingBubbleColor = overrides.incomingBubbleBackground ?: MaterialTheme.colorScheme.surfaceVariant
+    val outgoingTextColor = overrides.outgoingBubbleText ?: MaterialTheme.colorScheme.onPrimary
+    val incomingTextColor = overrides.incomingBubbleText ?: MaterialTheme.colorScheme.onSurfaceVariant
 
     Row(
         modifier = modifier
@@ -208,9 +215,9 @@ fun MessageBubble(
                 color = if (message.isDeleted == true)
                     MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
                 else if (isUser)
-                    MaterialTheme.colorScheme.primary
+                    outgoingBubbleColor
                 else
-                    MaterialTheme.colorScheme.surfaceVariant,
+                    incomingBubbleColor,
                 shadowElevation = if (message.isDeleted == true) 0.dp else if (isUser) 3.dp else 1.dp,
                 tonalElevation = 0.dp
             ) {
@@ -303,10 +310,7 @@ fun MessageBubble(
                                 FormattedMessageText(
                                     text = message.body,
                                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                                    textColor = if (isUser)
-                                        MaterialTheme.colorScheme.onPrimary
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textColor = if (isUser) outgoingTextColor else incomingTextColor,
                                     lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4,
                                     onLongPress = { triggerLongPress(null) },
                                     onPressChange = { isPressed = it }
@@ -340,16 +344,16 @@ fun MessageBubble(
                                 message.isDeleted == true ->
                                     MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                                 isUser ->
-                                    MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f)
+                                    outgoingTextColor.copy(alpha = 0.7f)
                                 else ->
-                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    incomingTextColor.copy(alpha = 0.6f)
                             }
                         )
                         if (showSendingIcon) {
                             Icon(
                                 imageVector = Icons.Default.Schedule,
                                 contentDescription = "Sending",
-                                tint = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
+                                tint = outgoingTextColor.copy(alpha = 0.75f),
                                 modifier = Modifier
                                     .size(14.dp)
                                     .testTag(MessageBubbleTestTags.STATUS_SENDING)

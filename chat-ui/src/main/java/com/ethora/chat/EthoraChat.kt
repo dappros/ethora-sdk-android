@@ -283,7 +283,12 @@ fun Chat(
         }
     }
     
-    ChatTheme(colors = config.colors) {
+    ChatTheme(
+        darkTheme = config.forceDarkTheme ?: androidx.compose.foundation.isSystemInDarkTheme(),
+        colors = config.colors,
+        bubble = config.bubleMessage,
+        background = config.backgroundChat
+    ) {
         var hadSuccessfulConnection by remember(currentUser?.id) { mutableStateOf(false) }
 
         // Initialize XMPP client if user is available.

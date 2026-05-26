@@ -12,6 +12,13 @@ data class ChatConfig(
     val disableHeader: Boolean? = null,
     val disableMedia: Boolean? = null,
     val colors: ChatColors? = null,
+    /**
+     * Force a specific theme regardless of system setting.
+     *   true  → always dark
+     *   false → always light
+     *   null  → follow the system (default)
+     */
+    val forceDarkTheme: Boolean? = null,
 
     // Login Configurations
     val googleLogin: GoogleLoginConfig? = null,
@@ -120,6 +127,7 @@ data class ChatConfig(
         private var disableHeader: Boolean? = null
         private var disableMedia: Boolean? = null
         private var colors: ChatColors? = null
+        private var forceDarkTheme: Boolean? = null
         private var googleLogin: GoogleLoginConfig? = null
         private var jwtLogin: JWTLoginConfig? = null
         private var userLogin: UserLoginConfig? = null
@@ -178,6 +186,7 @@ data class ChatConfig(
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
         fun colors(value: ChatColors) = apply { this.colors = value }
+        fun forceDarkTheme(value: Boolean?) = apply { this.forceDarkTheme = value }
         fun googleLogin(value: GoogleLoginConfig) = apply { this.googleLogin = value }
         fun jwtLogin(value: JWTLoginConfig) = apply { this.jwtLogin = value }
         fun userLogin(value: UserLoginConfig) = apply { this.userLogin = value }
@@ -237,6 +246,7 @@ data class ChatConfig(
             disableHeader = disableHeader,
             disableMedia = disableMedia,
             colors = colors,
+            forceDarkTheme = forceDarkTheme,
             googleLogin = googleLogin,
             jwtLogin = jwtLogin,
             userLogin = userLogin,

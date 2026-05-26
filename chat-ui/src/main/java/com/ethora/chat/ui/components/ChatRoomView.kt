@@ -594,10 +594,13 @@ fun ChatRoomView(
 
     // Get chat config
     val config by com.ethora.chat.core.store.ChatStore.config.collectAsState()
+    val themeOverrides = com.ethora.chat.ui.styling.LocalChatThemeOverrides.current
+    val chatBackgroundColor = themeOverrides.chatBackground ?: MaterialTheme.colorScheme.background
 
     Column(
         modifier = modifier
             .fillMaxSize()
+            .background(chatBackgroundColor)
             .onGloballyPositioned { coords ->
                 // Feeds the `isActivelyViewed` derived state above. Zero
                 // window-clipped bounds → host has hidden us (0-size Box,
