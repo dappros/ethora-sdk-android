@@ -12,12 +12,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.RoomMember
+import com.ethora.chat.ui.styling.LocalChatThemeOverrides
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -31,13 +34,21 @@ fun ChatInfoScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val overrides = LocalChatThemeOverrides.current
+    val screenBg = overrides.chatBackground ?: MaterialTheme.colorScheme.background
+    val headerBg = overrides.headerBackground ?: MaterialTheme.colorScheme.surface
+    val headerContentColor = if (headerBg.luminance() > 0.5f) Color.Black else Color.White
+    val cardBg = overrides.outgoingBubbleBackground
+        ?: MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+    val cardText = overrides.outgoingBubbleText
+        ?: if (cardBg.luminance() > 0.5f) Color.Black else Color.White
+    val onScreenBg = if (screenBg.luminance() > 0.5f) Color.Black else Color.White
+
     Scaffold(
+        containerColor = screenBg,
         topBar = {
             TopAppBar(
                 title = {
-                    // Show the actual room title instead of a generic "Chat Profile"
-                    // label — matches web's ChatProfileModal which puts the room
-                    // name in the modal header.
                     val headerText = room.title.ifBlank { room.name.ifBlank { room.jid.substringBefore("@") } }
                     Text(text = headerText, maxLines = 1)
                 },
@@ -48,7 +59,13 @@ fun ChatInfoScreen(
                             contentDescription = "Back"
                         )
                     }
-                }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = headerBg,
+                    titleContentColor = headerContentColor,
+                    navigationIconContentColor = headerContentColor,
+                    actionIconContentColor = headerContentColor
+                )
             )
         }
     ) { paddingValues ->
@@ -103,14 +120,14 @@ fun ChatInfoScreen(
                         style = MaterialTheme.typography.headlineMedium.copy(
                             fontWeight = FontWeight.Bold
                         ),
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = onScreenBg
                     )
-                    
+
                     // Member count
                     Text(
                         text = "${room.usersCnt} ${if (room.usersCnt == 1) "member" else "members"}",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = onScreenBg.copy(alpha = 0.7f)
                     )
                 }
             }
@@ -121,7 +138,9 @@ fun ChatInfoScreen(
                 item {
                     InfoCard(
                         label = "Description",
-                        value = roomDescription
+                        value = roomDescription,
+                        cardColor = cardBg,
+                        textColor = cardText
                     )
                 }
             }
@@ -135,12 +154,13 @@ fun ChatInfoScreen(
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.SemiBold
                         ),
+                        color = onScreenBg,
                         modifier = Modifier.padding(vertical = 8.dp)
                     )
                 }
                 
                 items(roomMembers) { member ->
-                    MemberItem(member = member)
+                    MemberItem(member = member, cardColor = cardBg, textColor = cardText)
                 }
             }
         }
@@ -154,12 +174,14 @@ fun ChatInfoScreen(
 private fun InfoCard(
     label: String,
     value: String,
+    cardColor: Color,
+    textColor: Color,
     modifier: Modifier = Modifier
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+        color = cardColor
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -168,12 +190,12 @@ private fun InfoCard(
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                color = textColor.copy(alpha = 0.7f)
             )
             Text(
                 text = value,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
+                color = textColor
             )
         }
     }
@@ -185,12 +207,14 @@ private fun InfoCard(
 @Composable
 private fun MemberItem(
     member: RoomMember,
+    cardColor: Color,
+    textColor: Color,
     modifier: Modifier = Modifier
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+        color = cardColor
     ) {
         Row(
             modifier = Modifier
@@ -203,7 +227,7 @@ private fun MemberItem(
             Surface(
                 modifier = Modifier.size(48.dp),
                 shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer
+                color = textColor.copy(alpha = 0.15f)
             ) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
@@ -223,11 +247,11 @@ private fun MemberItem(
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.Medium
                         ),
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = textColor
                     )
                 }
             }
-            
+
             // Name and info
             Column(
                 modifier = Modifier.weight(1f),
@@ -239,9 +263,9 @@ private fun MemberItem(
                     style = MaterialTheme.typography.bodyLarge.copy(
                         fontWeight = FontWeight.SemiBold
                     ),
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = textColor
                 )
-                
+
                 if (member.lastActive != null) {
                     val dateFormat = SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault())
                     val lastActiveValue = member.lastActive
@@ -249,12 +273,12 @@ private fun MemberItem(
                         Text(
                             text = dateFormat.format(Date(lastActiveValue * 1000)),
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            color = textColor.copy(alpha = 0.7f)
                         )
                     }
                 }
             }
-            
+
             // Role badge
             val memberRole = member.role
             if (!memberRole.isNullOrBlank() && memberRole != "none") {
@@ -263,7 +287,7 @@ private fun MemberItem(
                     color = if (member.banStatus == "banned") {
                         MaterialTheme.colorScheme.errorContainer
                     } else {
-                        MaterialTheme.colorScheme.primaryContainer
+                        textColor.copy(alpha = 0.15f)
                     }
                 ) {
                     Text(
@@ -275,7 +299,7 @@ private fun MemberItem(
                         color = if (member.banStatus == "banned") {
                             MaterialTheme.colorScheme.onErrorContainer
                         } else {
-                            MaterialTheme.colorScheme.onPrimaryContainer
+                            textColor
                         }
                     )
                 }

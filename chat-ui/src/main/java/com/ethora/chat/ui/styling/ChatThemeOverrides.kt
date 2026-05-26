@@ -6,6 +6,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.graphics.Color
 import com.ethora.chat.core.config.BackgroundChatConfig
 import com.ethora.chat.core.config.MessageBubbleStyle
+import com.ethora.chat.core.config.ChatColors as ConfigColors
 
 /**
  * Resolved colour overrides for the SDK's chat surface. Populated by
@@ -25,7 +26,10 @@ data class ChatThemeOverrides(
     val outgoingBubbleText: Color? = null,
     val incomingBubbleText: Color? = null,
     val chatBackground: Color? = null,
-    val chatBackgroundImage: String? = null
+    val chatBackgroundImage: String? = null,
+    val headerBackground: Color? = null,
+    val inputBarBackground: Color? = null,
+    val inputTextColor: Color? = null
 ) {
     companion object {
         val Empty = ChatThemeOverrides()
@@ -42,9 +46,10 @@ val LocalChatThemeOverrides = compositionLocalOf { ChatThemeOverrides.Empty }
 internal fun resolveOverrides(
     bubble: MessageBubbleStyle?,
     background: BackgroundChatConfig?,
+    colors: ConfigColors?,
     darkTheme: Boolean
 ): ChatThemeOverrides {
-    if (bubble == null && background == null) return ChatThemeOverrides.Empty
+    if (bubble == null && background == null && colors == null) return ChatThemeOverrides.Empty
     fun pick(light: String?, dark: String?): Color? {
         val raw = if (darkTheme) (dark ?: light) else light
         return parseHexColor(raw)
@@ -57,7 +62,10 @@ internal fun resolveOverrides(
         chatBackground = pick(background?.color, background?.colorDark),
         chatBackgroundImage = if (darkTheme) {
             background?.imageDark ?: background?.image
-        } else background?.image
+        } else background?.image,
+        headerBackground = pick(colors?.headerColor, colors?.headerColorDark),
+        inputBarBackground = pick(colors?.inputBarColor, colors?.inputBarColorDark),
+        inputTextColor = pick(colors?.inputTextColor, colors?.inputTextColorDark)
     )
 }
 

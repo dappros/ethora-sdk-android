@@ -895,26 +895,26 @@ fun ChatRoomView(
                                 .padding(top = 8.dp),
                             contentAlignment = androidx.compose.ui.Alignment.Center
                         ) {
-                            Card(
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
-                                ),
-                                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                            Surface(
+                                shape = MaterialTheme.shapes.small,
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     CircularProgressIndicator(
-                                        modifier = Modifier.size(20.dp),
-                                        strokeWidth = 2.dp
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
                                     )
                                     Text(
                                         text = "Loading older messages...",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.SemiBold
+                                        ),
+                                        color = MaterialTheme.colorScheme.primary
                                     )
                                 }
                             }
@@ -1239,10 +1239,12 @@ private fun ChatRoomHeader(
     showInfoButton: Boolean,
     showBackButton: Boolean
 ) {
+    val headerColor = com.ethora.chat.ui.styling.LocalChatThemeOverrides.current.headerBackground
+        ?: MaterialTheme.colorScheme.surface
     Surface(
         tonalElevation = 0.dp,
         shadowElevation = 0.dp,
-        color = MaterialTheme.colorScheme.surface
+        color = headerColor
     ) {
         Row(
             modifier = Modifier

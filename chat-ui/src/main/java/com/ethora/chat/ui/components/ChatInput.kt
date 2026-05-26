@@ -167,11 +167,16 @@ fun ChatInput(
         }
     }
     
+    val themeOverrides = com.ethora.chat.ui.styling.LocalChatThemeOverrides.current
+    val inputBarColor = themeOverrides.inputBarBackground
+        ?: MaterialTheme.colorScheme.surface
+    val inputTextColor = themeOverrides.inputTextColor
+        ?: MaterialTheme.colorScheme.onSurface
     Surface(
         modifier = modifier.fillMaxWidth(),
         tonalElevation = 2.dp,
         shadowElevation = 0.dp,
-        color = MaterialTheme.colorScheme.surface
+        color = inputBarColor
     ) {
         Column {
             // File preview
@@ -369,21 +374,23 @@ fun ChatInput(
                                 sendStop()
                             }
                         },
-                    placeholder = { 
+                    placeholder = {
                         Text(
                             if (editText != null) "Edit message..." else "Type a message...",
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            color = inputTextColor.copy(alpha = 0.5f),
                             style = MaterialTheme.typography.bodyMedium
-                        ) 
+                        )
                     },
                     shape = RoundedCornerShape(24.dp),
                     singleLine = false,
                     maxLines = 5,
                     colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = inputTextColor,
+                        unfocusedTextColor = inputTextColor,
                         focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
                         unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
-                        focusedContainerColor = MaterialTheme.colorScheme.surface,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                        focusedContainerColor = inputBarColor,
+                        unfocusedContainerColor = inputBarColor
                     ),
                     textStyle = MaterialTheme.typography.bodyMedium
                 )

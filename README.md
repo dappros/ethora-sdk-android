@@ -16,6 +16,7 @@ This package ships a complete chat experience (room list + room view + media + r
 - [Single Room vs Multi Room](#single-room-vs-multi-room)
 - [Public APIs for Host UI](#public-apis-for-host-ui)
 - [ChatConfig Reference](#chatconfig-reference)
+  - [Color Customization](#color-customization)
 - [Event and Send Interception](#event-and-send-interception)
 - [Custom UI Components](#custom-ui-components)
 - [Push Notifications (FCM)](#push-notifications-fcm)
@@ -462,12 +463,76 @@ reconnectChat()
 - `chatHeaderSettings.roomTitleOverrides`
 - `chatHeaderSettings.chatInfoButtonDisabled`
 - `chatHeaderSettings.backButtonDisabled`
-- `colors`, `bubleMessage`, `backgroundChat`
+- `colors`, `bubleMessage`, `backgroundChat` (see [Color Customization](#color-customization) below)
 - `disableProfilesInteractions`
 - `eventHandlers`, `onChatEvent`, `onBeforeSend`
 - `customComponents`
 - `initBeforeLoad` — when `true`, the SDK runs the web-parity bootstrap (user fetch → rooms fetch → XMPP connect → private-store sync → per-room history preload) so `useUnread()` reports real counts before the `Chat` composable mounts. Drive it via `EthoraChatProvider` (wrap your app root) or `EthoraChatBootstrap.initializeAsync(context, config)` from `Application.onCreate`.
 - `retryConfig` — `RetryConfig(autoRetry: Boolean = false, maxAttempts: Int = 3)`. Controls whether failed text/media sends are silently retried in the background. **Default is `autoRetry = false`** — failed messages stay in the "Sending failed. Tap to retry or delete." state until the user acts. Manual user-initiated retry via the message context menu is always allowed regardless of this flag. Pass `RetryConfig(autoRetry = true)` to restore the legacy silent-retry behaviour.
+
+### Color Customization
+
+All color values are hex strings (`"#RRGGBB"` or `"RRGGBB"`). Every field is optional — when `null`, the SDK falls back to the Material 3 theme (light or dark, controlled by `forceDarkTheme`). Each light-mode field has a `*Dark` sibling; if the dark variant is `null`, the light value is used in both modes.
+
+#### `colors: ChatColors`
+
+| Field | Default | Effect |
+|---|---|---|
+| `primary` | `#0052CD` | Material `primary` — accent color, send button, links |
+| `secondary` | `#F3F6FC` | Material `secondary` |
+| `primaryDark` | = `primary` | Dark-mode override for `primary` |
+| `secondaryDark` | = `secondary` | Dark-mode override for `secondary` |
+| `headerColor` | Material `surface` | Chat header (toolbar) background; also applied to ChatInfo screen header |
+| `headerColorDark` | = `headerColor` | Dark-mode override |
+| `inputBarColor` | Material `surface` | Message input bar background |
+| `inputBarColorDark` | = `inputBarColor` | Dark-mode override |
+| `inputTextColor` | Material `onSurface` | Text color inside the message input field (including placeholder at 50% alpha) |
+| `inputTextColorDark` | = `inputTextColor` | Dark-mode override |
+
+#### `bubleMessage: MessageBubbleStyle`
+
+| Field | Default | Effect |
+|---|---|---|
+| `backgroundMessageUser` | Material `primary` | Outgoing (sent) message bubble background; also used as card color on ChatInfo screen |
+| `backgroundMessage` | `#FFFFFF` | Incoming (received) message bubble background |
+| `colorUser` | `#FFFFFF` | Outgoing message text color; also used as text color on ChatInfo cards |
+| `color` | `#000000` | Incoming message text color |
+| `borderRadius` | `16f` | Bubble corner radius (dp) |
+| `backgroundMessageUserDark` | = `backgroundMessageUser` | Dark-mode override |
+| `backgroundMessageDark` | = `backgroundMessage` | Dark-mode override |
+| `colorUserDark` | = `colorUser` | Dark-mode override |
+| `colorDark` | = `color` | Dark-mode override |
+
+#### `backgroundChat: BackgroundChatConfig`
+
+| Field | Default | Effect |
+|---|---|---|
+| `color` | Material `background` | Chat messages area background; also applied to ChatInfo screen background |
+| `image` | — | Background image URL (overrides `color`) |
+| `colorDark` | = `color` | Dark-mode override |
+| `imageDark` | = `image` | Dark-mode override |
+
+#### Example
+
+```kotlin
+val config = ChatConfig(
+    colors = ChatColors(
+        primary = "#5E3FDE",
+        secondary = "#E1E4FE",
+        headerColor = "#2D8B78",
+        inputBarColor = "#1A1A1A",
+        inputTextColor = "#FFFFFF"
+    ),
+    bubleMessage = MessageBubbleStyle(
+        backgroundMessageUser = "#5E3FDE",
+        colorUser = "#FFFFFF",
+        backgroundMessage = "#F2F4F8",
+        color = "#111827"
+    ),
+    backgroundChat = BackgroundChatConfig(color = "#7FFFD4"),
+    forceDarkTheme = false
+)
+```
 
 ### Fields present but not guaranteed as active behavior
 

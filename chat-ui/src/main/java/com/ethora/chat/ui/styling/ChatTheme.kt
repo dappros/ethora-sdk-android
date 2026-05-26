@@ -70,7 +70,7 @@ fun ChatTheme(
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) darkChatColorScheme(colors) else lightChatColorScheme(colors)
-    val overrides = resolveOverrides(bubble, background, darkTheme)
+    val overrides = resolveOverrides(bubble, background, colors, darkTheme)
 
     MaterialTheme(
         colorScheme = colorScheme,
