@@ -287,7 +287,8 @@ fun Chat(
         darkTheme = config.forceDarkTheme ?: androidx.compose.foundation.isSystemInDarkTheme(),
         colors = config.colors,
         bubble = config.bubleMessage,
-        background = config.backgroundChat
+        background = config.backgroundChat,
+        typography = config.typography
     ) {
         var hadSuccessfulConnection by remember(currentUser?.id) { mutableStateOf(false) }
 

@@ -62,6 +62,8 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.extended)
     implementation(libs.compose.navigation)
+    // Downloadable Google Fonts (configurable font family by name).
+    implementation(libs.compose.ui.text.google.fonts)
 
     // Image Loading
     implementation(libs.coil.compose)

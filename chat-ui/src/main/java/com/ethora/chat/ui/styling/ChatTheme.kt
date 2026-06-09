@@ -2,6 +2,7 @@ package com.ethora.chat.ui.styling
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -11,6 +12,7 @@ import androidx.compose.ui.graphics.Color
 import com.ethora.chat.core.config.BackgroundChatConfig
 import com.ethora.chat.core.config.MessageBubbleStyle
 import com.ethora.chat.core.config.ChatColors as ConfigColors
+import com.ethora.chat.core.config.ChatTypographyConfig
 
 /**
  * Light color scheme
@@ -67,16 +69,35 @@ fun ChatTheme(
     colors: ConfigColors? = null,
     bubble: MessageBubbleStyle? = null,
     background: BackgroundChatConfig? = null,
+    typography: ChatTypographyConfig? = null,
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) darkChatColorScheme(colors) else lightChatColorScheme(colors)
     val overrides = resolveOverrides(bubble, background, colors, darkTheme)
 
+    // Resolve the host-provided font (Google Font by name or bundled res/font);
+    // null keeps the platform default, identical to prior behaviour.
+    val fontFamily = rememberChatFontFamily(typography)
+
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = ChatTypography
+        typography = chatTypography(fontFamily)
     ) {
-        CompositionLocalProvider(LocalChatThemeOverrides provides overrides) {
+        // Also publish the family on LocalTextStyle so that bare `Text("…")`
+        // calls — those that don't reference a MaterialTheme.typography token —
+        // inherit the configured font too. This is the Compose equivalent of
+        // the web SDK's `--ethora-font-family` cascade. When no font is
+        // configured, leave LocalTextStyle untouched (default behaviour).
+        val baseTextStyle = LocalTextStyle.current
+        val resolvedTextStyle = if (fontFamily != null) {
+            baseTextStyle.copy(fontFamily = fontFamily)
+        } else {
+            baseTextStyle
+        }
+        CompositionLocalProvider(
+            LocalChatThemeOverrides provides overrides,
+            LocalTextStyle provides resolvedTextStyle
+        ) {
             content()
         }
     }
