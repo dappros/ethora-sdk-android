@@ -23,4 +23,3 @@ include(":ethora-component")
 // SDK only (chat-core + chat-ui source sets collected under :ethora-component).
 // The sample has its own self-contained Gradle build under `sample-chat-app/`
 // with its own `settings.gradle.kts` and wrapper; build it from there.
-
