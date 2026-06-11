@@ -44,8 +44,16 @@ fun mergeSingleRoomPlaceholder(room: Room, existing: Room?): Room {
     if (existing == null) return room
     return room.copy(
         role = room.role ?: existing.role,
-        lastViewedTimestamp = room.lastViewedTimestamp ?: existing.lastViewedTimestamp,
-        unreadBaselineTimestamp = room.unreadBaselineTimestamp ?: existing.unreadBaselineTimestamp,
+        // 0 means "no marker yet" (createRoomFromApi hardcodes 0 — the API
+        // never carries real read markers), so it must fall through to the
+        // existing value just like null. A plain `?:` would let the API's
+        // hardcoded 0 wipe the local marker on every /chats/my refresh,
+        // after which updateUnreadCount's `effectiveBaseline <= 0` guard
+        // pins unread at 0 until something rewrites the marker.
+        lastViewedTimestamp = room.lastViewedTimestamp?.takeIf { it > 0 }
+            ?: existing.lastViewedTimestamp,
+        unreadBaselineTimestamp = room.unreadBaselineTimestamp?.takeIf { it > 0 }
+            ?: existing.unreadBaselineTimestamp,
         unreadMessages = room.unreadMessages.takeIf { it > 0 } ?: existing.unreadMessages,
         pendingMessages = room.pendingMessages.takeIf { it > 0 } ?: existing.pendingMessages,
         messageStats = room.messageStats ?: existing.messageStats,

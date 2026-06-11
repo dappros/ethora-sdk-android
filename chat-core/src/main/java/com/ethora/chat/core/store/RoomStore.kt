@@ -380,7 +380,15 @@ object RoomStore {
         val fromRoom = room.lastMessageTimestamp ?: 0L
         val fromStore = MessageStore.lastKnownTimestamp(roomJid)
         val latest = maxOf(fromRoom, fromStore)
-        return if (latest > existing) latest else existing
+        val resolved = if (latest > existing) latest else existing
+        if (resolved > 0L) return resolved
+        // No prior marker and no known messages. A 0 marker is NOT "everything
+        // unread" — updateUnreadCount treats baseline <= 0 as "no baseline →
+        // count nothing", so persisting 0 here (locally AND to chatjson via
+        // the callers) permanently disables this room's badge. The user just
+        // left a room they were actively viewing, so "read up to now" is the
+        // truthful marker — same seeding rule the bootstrap applies (step 6b).
+        return System.currentTimeMillis()
     }
 
     /**

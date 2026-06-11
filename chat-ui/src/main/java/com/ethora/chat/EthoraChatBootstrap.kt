@@ -98,8 +98,20 @@ object EthoraChatBootstrap {
     /**
      * Java/Kotlin-friendly listener registration. The listener is called once
      * synchronously with the current value, then on every change. Close the
-     * returned [AutoCloseable] (typically in `onDestroy` or on logout) to
-     * unregister.
+     * returned [AutoCloseable] to unregister.
+     *
+     * Registration and unregistration MUST be tied to the same lifecycle:
+     *  • App-scoped badge (recommended): register once in `Application.onCreate`
+     *    (safe before [initialize] completes — fires `false`, updates when data
+     *    arrives) and close only on logout. Never close it in
+     *    `Activity.onDestroy` in this setup.
+     *  • Activity-scoped: register in `onCreate`/`onStart` EVERY time and close
+     *    in the matching `onDestroy`/`onStop`.
+     * The classic trap is mixing the two — "register once after login, close in
+     * onDestroy": a back press destroys the Activity (closing the listener)
+     * while the process and the cached login survive, so the login-tied
+     * registration never runs again and the badge goes silent until the
+     * process is killed.
      */
     fun addUnreadListener(listener: UnreadListener): AutoCloseable {
         listener.onUnreadChanged(UnreadCounter.total(RoomStore.rooms.value) > 0)
@@ -220,8 +232,21 @@ object EthoraChatBootstrap {
         }
         val key = bootstrapKey(config)
         if (lastBootstrapKey == key && _isInitialized.value) {
-            android.util.Log.d(TAG, "Bootstrap already complete for key=${key.take(40)}…")
-            return
+            // "Already initialized" only counts when the shared socket is
+            // actually alive (or mid-connect). Hosts are told it's safe to
+            // call initialize on every app resume — if the socket died while
+            // the process idled in the background (back-press → cached
+            // process → relaunch), a blind no-op here would leave the SDK
+            // permanently deaf: no XMPP traffic, no RoomStore updates, no
+            // unread-listener callbacks. Fall through and let step 4
+            // reuse-or-rebuild the client and re-run the catchup stages.
+            val client = _sharedXmppClient.value
+            if (client != null && (client.checkOnline() || client.checkConnecting())) {
+                android.util.Log.d(TAG, "Bootstrap already complete for key=${key.take(40)}…")
+                return
+            }
+            android.util.Log.w(TAG, "Bootstrap key cached but shared XMPP client is dead — re-running")
+            _isInitialized.value = false
         }
 
         val now = System.currentTimeMillis()
