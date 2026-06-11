@@ -228,6 +228,57 @@ class UnreadRecomputeTest {
     }
 
     @Test
+    fun `rooms refresh from API does not kill the unread badge (back-press relaunch regression)`() {
+        // Customer-reported repro: register addUnreadListener → press back
+        // (Activity destroyed, process cached) → relaunch. The remounting
+        // Chat/RoomList re-fetches /chats/my and calls setRooms with
+        // createRoomFromApi rooms whose markers are hardcoded to 0. Before
+        // the merge fix that wiped lastViewedTimestamp for every room, so
+        // every later incoming message hit the `effectiveBaseline <= 0`
+        // guard and the badge never fired again until process death.
+        UserStore.setUser(User(id = "user-123", xmppUsername = "alice@example.com"))
+        RoomStore.setLastViewedTimestamp(roomJid, 1_000L)
+
+        // The /chats/my refresh that the Chat remount triggers.
+        RoomStore.setRooms(
+            listOf(
+                com.ethora.chat.core.models.createRoomFromApi(
+                    apiRoom = com.ethora.chat.core.models.ApiRoom(
+                        name = "room",
+                        type = com.ethora.chat.core.models.RoomType.GROUP,
+                        title = "Room",
+                        _id = "room-1"
+                    ),
+                    conferenceDomain = "conference.example.com"
+                )
+            )
+        )
+
+        assertEquals(
+            "API refresh must not wipe the local read marker",
+            1_000L,
+            RoomStore.getRoomByJid(roomJid)?.lastViewedTimestamp
+        )
+
+        // A message lands after the refresh — the badge must still fire.
+        MessageStore.addMessages(
+            roomJid,
+            listOf(
+                Message(
+                    id = "incoming-after-refresh",
+                    user = User(id = "bob", xmppUsername = "bob@example.com"),
+                    date = Date(2_000L),
+                    body = "are you there?",
+                    roomJid = roomJid,
+                    timestamp = 2_000L
+                )
+            )
+        )
+
+        assertEquals(1, RoomStore.getRoomByJid(roomJid)?.unreadMessages)
+    }
+
+    @Test
     fun `incoming message from another user past lastViewed still counts`() {
         // Guard rail: the new isOwnMessage-based filter must NOT swallow
         // legitimate incoming messages. Set current user; arrival from

@@ -140,7 +140,14 @@ class XMPPClient(
      * Check if client is online
      */
     fun checkOnline(): Boolean {
-        return status == ConnectionStatus.ONLINE && connection?.isConnected == true
+        // `connection` is the TCP transport — in WebSocket mode it stays null,
+        // so the TCP-only check reported a healthy WS client as offline.
+        val transportConnected = if (useWebSocket) {
+            webSocketConnection?.isFullyConnected() == true
+        } else {
+            connection?.isConnected == true
+        }
+        return status == ConnectionStatus.ONLINE && transportConnected
     }
 
     /**
