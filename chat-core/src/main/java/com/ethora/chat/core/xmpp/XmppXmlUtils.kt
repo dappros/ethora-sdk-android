@@ -5,6 +5,13 @@ package com.ethora.chat.core.xmpp
 // and attribute decoding, which made file messages loaded from history
 // render as plain text and broke signed-URL thumbnails.
 
+// The backend stamps every broadcast / system message with this constant
+// stanza id (send_system_message[_ws] / send_groupchat_message_ws in
+// _xmpp.service.js). It is NOT a unique correlation handle, so it must never
+// be used as a message id or matched during dedup — otherwise distinct
+// broadcasts collapse onto one another.
+internal const val BROADCAST_PLACEHOLDER_ID = "id"
+
 internal fun extractDataElement(xml: String): String {
     val start = xml.indexOf("<data")
     if (start == -1) return ""
@@ -43,11 +50,28 @@ internal fun extractAttribute(xml: String, attr: String): String? {
  */
 internal fun unwrapMucSubInnerMessage(xml: String): String {
     if (xml.isEmpty()) return xml
-    if (!xml.contains("pubsub#event") || !xml.contains("urn:xmpp:mucsub:nodes:messages")) return xml
-    val itemOpen = xml.indexOf("<item ")
-    val itemContentStart = if (itemOpen == -1) -1 else xml.indexOf('>', itemOpen)
-    if (itemContentStart == -1) return xml
-    val innerStart = xml.indexOf("<message", itemContentStart + 1)
+    // Trigger on the pubsub#event envelope ALONE — do NOT additionally
+    // require the literal `urn:xmpp:mucsub:nodes:messages` node string. The
+    // web client (handleStanzas.unwrapMucsubMessage) unwraps purely by
+    // structure (event → items → item → message) with no node check, and we
+    // must match it: the forwarded copy doesn't always echo that exact node
+    // attribute, and gating on it silently left those broadcasts wrapped.
+    // The real discriminator is "does the item actually contain a <message>"
+    // (handled below), so non-message pubsub events (PEP, presence/subject
+    // payloads) still pass through untouched.
+    if (!xml.contains("pubsub#event")) return xml
+    // Find the <item> opening tag, tolerating BOTH `<item>` (no attributes —
+    // the shape ejabberd emits when forwarding to the messages node, and the
+    // exact shape this function's own docstring above shows) AND
+    // `<item id='…'>`. The previous `indexOf("<item ")` required a trailing
+    // space, so a bare `<item>` was never matched: the broadcast was left
+    // wrapped and its id / sender / timestamp were then read off the pubsub
+    // envelope instead of the inner stanza — the "broadcast messages not
+    // always received" symptom. The pattern is anchored so it can never
+    // match the enclosing `<items>` element.
+    val itemMatch = Regex("<item(?:\\s[^>]*)?>").find(xml) ?: return xml
+    val itemContentStart = itemMatch.range.last + 1
+    val innerStart = xml.indexOf("<message", itemContentStart)
     if (innerStart == -1) return xml
     // Find the matching </message> at the same depth — a forwarded chat
     // message can contain nested <message> elements (replies, reactions

@@ -127,6 +127,15 @@ object MessageStore {
 
     private val _messages = MutableStateFlow<Map<String, List<Message>>>(emptyMap())
     val messages: StateFlow<Map<String, List<Message>>> = _messages.asStateFlow()
+
+    // Normalise an id/xmppId for correlation: blanks and the backend's
+    // constant broadcast id "id" are NOT unique handles and must never match
+    // two distinct messages (every broadcast / system message ships with
+    // stanza id="id"). Used by both addMessage and addMessages so a stream of
+    // broadcasts doesn't collapse onto a single row — the reported "latest
+    // broadcast shows, previous disappears".
+    private fun corr(v: String?): String? =
+        v?.takeIf { it.isNotBlank() && it != com.ethora.chat.core.xmpp.BROADCAST_PLACEHOLDER_ID }
     
     // Message cache for persistence
     private var messageCache: MessageCache? = null
@@ -240,12 +249,19 @@ object MessageStore {
         
         // Match web: bidirectional ID matching for pending messages
         // Check: msg.id === message.id || (message.xmppId && msg.id === message.xmppId) || (msg.xmppId && msg.xmppId === message.id)
+        //
+        // `corr` (see member helper) normalises away the constant broadcast
+        // id "id" so distinct broadcasts never collapse onto one another.
+        val msgId = corr(message.id)
+        val msgXmppId = corr(message.xmppId)
         val existingIndex = roomMessages.indexOfFirst { existing ->
-            val exactIdMatch = existing.id == message.id
-            val incomingXmppIdMatchesExistingId = message.xmppId != null && existing.id == message.xmppId
-            val existingXmppIdMatchesIncomingId = existing.xmppId != null && existing.xmppId == message.id
-            val xmppIdMatch = existing.xmppId != null && message.xmppId != null && existing.xmppId == message.xmppId
-            
+            val exId = corr(existing.id)
+            val exXmppId = corr(existing.xmppId)
+            val exactIdMatch = msgId != null && exId == msgId
+            val incomingXmppIdMatchesExistingId = msgXmppId != null && exId == msgXmppId
+            val existingXmppIdMatchesIncomingId = exXmppId != null && exXmppId == msgId
+            val xmppIdMatch = exXmppId != null && msgXmppId != null && exXmppId == msgXmppId
+
             exactIdMatch || incomingXmppIdMatchesExistingId || existingXmppIdMatchesIncomingId || xmppIdMatch
         }
         
@@ -547,11 +563,18 @@ object MessageStore {
             // the auto-retry succeeded and the server echo just arrived via
             // MAM), do NOT skip — fall through and treat it as a pending
             // reconciliation so the failed flag gets cleared.
+            // `corr` normalises away the constant broadcast id "id" (and
+            // blanks) so distinct broadcasts in a history page don't collapse
+            // onto each other or onto an already-loaded copy. See addMessage.
+            val inId = corr(incoming.id)
+            val inXmppId = corr(incoming.xmppId)
             val matchIdx = roomMessages.indexOfFirst { existing ->
-                val exactIdMatch = existing.id == incoming.id
-                val incomingXmppIdMatchesExistingId = incoming.xmppId != null && existing.id == incoming.xmppId
-                val existingXmppIdMatchesIncomingId = existing.xmppId != null && existing.xmppId == incoming.id
-                val xmppIdMatch = existing.xmppId != null && incoming.xmppId != null && existing.xmppId == incoming.xmppId
+                val exId = corr(existing.id)
+                val exXmppId = corr(existing.xmppId)
+                val exactIdMatch = inId != null && exId == inId
+                val incomingXmppIdMatchesExistingId = inXmppId != null && exId == inXmppId
+                val existingXmppIdMatchesIncomingId = exXmppId != null && exXmppId == inId
+                val xmppIdMatch = exXmppId != null && inXmppId != null && exXmppId == inXmppId
                 exactIdMatch || incomingXmppIdMatchesExistingId || existingXmppIdMatchesIncomingId || xmppIdMatch
             }
             if (matchIdx >= 0) {

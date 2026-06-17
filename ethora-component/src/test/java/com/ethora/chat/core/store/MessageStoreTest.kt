@@ -386,4 +386,61 @@ class MessageStoreTest {
         val doomed = read.first { it.id == "doomed" }
         assertEquals(true, doomed.isDeleted)
     }
+
+    // --- broadcast id="id" collision -----------------------------------
+
+    @Test
+    fun `successive broadcasts sharing xmppId 'id' do not collapse (addMessage)`() {
+        // Field report: "latest broadcast shows, previous disappears." The
+        // backend stamps every broadcast / system message with the constant
+        // stanza id="id" (send_system_message[_ws] / send_groupchat_message_ws).
+        // Each broadcast still has a UNIQUE server stanza-id as its row id,
+        // but the constant xmppId must NOT match them together.
+        val room = "room-1@conference.xmpp.example.com"
+        MessageStore.addMessage(room, makeMessage("archive-1", body = "BC one", xmppId = "id"))
+        MessageStore.addMessage(room, makeMessage("archive-2", body = "BC two", xmppId = "id"))
+
+        val msgs = MessageStore.getMessagesForRoom(room).filterNot { it.id == "delimiter-new" }
+        assertEquals(2, msgs.size)
+        assertEquals(setOf("BC one", "BC two"), msgs.map { it.body }.toSet())
+    }
+
+    @Test
+    fun `successive broadcasts sharing xmppId 'id' do not collapse (addMessages batch)`() {
+        // Same collision on the MAM / history load path (kill + relaunch).
+        val room = "room-1@conference.xmpp.example.com"
+        MessageStore.addMessages(
+            room,
+            listOf(
+                makeMessage("archive-1", body = "BC one", xmppId = "id"),
+                makeMessage("archive-2", body = "BC two", xmppId = "id"),
+                makeMessage("archive-3", body = "BC three", xmppId = "id"),
+            )
+        )
+
+        val msgs = MessageStore.getMessagesForRoom(room).filterNot { it.id == "delimiter-new" }
+        assertEquals(3, msgs.size)
+        assertEquals(setOf("BC one", "BC two", "BC three"), msgs.map { it.body }.toSet())
+    }
+
+    @Test
+    fun `legitimate xmppId still reconciles a pending row (corr guard is id-only)`() {
+        // Guard rail: the "id" normalisation must NOT weaken normal pending
+        // reconciliation. An optimistic row keyed by a real unique id must
+        // still be matched and replaced by its server echo (one row, not two).
+        val room = "room-1@conference.xmpp.example.com"
+        MessageStore.addMessage(
+            room,
+            makeMessage("send-text-message:UUID-9", body = "hi", pending = true)
+        )
+        // Echo arrives with the server id, correlating back via xmppId.
+        MessageStore.addMessage(
+            room,
+            makeMessage("server-row-9", body = "hi", xmppId = "send-text-message:UUID-9")
+        )
+
+        val msgs = MessageStore.getMessagesForRoom(room).filterNot { it.id == "delimiter-new" }
+        assertEquals(1, msgs.size)
+        assertEquals(false, msgs[0].pending == true)
+    }
 }

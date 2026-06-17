@@ -835,9 +835,18 @@ class XMPPWebSocketConnection(
             val hasMedia = isMediafile == "true" || location != null
             val hasData = dataXml.isNotBlank()
             
+            // The backend stamps EVERY broadcast / system message with the
+            // constant stanza id "id" (send_system_message[_ws] /
+            // send_groupchat_message_ws in _xmpp.service.js). It is NOT a
+            // unique handle, so it must never be used as the message id or
+            // correlation key — otherwise every broadcast collapses onto the
+            // previous one via MessageStore dedup ("latest broadcast shows,
+            // previous disappears"). Prefer the unique server-assigned
+            // <stanza-id> (archiveId) instead.
+            val usableMessageId = messageId.takeIf { it.isNotBlank() && it != BROADCAST_PLACEHOLDER_ID }
             val effectiveMessageId = when {
                 !archiveId.isNullOrBlank() -> archiveId
-                messageId.isNotBlank() -> messageId
+                usableMessageId != null -> usableMessageId
                 else -> "msg-${System.currentTimeMillis()}"
             }
 
@@ -915,13 +924,16 @@ class XMPPWebSocketConnection(
             val isDeleted = xml.contains("<deleted") || xml.contains("<deleted>")
             
             // Create Message object with media fields.
-            // xmppId precedence: origin-id > stanza id > archive id.
+            // xmppId precedence: origin-id > (real) stanza id > archive id.
             // origin-id is the only handle a sender controls end-to-end;
             // bidirectional reconciliation in MessageStore.addMessage(s)
-            // hits it first when both sides have it.
+            // hits it first when both sides have it. The constant broadcast
+            // "id" is skipped (see usableMessageId above) so the unique
+            // archiveId is used for server broadcasts instead.
             val correlationId = when {
                 !originId.isNullOrBlank() -> originId
-                messageId.isNotBlank() -> messageId
+                usableMessageId != null -> usableMessageId
+                !archiveId.isNullOrBlank() -> archiveId
                 else -> effectiveMessageId
             }
             val message = Message(
