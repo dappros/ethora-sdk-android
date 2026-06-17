@@ -5,6 +5,13 @@ package com.ethora.chat.core.xmpp
 // and attribute decoding, which made file messages loaded from history
 // render as plain text and broke signed-URL thumbnails.
 
+// The backend stamps every broadcast / system message with this constant
+// stanza id (send_system_message[_ws] / send_groupchat_message_ws in
+// _xmpp.service.js). It is NOT a unique correlation handle, so it must never
+// be used as a message id or matched during dedup — otherwise distinct
+// broadcasts collapse onto one another.
+internal const val BROADCAST_PLACEHOLDER_ID = "id"
+
 internal fun extractDataElement(xml: String): String {
     val start = xml.indexOf("<data")
     if (start == -1) return ""
