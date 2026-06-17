@@ -269,16 +269,58 @@ class XmppXmlUtilsTest {
     }
 
     @Test
-    fun `unwrapMucSubInnerMessage returns input unchanged for non-mucsub pubsub events`() {
-        // Defensive: only the `mucsub:nodes:messages` node carries chat
-        // messages we should unwrap. Other pubsub-event traffic (e.g.
-        // PEP notifications) must pass through untouched so the realtime
-        // parser still classifies it correctly.
+    fun `unwrapMucSubInnerMessage returns input unchanged for non-message pubsub events`() {
+        // Defensive: a pubsub event whose item carries no inner <message>
+        // (e.g. a PEP notification with a <payload/>) must pass through
+        // untouched so the realtime parser still classifies it correctly.
+        // The discriminator is the inner <message>, NOT the node name — so
+        // this holds regardless of the node attribute.
         val xml = "<message id='outer'>" +
             "<event xmlns='http://jabber.org/protocol/pubsub#event'>" +
             "<items node='some:other:node'><item><payload/></item></items>" +
             "</event></message>"
         assertEquals(xml, unwrapMucSubInnerMessage(xml))
+    }
+
+    @Test
+    fun `unwrapMucSubInnerMessage unwraps a bare item with no attributes`() {
+        // Regression for "broadcast messages not always received": ejabberd
+        // forwards to the messages node with a BARE `<item>` (no id attr) —
+        // the very shape this helper's docstring shows. The old
+        // `indexOf("<item ")` required a trailing space, so the broadcast was
+        // left wrapped and its id/sender were read off the pubsub envelope.
+        val outer = "<message xmlns='jabber:client' id='99' from='room@conf/u' to='me@host'>" +
+            "<event xmlns='http://jabber.org/protocol/pubsub#event'>" +
+            "<items node='urn:xmpp:mucsub:nodes:messages'>" +
+            "<item>" +
+            "<message id='send-text-message:bare-1' type='groupchat' from='room@conf/u' xmlns='jabber:client'>" +
+            "<body>broadcast hello</body>" +
+            "<stanza-id by='room@conf' id='99' xmlns='urn:xmpp:sid:0'/>" +
+            "</message></item></items></event></message>"
+
+        val inner = unwrapMucSubInnerMessage(outer)
+        assertEquals("send-text-message:bare-1", extractAttribute(inner, "id"))
+        assertEquals("broadcast hello", extractBody(inner))
+        assertTrue(inner.startsWith("<message id='send-text-message:bare-1'"))
+        assertTrue(inner.endsWith("</message>"))
+    }
+
+    @Test
+    fun `unwrapMucSubInnerMessage unwraps regardless of the node attribute (web parity)`() {
+        // Web (handleStanzas.unwrapMucsubMessage) unwraps any pubsub#event
+        // that wraps an inner <message>, with no node-name check. The inner
+        // <message> is the discriminator, so a forwarded copy that omits or
+        // varies the node string must still be unwrapped — gating on the
+        // exact node was a divergence that dropped such broadcasts.
+        val outer = "<message id='outer'>" +
+            "<event xmlns='http://jabber.org/protocol/pubsub#event'>" +
+            "<items><item id='x'>" +
+            "<message id='real-7' type='groupchat'><body>hi</body></message>" +
+            "</item></items></event></message>"
+
+        val inner = unwrapMucSubInnerMessage(outer)
+        assertEquals("real-7", extractAttribute(inner, "id"))
+        assertEquals("hi", extractBody(inner))
     }
 
     @Test
