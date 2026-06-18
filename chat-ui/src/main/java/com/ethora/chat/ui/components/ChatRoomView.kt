@@ -719,6 +719,39 @@ fun ChatRoomView(
                                 return@items
                             }
 
+                            // Admin-broadcast / system message — render a centered
+                            // banner instead of a chat bubble (web parity:
+                            // MessageContainer.tsx renders <SystemMessage> when
+                            // isSystemMessage === 'true'). Show the day separator
+                            // first, then short-circuit grouping + bubble logic.
+                            if (message.isSystemMessage == "true") {
+                                val prevForSep = if (index > 0) messages[index - 1] else null
+                                val showSep = prevForSep?.let { prev ->
+                                    val c = java.util.Calendar.getInstance().apply {
+                                        time = message.date
+                                        set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+                                        set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+                                    }
+                                    val p = java.util.Calendar.getInstance().apply {
+                                        time = prev.date
+                                        set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+                                        set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+                                    }
+                                    c.get(java.util.Calendar.YEAR) != p.get(java.util.Calendar.YEAR) ||
+                                        c.get(java.util.Calendar.DAY_OF_YEAR) != p.get(java.util.Calendar.DAY_OF_YEAR)
+                                } ?: true
+                                Column {
+                                    if (showSep) {
+                                        DateSeparator(date = message.date)
+                                    }
+                                    SystemMessageBanner(
+                                        messageText = message.body,
+                                        colors = config?.colors
+                                    )
+                                }
+                                return@items
+                            }
+
                             // Calculate if we should show date separator
                             // In oldest-first list, messages[index-1] is OLDER than messages[index]
                             // We show separator if day changes between current and PREVIOUS (older) item
