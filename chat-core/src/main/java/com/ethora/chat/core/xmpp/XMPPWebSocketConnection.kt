@@ -892,6 +892,11 @@ class XMPPWebSocketConnection(
             val photoURL = extractAttribute(dataXml, "photoURL") ?: extractAttribute(dataXml, "photo")
             val fullName = extractAttribute(dataXml, "fullName")
             val senderJID = extractAttribute(dataXml, "senderJID")
+            // System / admin-broadcast flag — the server stamps admin-panel
+            // broadcasts with <data isSystemMessage="true">. Web renders these
+            // as a centered banner (SystemMessage.tsx) rather than a chat
+            // bubble; carry the flag through so the Android UI can do the same.
+            val isSystemMessage = extractAttribute(dataXml, "isSystemMessage")
             
             // Extract media fields for media message matching (already extracted above)
             val locationPreview = extractAttribute(dataXml, "locationPreview")
@@ -947,6 +952,7 @@ class XMPPWebSocketConnection(
                 xmppFrom = from,
                 pending = false, // Real-time messages are not pending
                 isDeleted = isDeleted,
+                isSystemMessage = isSystemMessage,
                 location = location,
                 locationPreview = locationPreview,
                 fileName = fileName,

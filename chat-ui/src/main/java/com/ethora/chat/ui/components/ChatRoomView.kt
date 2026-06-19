@@ -719,6 +719,39 @@ fun ChatRoomView(
                                 return@items
                             }
 
+                            // Admin-broadcast / system message — render a centered
+                            // banner instead of a chat bubble (web parity:
+                            // MessageContainer.tsx renders <SystemMessage> when
+                            // isSystemMessage === 'true'). Show the day separator
+                            // first, then short-circuit grouping + bubble logic.
+                            if (message.isSystemMessage == "true") {
+                                val prevForSep = if (index > 0) messages[index - 1] else null
+                                val showSep = prevForSep?.let { prev ->
+                                    val c = java.util.Calendar.getInstance().apply {
+                                        time = message.date
+                                        set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+                                        set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+                                    }
+                                    val p = java.util.Calendar.getInstance().apply {
+                                        time = prev.date
+                                        set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+                                        set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+                                    }
+                                    c.get(java.util.Calendar.YEAR) != p.get(java.util.Calendar.YEAR) ||
+                                        c.get(java.util.Calendar.DAY_OF_YEAR) != p.get(java.util.Calendar.DAY_OF_YEAR)
+                                } ?: true
+                                Column {
+                                    if (showSep) {
+                                        DateSeparator(date = message.date)
+                                    }
+                                    SystemMessageBanner(
+                                        messageText = message.body,
+                                        colors = config?.colors
+                                    )
+                                }
+                                return@items
+                            }
+
                             // Calculate if we should show date separator
                             // In oldest-first list, messages[index-1] is OLDER than messages[index]
                             // We show separator if day changes between current and PREVIOUS (older) item
@@ -765,10 +798,34 @@ fun ChatRoomView(
                                 // Group messages from the same user that are within 5 minutes of each other
                                 // Chronological previous is index - 1 (older)
                                 // Chronological next is index + 1 (newer)
-                                val prevChronological = if (index > 0) messages[index - 1] else null
-                                val nextChronological = if (index < messages.size - 1) messages[index + 1] else null
-                                
+                                //
+                                // Non-bubble rows (the system / admin-broadcast banner and the
+                                // "New Messages" delimiter) are NOT chat bubbles and must act as
+                                // hard group boundaries: the first real message after one always
+                                // shows its avatar + username, and we never group a bubble with a
+                                // banner/delimiter sitting next to it. We therefore (a) detect an
+                                // adjacent boundary and (b) skip those rows when looking for the
+                                // nearest same-sender neighbour.
+                                fun isBoundaryRow(m: com.ethora.chat.core.models.Message?): Boolean =
+                                    m != null && (m.isSystemMessage == "true" || m.id == "delimiter-new")
+
+                                val prevIsBoundary = isBoundaryRow(if (index > 0) messages[index - 1] else null)
+                                val nextIsBoundary = isBoundaryRow(if (index < messages.size - 1) messages[index + 1] else null)
+
+                                val prevChronological = run {
+                                    var i = index - 1
+                                    while (i >= 0 && isBoundaryRow(messages[i])) i--
+                                    if (i >= 0) messages[i] else null
+                                }
+                                val nextChronological = run {
+                                    var i = index + 1
+                                    while (i < messages.size && isBoundaryRow(messages[i])) i++
+                                    if (i < messages.size) messages[i] else null
+                                }
+
                                 val isFirstInGroup = when {
+                                    // A banner / delimiter directly above → always start a new group
+                                    prevIsBoundary -> true
                                     // Chronologically first (no older message from same user within window)
                                     prevChronological == null -> true
                                     // Different user
@@ -779,8 +836,10 @@ fun ChatRoomView(
                                         timeDiff > 5 * 60 * 1000 // 5 minutes in milliseconds
                                     }
                                 }
-                                
+
                                 val isLastInGroup = when {
+                                    // A banner / delimiter directly below → close the group here
+                                    nextIsBoundary -> true
                                     // Chronologically last (no newer message from same user within window)
                                     nextChronological == null -> true
                                     // Different user

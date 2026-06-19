@@ -1073,7 +1073,10 @@ class XMPPClient(
             val originalName = extractAttribute(dataXml, "originalName")
             val size = extractAttribute(dataXml, "size")
             val waveForm = extractAttribute(dataXml, "waveForm")
-            
+            // Admin-broadcast / system flag (see realtime parser). Carried so
+            // history-loaded banners render the same as live ones.
+            val isSystemMessage = extractAttribute(dataXml, "isSystemMessage")
+
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
             Log.d(TAG, "  Extracted user data: firstName=$senderFirstName, lastName=$senderLastName, photoURL=${cleanPhotoURL?.take(50)}, fullName=$fullName, senderJID=$senderJID")
@@ -1132,6 +1135,7 @@ class XMPPClient(
                 xmppId = stanzaMessageId,
                 xmppFrom = from,
                 isDeleted = isDeleted,
+                isSystemMessage = isSystemMessage,
                 location = location,
                 locationPreview = locationPreview,
                 mimetype = mimetype,
