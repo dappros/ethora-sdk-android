@@ -38,7 +38,7 @@ tasks.register("clean", Delete::class) {
 subprojects {
     group = rootProject.group
     version = rootProject.version
-    layout.buildDirectory.set(file("/tmp/android_build/${rootProject.name}/${project.name}"))
+    layout.buildDirectory.set(file((System.getenv("ETHORA_BUILD_ROOT") ?: "/tmp/android_build/${rootProject.name}") + "/${project.name}"))
 }
 
 // Root POM aggregator at `com.github.dappros:ethora-sdk-android:<version>` with
