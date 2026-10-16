@@ -50,7 +50,13 @@ data class Message(
      *  it's not in any override list. Not persisted to the Room DB — after
      *  app restart, messages come back from MAM with `id = archive-id`
      *  directly, so this field is only needed for the in-session window. */
-    val archiveId: String? = null
+    val archiveId: String? = null,
+    /** E2EE room, and this message did not arrive inside an OMEMO payload (sent in clear). */
+    val unencrypted: Boolean? = null,
+    /** Per-file keys of a sealed attachment, from the decrypted OMEMO body. */
+    val e2eeKeys: List<String>? = null,
+    /** Set by the sender when this message's attachments are sealed. */
+    val clientEncrypted: String? = null
 )
 
 /**

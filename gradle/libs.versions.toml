@@ -28,6 +28,9 @@ gson = "2.11.0"
 # XMPP
 smack = "4.4.8"
 
+# E2EE (OMEMO): X25519 / Ed25519 / HKDF from the lightweight API
+bouncycastle = "1.79"
+
 # Image Loading
 coil = "3.4.0"
 
@@ -87,6 +90,9 @@ smack-tcp = { group = "org.igniterealtime.smack", name = "smack-tcp", version.re
 smack-extensions = { group = "org.igniterealtime.smack", name = "smack-extensions", version.ref = "smack" }
 smack-android = { group = "org.igniterealtime.smack", name = "smack-android", version.ref = "smack" }
 smack-android-extensions = { group = "org.igniterealtime.smack", name = "smack-android-extensions", version.ref = "smack" }
+
+# E2EE
+bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
 
 # Image Loading
 coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }

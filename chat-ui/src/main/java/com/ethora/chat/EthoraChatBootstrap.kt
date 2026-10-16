@@ -222,6 +222,9 @@ object EthoraChatBootstrap {
 
     private suspend fun runBootstrapLocked(context: Context, config: ChatConfig) {
         ChatStore.setConfig(config)
+        com.ethora.chat.core.e2ee.E2eeRuntime.setStoreFactory { jid ->
+            com.ethora.chat.core.e2ee.OmemoPrefsStore.forAccount(context, jid)
+        }
         ChatStore.validateServerConfig(config)?.let { error ->
             com.ethora.chat.core.store.ConnectionStore.setState(
                 status = com.ethora.chat.core.store.ChatConnectionStatus.ERROR,

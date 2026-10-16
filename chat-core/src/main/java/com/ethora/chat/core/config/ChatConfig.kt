@@ -120,7 +120,10 @@ data class ChatConfig(
     val onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null,
 
     // Structured event stream
-    val onChatEvent: ((ChatEvent) -> Unit)? = null
+    val onChatEvent: ((ChatEvent) -> Unit)? = null,
+
+    // End-to-end encryption (OMEMO 2). Off by default.
+    val e2ee: E2eeConfig? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -185,6 +188,7 @@ data class ChatConfig(
         private var customComponents: CustomComponents? = null
         private var onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null
         private var onChatEvent: ((ChatEvent) -> Unit)? = null
+        private var e2ee: E2eeConfig? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -245,6 +249,7 @@ data class ChatConfig(
         fun customComponents(value: CustomComponents) = apply { this.customComponents = value }
         fun onBeforeSend(value: (OutgoingSendInput) -> SendDecision) = apply { this.onBeforeSend = value }
         fun onChatEvent(value: (ChatEvent) -> Unit) = apply { this.onChatEvent = value }
+        fun e2ee(value: E2eeConfig) = apply { this.e2ee = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -305,7 +310,8 @@ data class ChatConfig(
             eventHandlers = eventHandlers,
             customComponents = customComponents,
             onBeforeSend = onBeforeSend,
-            onChatEvent = onChatEvent
+            onChatEvent = onChatEvent,
+            e2ee = e2ee
         )
     }
 

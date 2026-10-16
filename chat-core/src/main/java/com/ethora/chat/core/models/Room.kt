@@ -101,7 +101,9 @@ data class Room(
     val historyComplete: Boolean? = null,
     val historyPreloadState: HistoryPreloadState = HistoryPreloadState.IDLE,
     val isPlaceholder: Boolean = false,
-    val presenceReady: Boolean = false
+    val presenceReady: Boolean = false,
+    /** Backend marked this room end-to-end encrypted. Only acted on when E2EE is enabled. */
+    val e2ee: Boolean = false
 )
 
 /**
@@ -121,7 +123,9 @@ data class ApiRoom(
     val createdAt: String? = null,
     val updatedAt: String? = null,
     val __v: Int? = null,
-    val reported: Boolean? = null
+    val reported: Boolean? = null,
+    /** End-to-end encrypted (OMEMO) room, as the backend reports it on GET chats/my. */
+    val e2ee: Boolean? = null
 )
 
 /**
@@ -153,6 +157,7 @@ fun createRoomFromApi(apiRoom: ApiRoom, conferenceDomain: String, usersArrayLeng
         composing = null,
         composingList = null,
         lastViewedTimestamp = 0,
+        e2ee = apiRoom.e2ee == true,
         unreadBaselineTimestamp = 0,
         unreadMessages = 0,
         pendingMessages = 0,

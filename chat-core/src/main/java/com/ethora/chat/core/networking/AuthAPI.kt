@@ -9,6 +9,7 @@ import com.google.gson.JsonObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Response
 import retrofit2.http.*
 
@@ -40,7 +41,8 @@ interface AuthAPI {
     suspend fun uploadFile(
         @Header("Authorization") token: String,
         @Header("Accept") accept: String = "*/*",
-        @Part file: MultipartBody.Part
+        @Part file: MultipartBody.Part,
+        @Part("clientEncrypted") clientEncrypted: RequestBody?
     ): Response<JsonObject>
 }
 
@@ -253,10 +255,13 @@ object AuthAPIHelper {
         file: java.io.File,
         mimeType: String,
         token: String,
-        baseUrl: String = ChatStore.getEffectiveBaseUrl()
+        baseUrl: String = ChatStore.getEffectiveBaseUrl(),
+        /** The file is ciphertext sealed by the caller (E2EE room): the backend stores it verbatim. */
+        clientEncrypted: Boolean = false
     ): FileUploadResult? {
         return try {
             val api = ApiClient.createService<AuthAPI>(baseUrl)
+            val encryptedFlag: RequestBody? = if (clientEncrypted) "true".toRequestBody("text/plain".toMediaType()) else null
             
             val requestFile = RequestBody.create(
                 mimeType.toMediaType(),
@@ -282,7 +287,7 @@ object AuthAPIHelper {
             while (true) {
                 var shouldRetryWithRefreshedToken = false
                 for (authHeader in buildAuthHeaders(currentToken)) {
-                    val response = api.uploadFile(authHeader, "*/*", multipartBody)
+                    val response = api.uploadFile(authHeader, "*/*", multipartBody, encryptedFlag)
                     if (response.isSuccessful && response.body() != null) {
                         val body = response.body()!!
                         val result = parseUploadResult(body)

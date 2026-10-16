@@ -4,6 +4,16 @@ import android.util.Log
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.networking.DnsFallback
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.e2ee.E2eeRuntime
+import com.ethora.chat.core.e2ee.OmemoIqException
+import com.ethora.chat.core.e2ee.OmemoManager
+import com.ethora.chat.core.e2ee.OmemoStanzas
+import com.ethora.chat.core.e2ee.OmemoTransport
+import com.ethora.chat.core.e2ee.XmlElement
+import com.ethora.chat.core.e2ee.XmlParser
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.*
@@ -104,6 +114,9 @@ class XMPPWebSocketConnection(
         "$prefix:${System.currentTimeMillis()}"
 
     internal companion object {
+        /** How long an OMEMO PEP request may wait for its IQ reply. */
+        const val OMEMO_IQ_TIMEOUT_MS = 15_000L
+
         // <chatjson xmlns="chatjson:store" value="{...}"/> — the prosody mod
         // echoes the stored payload back with single-quoted attributes, so
         // accept both quote styles. Returns null when no chatjson element is
@@ -326,6 +339,46 @@ class XMPPWebSocketConnection(
         Log.d(TAG, "📤 Sent stream open (${if (useLegacyStreamOpen) "legacy" else "RFC7395"}): ${streamOpen.take(200)}")
     }
     
+    // ----- OMEMO (E2EE) transport: IQ request/reply correlation for PEP ------
+    private val omemoPending = ConcurrentHashMap<String, CompletableDeferred<String>>()
+
+    /** Our bare JID, the `from` side of every OMEMO stanza we build. */
+    private fun ownBareJid(): String = resolveBareJid(username) ?: username.lowercase()
+
+    private inner class OmemoTransportAdapter(override val ownJid: String) : OmemoTransport {
+        override suspend fun request(iq: XmlElement): XmlElement {
+            val id = "omemo-${System.nanoTime()}"
+            iq.attrs["id"] = id
+            val reply = CompletableDeferred<String>()
+            omemoPending[id] = reply
+            try {
+                if (!sendRaw(iq.toXml())) throw IllegalStateException("WebSocket rejected OMEMO IQ")
+                val result = withTimeout(OMEMO_IQ_TIMEOUT_MS) { reply.await() }
+                val element = XmlParser.parse(result)
+                if (element.attr("type") == "error") {
+                    val condition = element.child("error")?.elements?.firstOrNull { it.name != "text" }?.name
+                    throw OmemoIqException(condition ?: "error")
+                }
+                return element
+            } finally {
+                omemoPending.remove(id)
+            }
+        }
+
+        override fun send(stanza: XmlElement) {
+            sendRaw(stanza.toXml())
+        }
+    }
+
+    /** Completes a pending OMEMO IQ when [xml] is its reply. Returns true when it consumed the stanza. */
+    private fun completeOmemoIq(xml: String): Boolean {
+        if (omemoPending.isEmpty() || !xml.startsWith("<iq")) return false
+        val id = extractAttribute(xml, "id") ?: return false
+        val pending = omemoPending[id] ?: return false
+        pending.complete(xml)
+        return true
+    }
+
     /**
      * Handle incoming XMPP stanza
      */
@@ -434,6 +487,7 @@ class XMPPWebSocketConnection(
                             )
                             authState = AuthState.AUTHENTICATED
                             isAuthenticated = true
+                            E2eeRuntime.onOnline(OmemoTransportAdapter(ownBareJid()))
                             clientWrapper?.let { client ->
                                 delegate?.onXMPPClientConnected(client)
                             }
@@ -488,8 +542,11 @@ class XMPPWebSocketConnection(
                         } catch (_: Throwable) {}
                         return
                     }
+                    if (completeOmemoIq(xml)) return
+                    // E2EE seam: decrypts in place when OMEMO is on; drops session-only messages.
+                    val routed = OmemoStanzas.rewriteInbound(xml, host) ?: return
                     // Handle normal XMPP stanzas
-                    parseAndHandleStanza(xml)
+                    parseAndHandleStanza(routed)
                 }
                 else -> {
                     Log.d(TAG, "📨 Received stanza in state: $authState")
@@ -905,6 +962,12 @@ class XMPPWebSocketConnection(
             val originalName = extractAttribute(dataXml, "originalName")
             val size = extractAttribute(dataXml, "size")
             val waveForm = extractAttribute(dataXml, "waveForm")
+            // E2EE: a message in an encrypted room that did not arrive inside an OMEMO payload
+            // is sent in clear, whatever it claims about itself.
+            val unencrypted = (E2eeRuntime.isE2eeRoom(from.substringBefore("/")) &&
+                extractAttribute(dataXml, "omemoEncrypted") != "true").takeIf { it }
+            val e2eeKeys = extractAttribute(dataXml, "e2eeKeys")?.split(",")?.filter { it.isNotBlank() }
+            val clientEncrypted = extractAttribute(dataXml, "clientEncrypted")
             
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
@@ -961,7 +1024,10 @@ class XMPPWebSocketConnection(
                 originalName = originalName,
                 size = size,
                 waveForm = waveForm,
-                archiveId = archiveId?.takeIf { it.isNotBlank() }
+                archiveId = archiveId?.takeIf { it.isNotBlank() },
+                unencrypted = unencrypted,
+                e2eeKeys = e2eeKeys,
+                clientEncrypted = clientEncrypted
             )
             
             // Add to MessageStore with pending reconciliation
@@ -1339,7 +1405,11 @@ class XMPPWebSocketConnection(
         // bookkeeping.
         val originIdElement = """<origin-id xmlns="urn:xmpp:sid:0" id="$messageId"/>"""
 
-        val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$originIdElement$dataElement<body>$escapedBody</body></message>"""
+        var message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$originIdElement$dataElement<body>$escapedBody</body></message>"""
+        // E2EE seam (flag-gated): in an e2ee room the body goes inside OMEMO and <data>
+        // stays in the clear for the push pipeline. If encryption fails the message
+        // goes out in clear rather than not at all, as on web.
+        encryptOutgoingText(fixedRoomJid, messageId, body, dataElement)?.let { message = it }
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMessage() to $fixedRoomJid")
         // Surface OkHttp queue rejection (the silent-drop root cause behind
         // "spam 15 messages, 2 don't go"). Three attempts with tiny exp.
@@ -1369,6 +1439,26 @@ class XMPPWebSocketConnection(
         return messageId
     }
     
+    /** Encrypted stanza for an outgoing text in an e2ee room, or null to send the plain one. */
+    private suspend fun encryptOutgoingText(roomJid: String, id: String, body: String, dataXml: String): String? {
+        if (!E2eeRuntime.isE2eeRoom(roomJid)) return null
+        val cleartext = try {
+            XmlParser.parseFragments(dataXml)
+        } catch (e: IllegalArgumentException) {
+            return null
+        }
+        return when (val outcome = E2eeRuntime.encryptGroupStanza(
+            roomJid, host, id, listOf(XmlElement("body").add(body)), cleartext.filterIsInstance<XmlElement>()
+        )) {
+            is E2eeRuntime.Outcome.Encrypted -> outcome.stanza.toXml()
+            is E2eeRuntime.Outcome.Failed -> {
+                Log.w(TAG, "OMEMO: sending to $roomJid in clear - ${outcome.reason}")
+                null
+            }
+            E2eeRuntime.Outcome.NotEncrypted -> null
+        }
+    }
+
     /**
      * Send media message
      * Matches web: sendMediaMessage.xmpp.ts
@@ -1400,8 +1490,24 @@ class XMPPWebSocketConnection(
         }
         val fromAttribute = senderJid?.let { """ from="$it"""" } ?: ""
         
+        // Sealed attachments (e2ee rooms) carry their per-file keys in `e2eeKeys`.
+        // Those keys never go into <data>: they are put in the OMEMO body below.
+        val sealedKeys = (mediaData["e2eeKeys"] as? List<*>)?.map { it.toString() }?.takeIf { it.isNotEmpty() }
+        val e2eeRoom = E2eeRuntime.isE2eeRoom(fixedRoomJid)
+        if (sealedKeys != null && !e2eeRoom) {
+            Log.e(TAG, "Refusing to send sealed attachment to a room that is not end-to-end encrypted")
+            return false
+        }
+        if (e2eeRoom && sealedKeys == null) {
+            // Clear media in an e2ee room would leak the file, so refuse, as on web
+            Log.e(TAG, "Refusing to send unsealed media to end-to-end encrypted room $fixedRoomJid")
+            return false
+        }
+        val dataMap = if (sealedKeys != null) mediaData.filterKeys { it != "e2eeKeys" } + ("clientEncrypted" to "true")
+            else mediaData
+
         // Build data element XML with all media attributes
-        val dataAttributes = mediaData.map { (key, value) ->
+        val dataAttributes = dataMap.map { (key, value) ->
             val escapedValue = value.toString()
                 .replace("&", "&amp;")
                 .replace("<", "&lt;")
@@ -1425,7 +1531,25 @@ class XMPPWebSocketConnection(
         // body windowing).
         val originIdElement = """<origin-id xmlns="urn:xmpp:sid:0" id="$safeId"/>"""
         // Matches web version: includes from attribute and store hint
-        val message = """<message id="$safeId" type="groupchat"$fromAttribute to="$fixedRoomJid">$originIdElement<body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
+        var message = """<message id="$safeId" type="groupchat"$fromAttribute to="$fixedRoomJid">$originIdElement<body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
+        if (sealedKeys != null) {
+            // The keys go inside the OMEMO payload; <data> and the store hint stay in clear.
+            val cleartext = XmlParser.parseFragments("""<data $dataAttributes/><store xmlns="urn:xmpp:hints"/>""")
+            val outcome = E2eeRuntime.encryptGroupStanza(
+                fixedRoomJid,
+                host,
+                messageId,
+                listOf(XmlElement("body").add(com.ethora.chat.core.e2ee.OmemoFileEnvelope.sealedMediaBody(sealedKeys))),
+                cleartext.filterIsInstance<XmlElement>()
+            )
+            message = when (outcome) {
+                is E2eeRuntime.Outcome.Encrypted -> outcome.stanza.toXml()
+                else -> {
+                    Log.e(TAG, "OMEMO: refusing to send sealed attachment to $fixedRoomJid - $outcome")
+                    return false
+                }
+            }
+        }
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMediaMessage() to $fixedRoomJid")
         val ws = webSocket
         if (ws == null) {
@@ -1508,6 +1632,12 @@ class XMPPWebSocketConnection(
     suspend fun editMessage(roomJid: String, messageId: String, newText: String) {
         if (!isAuthenticated) {
             Log.e(TAG, "Cannot edit message: not authenticated")
+            return
+        }
+        // An edit is a plain <replace>, so it would put the new text in clear next to an
+        // encrypted original. Edits are blocked in e2ee rooms until they are encrypted too.
+        if (E2eeRuntime.isE2eeRoom(roomJid)) {
+            Log.w(TAG, "Edit blocked: messages in end-to-end encrypted rooms cannot be edited yet")
             return
         }
 
@@ -2151,6 +2281,7 @@ class XMPPWebSocketConnection(
     fun disconnect() {
         Log.d(TAG, "🔌 Disconnecting WebSocket...")
         disconnectRequested = true
+        E2eeRuntime.stop()
         webSocket?.close(1000, "Normal closure")
         isConnected = false
         isAuthenticated = false

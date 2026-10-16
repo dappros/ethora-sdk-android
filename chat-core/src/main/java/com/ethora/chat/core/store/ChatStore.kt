@@ -24,6 +24,7 @@ object ChatStore {
      */
     fun setConfig(config: ChatConfig?) {
         _config.value = config
+        com.ethora.chat.core.e2ee.E2eeRuntime.setEnabled(config?.e2ee?.enabled == true)
     }
 
     /**

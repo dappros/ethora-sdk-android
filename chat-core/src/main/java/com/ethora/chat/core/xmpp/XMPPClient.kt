@@ -1069,6 +1069,11 @@ class XMPPClient(
             val locationPreview = extractAttribute(dataXml, "locationPreview")
             val mimetype = extractAttribute(dataXml, "mimetype")
             val isMediafile = extractAttribute(dataXml, "isMediafile")
+            // E2EE flags, see XMPPWebSocketConnection.parseAndHandleRealtimeMessage
+            val unencryptedFlag = (com.ethora.chat.core.e2ee.E2eeRuntime.isE2eeRoom(actualRoomJid) &&
+                extractAttribute(dataXml, "omemoEncrypted") != "true").takeIf { it }
+            val e2eeKeysAttr = extractAttribute(dataXml, "e2eeKeys")?.split(",")?.filter { it.isNotBlank() }
+            val clientEncryptedAttr = extractAttribute(dataXml, "clientEncrypted")
             val fileName = extractAttribute(dataXml, "fileName")
             val originalName = extractAttribute(dataXml, "originalName")
             val size = extractAttribute(dataXml, "size")
@@ -1144,7 +1149,10 @@ class XMPPClient(
                 originalName = originalName,
                 size = size,
                 waveForm = waveForm,
-                archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId
+                archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId,
+                unencrypted = unencryptedFlag,
+                e2eeKeys = e2eeKeysAttr,
+                clientEncrypted = clientEncryptedAttr
             )
             
             messages.add(message)

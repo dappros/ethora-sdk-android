@@ -84,6 +84,9 @@ fun Chat(
     val localStorage = remember { LocalStorage(context) }
 
     ChatStore.setConfig(config)
+    com.ethora.chat.core.e2ee.E2eeRuntime.setStoreFactory { jid ->
+        com.ethora.chat.core.e2ee.OmemoPrefsStore.forAccount(context, jid)
+    }
     val configError = ChatStore.validateServerConfig(config)
     if (configError != null) {
         android.util.Log.w("EthoraChat", "ChatConfig invalid → $configError")
