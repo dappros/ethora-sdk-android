@@ -1,0 +1,114 @@
+{
+  "hkdf": [
+    {
+      "ikm": "282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01",
+      "salt": null,
+      "info": "OMEMO X3DH",
+      "length": 32,
+      "out": "3cef4d00af721a482590324de99c1dbb8ca049bfe00a1e033bc23f38f76675ba"
+    },
+    {
+      "ikm": "282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01",
+      "salt": "353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e",
+      "info": "OMEMO Root Chain",
+      "length": 64,
+      "out": "2cda0eb372e23614ee129cb1b236e391ee53f5ce840b73113c417ef0edf5516ddbe127da2d14ef2812ba09df2257bbf207dc6430b41a017b4f2235f94278eba6"
+    },
+    {
+      "ikm": "282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01",
+      "salt": null,
+      "info": "OMEMO Message Key Material",
+      "length": 80,
+      "out": "ef75af1d32671aabd6aed92f4823a1327a6019976546cb665af337a6478de201eb3e93db47787c35f23820b03be6b5c282baa88b1af210ac00a89ba4e11d598668fc72005feb9b0b37ad56c1c19cf3f7"
+    },
+    {
+      "ikm": "282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01",
+      "salt": null,
+      "info": "OMEMO Payload",
+      "length": 80,
+      "out": "64afd3d978c9fc0dfebb91772626941deab4c2c2ccff56ab70130b006deb95497d1b63fbd98769e489fa347425c2783fb2de23f85d2f670a869a68a92c608c3edba169b9099d37b0f9aaf93be121f4be"
+    }
+  ],
+  "identity": {
+    "alicePub": "e26f6fa991ddf37b2e5e9622b6baaf92d81ef89de22980754ff0bcec48d4b46e",
+    "bobPub": "af0f30663521a8c7c47d92cc7280bc93ed6b9eb1b4c3854c7725d9a8f3d9ec67",
+    "aliceDhPriv": "1876c0cd4afb3e2acac406ddba95d9d610dd973feb6158dfe76d2b08cef0ed7b",
+    "aliceDhPub": "559876214317925dc367daf380bf39349e950ca097695bcbb1b28b0782fa7c45",
+    "bobDhPub": "7e9a04978c7ba4a6adbb0ff01605fb78bf09cba80bebd04fc98a7cbf0aa89771",
+    "spkSignature": "26adce6d460ab710e55a1d10a0349cdf413e6a7e48c2e2ea2f11696d66548c15cd07582263fbac73d3c15ed43fa562c2606ca56e30c1456acf5c3e335e5bd408",
+    "aliceSignsMsg": "d1ca279fc71b2de198011505086e6d5c248743e605a0d605addb202f483a6cc6c4ba54f520ffd799eabb45749c608db33d3e714bed4756556612b558a7856508",
+    "msg": "ethora-omemo"
+  },
+  "x25519": {
+    "priv": "424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b",
+    "pubPeer": "7dce57d547d6a5097bcb6e5d48cfd5cd8070fb1b67a1e720bdf14f6fb264d521",
+    "shared": "cbcdfe00ab714fbe443722ea81c65270e167b65c6b61a0f2c19f898c8949ca2a"
+  },
+  "acceptSession": {
+    "rk": "20a6000fba71afaa1ab2cb711d6eacf365806d78277a58c19ba22a71c52e0945",
+    "ad": "e26f6fa991ddf37b2e5e9622b6baaf92d81ef89de22980754ff0bcec48d4b46eaf0f30663521a8c7c47d92cc7280bc93ed6b9eb1b4c3854c7725d9a8f3d9ec67",
+    "peerIk": "e26f6fa991ddf37b2e5e9622b6baaf92d81ef89de22980754ff0bcec48d4b46e",
+    "kexEk": "3c2ee2246ff19aada3f0f39122dada679b4a1cf3dcc93213852f8901daa4e24d"
+  },
+  "ratchet": {
+    "initiator": {
+      "rk": "a02101380ce3d2182b35a57dfde31ab3954d2c27255ee0e365527a8f11befbc2",
+      "dhsPriv": "aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c83",
+      "dhsPub": "bbad68987e0c2907180ca644ac44b8a760dcd10eb5bd942982cb4c831d59d235",
+      "dhr": "18b2b5d3c59d4769d9ce783e117c3665093a471b9bf6803322ea857394281020",
+      "cks": "19b4981ab149f9eaa419ca29a35d20cc10bca03366cb3af64e1136d282f0253d",
+      "ad": "e26f6fa991ddf37b2e5e9622b6baaf92d81ef89de22980754ff0bcec48d4b46eaf0f30663521a8c7c47d92cc7280bc93ed6b9eb1b4c3854c7725d9a8f3d9ec67",
+      "peerIk": "af0f30663521a8c7c47d92cc7280bc93ed6b9eb1b4c3854c7725d9a8f3d9ec67"
+    },
+    "responderEk": "3c2ee2246ff19aada3f0f39122dada679b4a1cf3dcc93213852f8901daa4e24d",
+    "plaintexts": [
+      "hello bob",
+      "second message",
+      "third, with ünïcode and \"quotes\""
+    ],
+    "wire": [
+      "0a106ab2a537b04e12ceb3141ce83c6e20ab1238080010001a20bbad68987e0c2907180ca644ac44b8a760dcd10eb5bd942982cb4c831d59d2352210d546fe071ee6e7f6d0b90f8a5be19eca",
+      "0a108158c4a04f8871cf8b1fa08b151255651238080110001a20bbad68987e0c2907180ca644ac44b8a760dcd10eb5bd942982cb4c831d59d2352210b0dc2951f38a52e3d65193c35ecbd916",
+      "0a10c86194a21af35d6b4977c26374d82b261258080210001a20bbad68987e0c2907180ca644ac44b8a760dcd10eb5bd942982cb4c831d59d2352230c17f86edefd468ffd7f69cf7d069b96c7159f4947cb7a78ed38a887b92baf14327d3045849eb3d610d07cb67caa52367"
+    ],
+    "decryptOrder": [
+      1,
+      0,
+      2
+    ],
+    "decrypted": {
+      "0": "hello bob",
+      "1": "second message",
+      "2": "third, with ünïcode and \"quotes\""
+    }
+  },
+  "payload": {
+    "key": "050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7de",
+    "plaintext": "{\"v\":1,\"keys\":[\"a\"]}",
+    "ciphertext": "d820e994b459b3e5b64a5e9e3bb2ab59e79e90b197729c72e7af26a19d6fdf91",
+    "keyMaterial": "050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7decb7ed9f20561409f92b17bb8af7f241c"
+  },
+  "protobuf": {
+    "message": "080510ac021a2018b2b5d3c59d4769d9ce783e117c3665093a471b9bf6803322ea85739428102022280102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728",
+    "authenticated": "0a10949ba2a9b0b7bec5ccd3dae1e8eff6fd1251080510ac021a2018b2b5d3c59d4769d9ce783e117c3665093a471b9bf6803322ea85739428102022280102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728",
+    "keyExchange": "080710011a20e26f6fa991ddf37b2e5e9622b6baaf92d81ef89de22980754ff0bcec48d4b46e22203c2ee2246ff19aada3f0f39122dada679b4a1cf3dcc93213852f8901daa4e24d2a650a10949ba2a9b0b7bec5ccd3dae1e8eff6fd1251080510ac021a2018b2b5d3c59d4769d9ce783e117c3665093a471b9bf6803322ea85739428102022280102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728",
+    "decodedMessageN": 5,
+    "decodedMessagePn": 300,
+    "decodedKexPkId": 7
+  },
+  "fileEnvelope": {
+    "meta": {
+      "mimetype": "application/pdf",
+      "originalname": "contract \"final\" é.pdf",
+      "size": 5
+    },
+    "bytes": "0102030405",
+    "envelope": "4554484f46494c4501000000527b226d696d6574797065223a226170706c69636174696f6e2f706466222c226f726967696e616c6e616d65223a22636f6e7472616374205c2266696e616c5c2220c3a92e706466222c2273697a65223a357d0102030405"
+  },
+  "sealedFile": {
+    "key": "121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4eb",
+    "ciphertext": "92e4a864cb7a876f128cc0481bb51106b6c65f80341e570ad0c329b5f52f7a6cd7fe039d757050809bd341ee53722317ecdfb3f8ee74dca219cc1e3afa913d8326ffc3af8c6893348a6fbbda473ec0ce837e3464b3a7d4a3e7ec38a01cbd6adebc7aef60ee560709448b740fd2e1a7ad",
+    "keyMaterialB64": "EhkgJy41PENKUVhfZm10e4KJkJeepayzusHIz9bd5OsHC6qSPyRhK8ZFBb0kUe+I",
+    "openedName": "contract \"final\" é.pdf"
+  }
+}
