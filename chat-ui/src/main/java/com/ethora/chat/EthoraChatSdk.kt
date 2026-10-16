@@ -6,6 +6,7 @@ import com.ethora.chat.core.persistence.ChatPersistenceManager
 import com.ethora.chat.core.persistence.LocalStorage
 import com.ethora.chat.core.persistence.MessageCache
 import com.ethora.chat.core.push.PushNotificationManager
+import com.ethora.chat.core.push.PushRegistration
 import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.store.MessageStore
 import com.ethora.chat.core.store.PendingMediaSendQueue
@@ -50,6 +51,34 @@ object EthoraChatSdk {
 
     @JvmStatic
     fun isInitialized(): Boolean = initialized
+
+    /**
+     * Hand the device push token from the host app to the SDK. The host owns
+     * FCM (see `FirebaseMessagingService.onNewToken`). The SDK registers the
+     * token with the backend once `ChatConfig.pushNotifications.enabled` is true.
+     *
+     * @param tokenType "fcm", "apns" or "apns-voip". Detected from the token when null.
+     */
+    @JvmStatic
+    fun registerPushToken(token: String, tokenType: String? = null) {
+        PushNotificationManager.setFcmToken(
+            token,
+            tokenType ?: PushRegistration.detectTokenType(token)
+        )
+    }
+
+    /**
+     * Pass a tapped push payload to the SDK. The room named by `jid`,
+     * `chatJid`, `roomJid` or `roomJID` is opened once the room list is loaded.
+     *
+     * @return true when the payload named a room.
+     */
+    @JvmStatic
+    fun handlePushPayload(data: Map<String, String?>): Boolean {
+        val jid = PushNotificationManager.roomJidFromPayload(data) ?: return false
+        PushNotificationManager.setPendingNotificationJid(jid)
+        return true
+    }
 
     /**
      * Tear down runtime SDK state without touching persisted data.

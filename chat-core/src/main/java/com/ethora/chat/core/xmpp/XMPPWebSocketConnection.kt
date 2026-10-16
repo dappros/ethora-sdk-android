@@ -20,8 +20,8 @@ import kotlin.jvm.Volatile
  */
 class XMPPWebSocketConnection(
     private val wsUrl: String,
-    private val username: String,
-    private val password: String,
+    private var username: String,
+    private var password: String,
     private val host: String,
     private val conference: String,
     private val resource: String = "default",
@@ -69,6 +69,24 @@ class XMPPWebSocketConnection(
     private var clientWrapper: XMPPClient? = null
     fun setClientWrapper(client: XMPPClient) {
         this.clientWrapper = client
+    }
+
+    /**
+     * Supplies fresh (username, password) after a SASL failure, mirroring web
+     * `xmppClient.authRecovery`. Returns null when no credentials can be found.
+     */
+    var credentialsProvider: (suspend () -> Pair<String, String>?)? = null
+
+    private var saslRecoveryAttempts = 0
+    private val maxSaslRecoveryAttempts = 3
+
+    /**
+     * A socket that has been replaced (after a credential recovery) can still
+     * deliver close or failure callbacks. Those must not touch the live socket.
+     */
+    private fun isStaleSocket(ws: WebSocket): Boolean {
+        val current = webSocket
+        return current != null && current !== ws
     }
     
     // MAM query collectors
@@ -212,6 +230,7 @@ class XMPPWebSocketConnection(
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (isStaleSocket(webSocket)) return
                     Log.d(TAG, "📨 Received WebSocket message: ${text.take(200)}")
                     com.ethora.chat.core.store.LogStore.receive(
                         TAG,
@@ -225,6 +244,7 @@ class XMPPWebSocketConnection(
                 }
 
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                    if (isStaleSocket(webSocket)) return
                     Log.d(TAG, "📨 Received WebSocket binary message")
                     val text = bytes.utf8()
                     com.ethora.chat.core.store.LogStore.receive(
@@ -239,6 +259,7 @@ class XMPPWebSocketConnection(
                 }
 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    if (isStaleSocket(webSocket)) return
                     Log.d(TAG, "🔌 WebSocket closing: $code - $reason")
                     com.ethora.chat.core.store.LogStore.warning(
                         TAG,
@@ -257,6 +278,7 @@ class XMPPWebSocketConnection(
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    if (isStaleSocket(webSocket)) return
                     Log.d(TAG, "🔌 WebSocket closed: $code - $reason")
                     com.ethora.chat.core.store.LogStore.warning(
                         TAG,
@@ -275,6 +297,7 @@ class XMPPWebSocketConnection(
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (isStaleSocket(webSocket)) return
                     Log.e(TAG, "❌ WebSocket failure", t)
                     com.ethora.chat.core.store.LogStore.error(
                         TAG,
@@ -383,8 +406,19 @@ class XMPPWebSocketConnection(
                     } else if (xml.contains("<failure") || (xml.contains("failure") && xml.contains("urn:ietf:params:xml:ns:xmpp-sasl"))) {
                         Log.e(TAG, "❌ SASL Authentication failed: $xml")
                         authState = AuthState.NOT_STARTED
-                        clientWrapper?.let { client ->
-                            delegate?.onStatusChanged(client, ConnectionStatus.ERROR)
+                        if (!disconnectRequested && credentialsProvider != null && saslRecoveryAttempts < maxSaslRecoveryAttempts) {
+                            // The XMPP password is short lived. Re-mint it and reconnect.
+                            saslRecoveryAttempts += 1
+                            com.ethora.chat.core.store.LogStore.warning(
+                                TAG,
+                                "🔐 SASL failed, refreshing XMPP credentials (attempt $saslRecoveryAttempts)",
+                                category = "xmpp-transport"
+                            )
+                            scope.launch { recoverFromSaslFailure() }
+                        } else {
+                            clientWrapper?.let { client ->
+                                delegate?.onStatusChanged(client, ConnectionStatus.ERROR)
+                            }
                         }
                     }
                 }
@@ -434,6 +468,7 @@ class XMPPWebSocketConnection(
                             )
                             authState = AuthState.AUTHENTICATED
                             isAuthenticated = true
+                            saslRecoveryAttempts = 0
                             clientWrapper?.let { client ->
                                 delegate?.onXMPPClientConnected(client)
                             }
@@ -2146,6 +2181,34 @@ class XMPPWebSocketConnection(
         }.also {
             unregisterMAMCollector(id)
         }
+    }
+
+    /** Re-mint credentials after a SASL failure, then open a fresh socket with them. */
+    private suspend fun recoverFromSaslFailure() {
+        val provider = credentialsProvider ?: return
+        val fresh = try {
+            provider()
+        } catch (e: Exception) {
+            Log.e(TAG, "Credential refresh failed", e)
+            null
+        }
+        if (fresh == null || fresh.first.isBlank() || fresh.second.isBlank()) {
+            clientWrapper?.let { client -> delegate?.onStatusChanged(client, ConnectionStatus.ERROR) }
+            return
+        }
+        username = fresh.first
+        password = fresh.second
+
+        val stale = webSocket
+        webSocket = null
+        isConnected = false
+        isAuthenticated = false
+        authState = AuthState.NOT_STARTED
+        try {
+            stale?.close(1000, "Re-authenticating")
+        } catch (_: Throwable) {
+        }
+        connect()
     }
 
     fun disconnect() {

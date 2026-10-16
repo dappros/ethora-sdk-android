@@ -1,6 +1,7 @@
 package com.ethora.chat.core.networking
 
 import com.ethora.chat.core.config.AppConfig
+import com.ethora.chat.core.service.LogoutService
 import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.LogStore
 import com.ethora.chat.core.store.UserStore
@@ -76,6 +77,7 @@ object ApiClient {
                 return url.contains("users/login-with-email") ||
                     url.contains("users/sign-up-with-email") ||
                     url.contains("users/client") ||
+                    url.contains("users/login/refresh") ||
                     url.contains("users/refresh-token")
             }
 
@@ -118,9 +120,8 @@ object ApiClient {
                 // Prevent infinite loops: if we've already attempted with a new token and still got 401.
                 if (responseCount(response) >= 2) return@Authenticator null
 
-                val currentAccessToken = UserStore.token.value ?: userToken
-                val currentRefreshToken = UserStore.refreshToken.value
-                if (currentAccessToken.isNullOrBlank() || currentRefreshToken.isNullOrBlank()) return@Authenticator null
+                if (AuthRefresh.isSessionDead()) return@Authenticator null
+                if (!AuthRefresh.hasRotatableSession()) return@Authenticator null
 
                 synchronized(refreshLock) {
                     LogStore.error("API", "🔄 401 received, attempting refresh for $url")
@@ -134,19 +135,20 @@ object ApiClient {
                             .build()
                     }
 
-                    val refreshed = runBlocking {
-                        try {
-                            AuthAPIHelper.refreshToken(
-                                refreshToken = currentRefreshToken,
-                                baseUrl = ChatStore.getEffectiveBaseUrl()
-                            )
-                        } catch (_: Exception) {
-                            null
-                        }
-                    } ?: return@synchronized null
+                    val refreshed = try {
+                        runBlocking { AuthRefresh.refreshAuthTokens() }
+                    } catch (fatal: RefreshFatalError) {
+                        // Only a dead session logs the user out. Mark it so parallel 401s do not log out twice.
+                        LogStore.error("API", "🚪 Refresh token is dead (${fatal.code}), logging out")
+                        AuthRefresh.markSessionDead()
+                        LogoutService.performLogout()
+                        return@synchronized null
+                    } catch (_: Exception) {
+                        // Network or 5xx: leave the session alone.
+                        return@synchronized null
+                    }
 
-                    // Persist in UserStore + update ApiClient cache.
-                    UserStore.updateTokens(refreshed.token, refreshed.refreshToken)
+                    // Tokens were already persisted by AuthRefresh. Keep the Retrofit cache in step.
                     setUserToken(refreshed.token)
 
                     LogStore.error("API", "✅ Refreshed token, retrying $url")

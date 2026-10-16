@@ -1,7 +1,6 @@
 package com.ethora.chat.core.networking
 
 import android.util.Log
-import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.UserStore
 import kotlinx.coroutines.CancellationException
@@ -9,114 +8,77 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
 /**
- * Token manager for handling JWT token refresh
- * Automatically refreshes tokens before expiration
+ * Proactive token refresh. Reads the access token's JWT `exp` claim and rotates
+ * the session through [AuthRefresh] shortly before it expires. Requests that
+ * still hit a 401 are refreshed reactively by [ApiClient].
  */
 object TokenManager {
     private const val TAG = "TokenManager"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    
-    // Token refresh job
+
     private var refreshJob: kotlinx.coroutines.Job? = null
-    
-    // Default token expiration time (24 hours in milliseconds)
-    // In production, this should be parsed from JWT token
-    private val DEFAULT_TOKEN_EXPIRATION_MS = TimeUnit.HOURS.toMillis(24)
-    
-    // Refresh token 5 minutes before expiration
+
+    /** How often the expiry is checked. */
+    private val CHECK_INTERVAL_MS = TimeUnit.SECONDS.toMillis(60)
+
+    /** Refresh once the token expires within this window. */
     private val REFRESH_BUFFER_MS = TimeUnit.MINUTES.toMillis(5)
-    
+
     /**
-     * Start automatic token refresh
-     * Checks token expiration and refreshes if needed
+     * Start the background expiry check. [baseUrl] is kept for source
+     * compatibility; the endpoint comes from [ChatStore].
      */
+    @Suppress("UNUSED_PARAMETER")
     fun startAutoRefresh(baseUrl: String = ChatStore.getEffectiveBaseUrl()) {
         stopAutoRefresh()
-        
         refreshJob = scope.launch {
-            while (true) {
+            while (isActive) {
                 try {
-                    delay(TimeUnit.MINUTES.toMillis(10)) // Check every 10 minutes
-                    
-                    val refreshToken = UserStore.refreshToken.value
-                    val currentToken = UserStore.token.value
-                    
-                    if (refreshToken == null || currentToken == null) {
-                        Log.d(TAG, "⏭️ No tokens available, skipping refresh check")
-                        continue
-                    }
-                    
-                    // Check if token needs refresh
-                    // In production, decode JWT to get actual expiration time
-                    // For now, we'll refresh if refresh token exists and current token is old
-                    val shouldRefresh = shouldRefreshToken(currentToken)
-                    
-                    if (shouldRefresh) {
-                        Log.d(TAG, "🔄 Refreshing token...")
-                        try {
-                            val refreshResponse = AuthAPIHelper.refreshToken(refreshToken, baseUrl)
-                            UserStore.updateTokens(refreshResponse.token, refreshResponse.refreshToken)
-                            Log.d(TAG, "✅ Token refreshed successfully")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "❌ Token refresh failed", e)
-                            // If refresh fails, token might be expired - user will need to re-login
+                    delay(CHECK_INTERVAL_MS)
+                    if (shouldRefreshToken(UserStore.token.value)) {
+                        Log.d(TAG, "Access token near expiry, refreshing")
+                        if (AuthRefresh.refreshAuthTokensQuietly() != null) {
+                            Log.d(TAG, "Token refreshed")
                         }
                     }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    Log.e(TAG, "❌ Error in token refresh check", e)
+                    Log.e(TAG, "Error in token expiry check", e)
                 }
             }
         }
     }
-    
-    /**
-     * Stop automatic token refresh
-     */
+
+    /** Stop the background expiry check. */
     fun stopAutoRefresh() {
         refreshJob?.cancel()
         refreshJob = null
     }
-    
+
     /**
-     * Check if token should be refreshed
-     * In production, decode JWT to check actual expiration
-     * For now, use a simple heuristic
+     * True when [token] expires within the refresh buffer, or has expired.
+     * A token without a readable `exp` is not refreshed proactively.
      */
-    private fun shouldRefreshToken(token: String): Boolean {
-        // In production, decode JWT and check expiration
-        // For now, always return false to avoid unnecessary refreshes
-        // The token will be refreshed when API calls fail with 401
-        return false
+    internal fun shouldRefreshToken(token: String?, nowMillis: Long = System.currentTimeMillis()): Boolean {
+        val remaining = JwtClaims.millisUntilExpiry(token, nowMillis) ?: return false
+        return remaining <= REFRESH_BUFFER_MS
     }
-    
+
     /**
-     * Refresh token if needed (called before API calls)
+     * Make sure the access token is fresh before a call. Returns false when no
+     * session can be refreshed.
      */
     suspend fun ensureValidToken(
-        baseUrl: String = ChatStore.getEffectiveBaseUrl()
+        @Suppress("UNUSED_PARAMETER") baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): Boolean {
-        val refreshToken = UserStore.refreshToken.value
-        val currentToken = UserStore.token.value
-        
-        if (refreshToken == null || currentToken == null) {
-            return false
-        }
-        
-        // Try to refresh token
-        return try {
-            val refreshResponse = AuthAPIHelper.refreshToken(refreshToken, baseUrl)
-            UserStore.updateTokens(refreshResponse.token, refreshResponse.refreshToken)
-            Log.d(TAG, "✅ Token refreshed")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Token refresh failed", e)
-            false
-        }
+        if (!AuthRefresh.hasRotatableSession()) return false
+        if (!shouldRefreshToken(UserStore.token.value)) return true
+        return AuthRefresh.refreshAuthTokensQuietly() != null
     }
 }

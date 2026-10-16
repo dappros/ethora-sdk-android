@@ -107,6 +107,9 @@ data class ChatConfig(
     // Notifications
     val messageNotifications: MessageNotificationConfig? = null,
 
+    // Device push registration (off unless enabled)
+    val pushNotifications: PushNotificationsConfig? = null,
+
     // Retry behaviour for failed text/media sends. Defaults to autoRetry = false.
     val retryConfig: RetryConfig = RetryConfig(),
 
@@ -181,6 +184,7 @@ data class ChatConfig(
         private var chatHeaderSettings: ChatHeaderSettingsConfig? = null
         private var useStoreConsoleEnabled: Boolean? = null
         private var messageNotifications: MessageNotificationConfig? = null
+        private var pushNotifications: PushNotificationsConfig? = null
         private var eventHandlers: ChatEventHandlers? = null
         private var customComponents: CustomComponents? = null
         private var onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null
@@ -241,6 +245,7 @@ data class ChatConfig(
         fun chatHeaderSettings(value: ChatHeaderSettingsConfig) = apply { this.chatHeaderSettings = value }
         fun useStoreConsoleEnabled(value: Boolean) = apply { this.useStoreConsoleEnabled = value }
         fun messageNotifications(value: MessageNotificationConfig) = apply { this.messageNotifications = value }
+        fun pushNotifications(value: PushNotificationsConfig) = apply { this.pushNotifications = value }
         fun eventHandlers(value: ChatEventHandlers) = apply { this.eventHandlers = value }
         fun customComponents(value: CustomComponents) = apply { this.customComponents = value }
         fun onBeforeSend(value: (OutgoingSendInput) -> SendDecision) = apply { this.onBeforeSend = value }
@@ -302,6 +307,7 @@ data class ChatConfig(
             chatHeaderSettings = chatHeaderSettings,
             useStoreConsoleEnabled = useStoreConsoleEnabled,
             messageNotifications = messageNotifications,
+            pushNotifications = pushNotifications,
             eventHandlers = eventHandlers,
             customComponents = customComponents,
             onBeforeSend = onBeforeSend,

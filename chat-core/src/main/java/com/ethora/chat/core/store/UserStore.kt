@@ -176,6 +176,37 @@ object UserStore {
     }
 
     /**
+     * Apply a rotated session and WAIT for persistence. Refresh-token rotation
+     * must reach storage before the caller uses the new tokens, because the
+     * backend treats a re-presented old refresh token as theft.
+     */
+    suspend fun applyRotatedSession(
+        token: String,
+        refreshToken: String,
+        fileToken: String? = null,
+        xmppPassword: String? = null
+    ) {
+        _token.value = token
+        _refreshToken.value = refreshToken
+        val updated = _currentUser.value?.copy(
+            token = token,
+            refreshToken = refreshToken,
+            fileToken = fileToken ?: _currentUser.value?.fileToken,
+            xmppPassword = xmppPassword ?: _currentUser.value?.xmppPassword
+        )
+        _currentUser.value = updated
+        persistenceManager?.saveTokens(token, refreshToken)
+        updated?.let { persistenceManager?.saveUser(it) }
+    }
+
+    /** Store a fresh XMPP password (from `POST users/xmpp-token`) and persist it. */
+    suspend fun applyXmppPassword(xmppPassword: String) {
+        val updated = _currentUser.value?.copy(xmppPassword = xmppPassword) ?: return
+        _currentUser.value = updated
+        persistenceManager?.saveUser(updated)
+    }
+
+    /**
      * Clear user data
      */
     fun clear() {
