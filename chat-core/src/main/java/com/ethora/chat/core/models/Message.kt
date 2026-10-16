@@ -50,7 +50,11 @@ data class Message(
      *  it's not in any override list. Not persisted to the Room DB — after
      *  app restart, messages come back from MAM with `id = archive-id`
      *  directly, so this field is only needed for the in-session window. */
-    val archiveId: String? = null
+    val archiveId: String? = null,
+    /** Caption typed with the files (web `caption` attribute on <data>). Null when none. */
+    val caption: String? = null,
+    /** All files of a multi-attach media message (web `attachments`). Null for single-file messages. */
+    val attachments: List<MessageAttachment>? = null
 )
 
 /**

@@ -146,7 +146,7 @@ object ApiClient {
                     } ?: return@synchronized null
 
                     // Persist in UserStore + update ApiClient cache.
-                    UserStore.updateTokens(refreshed.token, refreshed.refreshToken)
+                    UserStore.updateTokens(refreshed.token, refreshed.refreshToken, refreshed.fileToken)
                     setUserToken(refreshed.token)
 
                     LogStore.error("API", "✅ Refreshed token, retrying $url")

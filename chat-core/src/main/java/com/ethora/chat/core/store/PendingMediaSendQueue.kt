@@ -79,6 +79,14 @@ data class PendingMediaUploadPayload(
     }
 }
 
+/** One file of a queued media message, with its upload payload once the upload finished. */
+data class PendingMediaFile(
+    val localFilePath: String,
+    val fileName: String,
+    val mimeType: String,
+    val uploaded: PendingMediaUploadPayload? = null
+)
+
 data class PendingMediaSend(
     val id: String = "pending-media:${UUID.randomUUID()}",
     val roomJid: String,
@@ -111,10 +119,33 @@ data class PendingMediaSend(
      * the server echo merges into the existing row rather than appending
      * a duplicate. Null when no caption was attached.
      */
-    val captionMessageId: String? = null
+    val captionMessageId: String? = null,
+    /**
+     * Every file of a multi-attach message, in selection order. Null for entries
+     * queued before multi-attach, which describe their single file with the fields
+     * above. The fields above always describe the first file.
+     */
+    val files: List<PendingMediaFile>? = null
 ) {
     companion object {
         const val MAX_RETRY_ATTEMPTS = 3
+    }
+
+    /** All files of this message; a legacy single-file entry yields one item. */
+    val effectiveFiles: List<PendingMediaFile>
+        get() = files?.takeIf { it.isNotEmpty() }
+            ?: listOf(PendingMediaFile(localFilePath, fileName, mimeType, uploaded))
+
+    /** Replaces the file list and keeps the first-file fields in step with it. */
+    fun withFiles(updated: List<PendingMediaFile>): PendingMediaSend {
+        val first = updated.first()
+        return copy(
+            files = updated,
+            localFilePath = first.localFilePath,
+            fileName = first.fileName,
+            mimeType = first.mimeType,
+            uploaded = first.uploaded
+        )
     }
 
     /**
@@ -264,7 +295,9 @@ object PendingMediaSendQueue {
             val next = current.filterNot { it.id == id }
             replaceAllLocked(next)
             if (deleteLocalFile) {
-                removed?.localFilePath?.let { runCatching { File(it).delete() } }
+                removed?.effectiveFiles?.forEach { file ->
+                    runCatching { File(file.localFilePath).delete() }
+                }
             }
         }
     }
@@ -306,7 +339,9 @@ object PendingMediaSendQueue {
             val current = _items.value
             if (deleteLocalFiles) {
                 current.forEach { item ->
-                    runCatching { File(item.localFilePath).delete() }
+                    item.effectiveFiles.forEach { file ->
+                        runCatching { File(file.localFilePath).delete() }
+                    }
                 }
             }
             replaceAllLocked(emptyList())

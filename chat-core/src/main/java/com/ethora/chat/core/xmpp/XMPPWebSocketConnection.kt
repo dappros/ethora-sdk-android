@@ -2,6 +2,7 @@ package com.ethora.chat.core.xmpp
 
 import android.util.Log
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.models.MessageAttachments
 import com.ethora.chat.core.networking.DnsFallback
 import com.ethora.chat.core.models.User
 import kotlinx.coroutines.*
@@ -905,6 +906,8 @@ class XMPPWebSocketConnection(
             val originalName = extractAttribute(dataXml, "originalName")
             val size = extractAttribute(dataXml, "size")
             val waveForm = extractAttribute(dataXml, "waveForm")
+            val caption = extractAttribute(dataXml, "caption")?.takeIf { it.isNotBlank() }
+            val attachments = MessageAttachments.parse(extractAttribute(dataXml, "attachments")).takeIf { it.isNotEmpty() }
             
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
@@ -961,6 +964,8 @@ class XMPPWebSocketConnection(
                 originalName = originalName,
                 size = size,
                 waveForm = waveForm,
+                caption = caption,
+                attachments = attachments,
                 archiveId = archiveId?.takeIf { it.isNotBlank() }
             )
             
@@ -1400,17 +1405,6 @@ class XMPPWebSocketConnection(
         }
         val fromAttribute = senderJid?.let { """ from="$it"""" } ?: ""
         
-        // Build data element XML with all media attributes
-        val dataAttributes = mediaData.map { (key, value) ->
-            val escapedValue = value.toString()
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\"", "&quot;")
-                .replace("'", "&apos;")
-            "$key=\"$escapedValue\""
-        }.joinToString(" ")
-        
         // Escape messageId for XML id attribute
         val safeId = messageId
             .replace("&", "&amp;")
@@ -1418,14 +1412,7 @@ class XMPPWebSocketConnection(
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
             .replace("'", "&apos;")
-        // XEP-0359 origin-id mirrors the same correlation handle for media
-        // echoes — see sendMessage() above for the rationale. Without it,
-        // media echoes that come back through MUC-SUB rewrites would have
-        // to fall through to the heuristic content match (location/fileName
-        // body windowing).
-        val originIdElement = """<origin-id xmlns="urn:xmpp:sid:0" id="$safeId"/>"""
-        // Matches web version: includes from attribute and store hint
-        val message = """<message id="$safeId" type="groupchat"$fromAttribute to="$fixedRoomJid">$originIdElement<body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
+        val message = buildMediaMessageXml(fixedRoomJid, fromAttribute, mediaData, safeId)
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMediaMessage() to $fixedRoomJid")
         val ws = webSocket
         if (ws == null) {

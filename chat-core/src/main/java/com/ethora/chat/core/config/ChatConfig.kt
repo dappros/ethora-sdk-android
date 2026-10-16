@@ -120,7 +120,10 @@ data class ChatConfig(
     val onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null,
 
     // Structured event stream
-    val onChatEvent: ((ChatEvent) -> Unit)? = null
+    val onChatEvent: ((ChatEvent) -> Unit)? = null,
+
+    // Composer limits for multi-file media messages (web `attachments`)
+    val attachments: AttachmentsConfig = AttachmentsConfig()
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -128,6 +131,7 @@ data class ChatConfig(
     class Builder {
         private var disableHeader: Boolean? = null
         private var disableMedia: Boolean? = null
+        private var attachments: AttachmentsConfig = AttachmentsConfig()
         private var colors: ChatColors? = null
         private var typography: ChatTypographyConfig? = null
         private var forceDarkTheme: Boolean? = null
@@ -245,6 +249,7 @@ data class ChatConfig(
         fun customComponents(value: CustomComponents) = apply { this.customComponents = value }
         fun onBeforeSend(value: (OutgoingSendInput) -> SendDecision) = apply { this.onBeforeSend = value }
         fun onChatEvent(value: (ChatEvent) -> Unit) = apply { this.onChatEvent = value }
+        fun attachments(value: AttachmentsConfig) = apply { this.attachments = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -305,7 +310,8 @@ data class ChatConfig(
             eventHandlers = eventHandlers,
             customComponents = customComponents,
             onBeforeSend = onBeforeSend,
-            onChatEvent = onChatEvent
+            onChatEvent = onChatEvent,
+            attachments = attachments
         )
     }
 

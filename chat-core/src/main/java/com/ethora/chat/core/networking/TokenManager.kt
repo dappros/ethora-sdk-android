@@ -59,7 +59,7 @@ object TokenManager {
                         Log.d(TAG, "🔄 Refreshing token...")
                         try {
                             val refreshResponse = AuthAPIHelper.refreshToken(refreshToken, baseUrl)
-                            UserStore.updateTokens(refreshResponse.token, refreshResponse.refreshToken)
+                            UserStore.updateTokens(refreshResponse.token, refreshResponse.refreshToken, refreshResponse.fileToken)
                             Log.d(TAG, "✅ Token refreshed successfully")
                         } catch (e: Exception) {
                             Log.e(TAG, "❌ Token refresh failed", e)
@@ -111,7 +111,7 @@ object TokenManager {
         // Try to refresh token
         return try {
             val refreshResponse = AuthAPIHelper.refreshToken(refreshToken, baseUrl)
-            UserStore.updateTokens(refreshResponse.token, refreshResponse.refreshToken)
+            UserStore.updateTokens(refreshResponse.token, refreshResponse.refreshToken, refreshResponse.fileToken)
             Log.d(TAG, "✅ Token refreshed")
             true
         } catch (e: Exception) {

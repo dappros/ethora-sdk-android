@@ -311,7 +311,9 @@ object MessageStore {
                         mimetype = message.mimetype ?: existingMessage.mimetype,
                         originalName = message.originalName ?: existingMessage.originalName,
                         size = message.size ?: existingMessage.size,
-                        waveForm = message.waveForm ?: existingMessage.waveForm
+                        waveForm = message.waveForm ?: existingMessage.waveForm,
+                        caption = message.caption?.takeIf { it.isNotBlank() } ?: existingMessage.caption,
+                        attachments = message.attachments?.takeIf { it.isNotEmpty() } ?: existingMessage.attachments
                     )
                 }
                 roomMessages[existingIndex] = updatedMessage
@@ -520,7 +522,9 @@ object MessageStore {
                     mimetype = receivedMessage.mimetype ?: pendingMessage.mimetype,
                     originalName = receivedMessage.originalName ?: pendingMessage.originalName,
                     size = receivedMessage.size ?: pendingMessage.size,
-                    waveForm = receivedMessage.waveForm ?: pendingMessage.waveForm
+                    waveForm = receivedMessage.waveForm ?: pendingMessage.waveForm,
+                    caption = receivedMessage.caption?.takeIf { it.isNotBlank() } ?: pendingMessage.caption,
+                    attachments = receivedMessage.attachments?.takeIf { it.isNotEmpty() } ?: pendingMessage.attachments
                 )
             }
             roomMessages[pendingIndex] = updatedMessage
@@ -612,7 +616,9 @@ object MessageStore {
                             mimetype = incoming.mimetype ?: matched.mimetype,
                             originalName = incoming.originalName ?: matched.originalName,
                             size = incoming.size ?: matched.size,
-                            waveForm = incoming.waveForm ?: matched.waveForm
+                            waveForm = incoming.waveForm ?: matched.waveForm,
+                            caption = incoming.caption?.takeIf { it.isNotBlank() } ?: matched.caption,
+                            attachments = incoming.attachments?.takeIf { it.isNotEmpty() } ?: matched.attachments
                         )
                     }
                     roomMessages[matchIdx] = cleared
@@ -646,7 +652,9 @@ object MessageStore {
                         mimetype = incoming.mimetype ?: pending.mimetype,
                         originalName = incoming.originalName ?: pending.originalName,
                         size = incoming.size ?: pending.size,
-                        waveForm = incoming.waveForm ?: pending.waveForm
+                        waveForm = incoming.waveForm ?: pending.waveForm,
+                        caption = incoming.caption?.takeIf { it.isNotBlank() } ?: pending.caption,
+                        attachments = incoming.attachments?.takeIf { it.isNotEmpty() } ?: pending.attachments
                     )
                 }
                 roomMessages[pendingIdx] = merged
