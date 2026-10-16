@@ -120,7 +120,14 @@ data class ChatConfig(
     val onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null,
 
     // Structured event stream
-    val onChatEvent: ((ChatEvent) -> Unit)? = null
+    val onChatEvent: ((ChatEvent) -> Unit)? = null,
+
+    // Light / dark / system, mirrors web `colorScheme`. Takes precedence over forceDarkTheme.
+    val colorScheme: ChatColorScheme? = null,
+
+    // Side-by-side room list and chat on wide screens. null = auto (on at >= 600dp),
+    // false = always single pane, true = always two pane.
+    val twoPaneLayout: Boolean? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -185,6 +192,8 @@ data class ChatConfig(
         private var customComponents: CustomComponents? = null
         private var onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null
         private var onChatEvent: ((ChatEvent) -> Unit)? = null
+        private var colorScheme: ChatColorScheme? = null
+        private var twoPaneLayout: Boolean? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -245,6 +254,8 @@ data class ChatConfig(
         fun customComponents(value: CustomComponents) = apply { this.customComponents = value }
         fun onBeforeSend(value: (OutgoingSendInput) -> SendDecision) = apply { this.onBeforeSend = value }
         fun onChatEvent(value: (ChatEvent) -> Unit) = apply { this.onChatEvent = value }
+        fun colorScheme(value: ChatColorScheme?) = apply { this.colorScheme = value }
+        fun twoPaneLayout(value: Boolean?) = apply { this.twoPaneLayout = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -305,7 +316,9 @@ data class ChatConfig(
             eventHandlers = eventHandlers,
             customComponents = customComponents,
             onBeforeSend = onBeforeSend,
-            onChatEvent = onChatEvent
+            onChatEvent = onChatEvent,
+            colorScheme = colorScheme,
+            twoPaneLayout = twoPaneLayout
         )
     }
 
