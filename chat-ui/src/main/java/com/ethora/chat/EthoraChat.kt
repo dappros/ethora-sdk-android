@@ -787,10 +787,10 @@ fun Chat(
             }
         }
         
-        // Push subscribe paths gated behind SDK_PUSH_SUBSCRIBE_ENABLED
-        // (see const at end of file). FCM token + pending-JID deep-link stay live.
+        // Push subscribe paths run only when config.pushNotifications.enabled is true.
+        // The pending-JID deep-link below is always live.
         val fcmToken by PushNotificationManager.fcmToken.collectAsState()
-        if (SDK_PUSH_SUBSCRIBE_ENABLED) {
+        if (config.pushNotifications?.enabled == true) {
             LaunchedEffect(fcmToken, currentUser?.walletAddress) {
                 val token = fcmToken
                 if (token != null && currentUser != null) {
@@ -954,10 +954,6 @@ private enum class RoomConnectionPhase {
     READY,
     FAILED
 }
-
-// Push subscription (backend POST + MUC-SUB per room) is off for now.
-// Flip to true to re-enable.
-private const val SDK_PUSH_SUBSCRIBE_ENABLED: Boolean = false
 
 private fun resolveRoomTitle(
     normalizedRoomJid: String,

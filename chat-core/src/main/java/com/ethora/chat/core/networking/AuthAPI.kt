@@ -30,6 +30,16 @@ interface AuthAPI {
         @Body body: ClientTypeRequest
     ): Response<LoginResponse>
 
+    /**
+     * Refresh-token rotation, as in web `authRefresh.ts` and RN: the presented
+     * refresh token travels in the Authorization header, the body is empty.
+     */
+    @POST("users/login/refresh")
+    suspend fun loginRefresh(
+        @Header("Authorization") authorization: String
+    ): Response<RefreshTokenResponse>
+
+    /** Legacy endpoint, kept for source compatibility. Use [loginRefresh]. */
     @POST("users/refresh-token")
     suspend fun refreshToken(
         @Body body: RefreshTokenRequest
@@ -149,7 +159,9 @@ data class RefreshTokenRequest(
  */
 data class RefreshTokenResponse(
     val token: String,
-    val refreshToken: String? = null
+    val refreshToken: String? = null,
+    val fileToken: String? = null,
+    val xmppPassword: String? = null
 )
 
 /**
@@ -222,7 +234,7 @@ object AuthAPIHelper {
         baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): RefreshTokenResponse {
         val api = ApiClient.createService<AuthAPI>(baseUrl)
-        val response = api.refreshToken(RefreshTokenRequest(refreshToken))
+        val response = api.loginRefresh(refreshToken)
         if (response.isSuccessful) {
             return response.body()!!
         } else {
@@ -303,8 +315,7 @@ object AuthAPIHelper {
                         val refreshTokenValue = UserStore.refreshToken.value
                         if (!refreshTokenValue.isNullOrBlank()) {
                             try {
-                                val refreshed = refreshToken(refreshTokenValue, baseUrl)
-                                UserStore.updateTokens(refreshed.token, refreshed.refreshToken)
+                                val refreshed = AuthRefresh.refreshAuthTokens()
                                 currentToken = refreshed.token
                                 hasRefreshedToken = true
                                 shouldRetryWithRefreshedToken = true

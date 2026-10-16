@@ -2,6 +2,7 @@ package com.ethora.chat.core.service
 
 import android.util.Log
 import com.ethora.chat.core.networking.TokenManager
+import com.ethora.chat.core.push.PushNotificationManager
 import com.ethora.chat.core.store.*
 import com.ethora.chat.core.xmpp.XMPPClient
 import kotlinx.coroutines.CoroutineScope
@@ -9,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Logout service for the chat component
@@ -28,6 +30,7 @@ import kotlinx.coroutines.withContext
  */
 object LogoutService {
     private const val TAG = "LogoutService"
+    private const val PUSH_RELEASE_TIMEOUT_MS = 2500L
     
     // XMPP client reference (set by chat component)
     private var xmppClient: XMPPClient? = null
@@ -104,6 +107,9 @@ object LogoutService {
         // Capture before the composable teardown clears it.
         val capturedRoom = RoomStore.currentRoom.value
         val capturedClient = synchronized(xmppLock) { xmppClient }
+        // Captured now: the push token and session token are cleared below.
+        val capturedAuthToken = UserStore.token.value
+        val capturedPushToken = PushNotificationManager.fcmToken.value
 
         scope.launch {
             try {
@@ -137,8 +143,17 @@ object LogoutService {
                     Log.d(TAG, "✅ All stores cleared")
                 }
 
+                // 0c. Release the push registration on the server (RN: awaited, runs with the flush).
+                val pushReleaseJob = launch(Dispatchers.IO) {
+                    runCatching {
+                        PushNotificationManager.releaseRegistration(capturedAuthToken, capturedPushToken)
+                    }.onFailure { e -> Log.w(TAG, "⚠️ Push release on logout failed", e) }
+                }
+
                 // Wait for the flush to finish before we disconnect the socket.
                 flushJob.join()
+                withTimeoutOrNull(PUSH_RELEASE_TIMEOUT_MS) { pushReleaseJob.join() }
+                PushNotificationManager.reset()
 
                 // 1. Disconnect XMPP client
                 withContext(Dispatchers.IO) {

@@ -5,6 +5,7 @@ import android.util.Log
 import com.ethora.chat.core.config.XMPPSettings
 import com.ethora.chat.core.models.Message
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.networking.XmppCredentialRecovery
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.LogStore
 import kotlinx.coroutines.*
@@ -37,8 +38,8 @@ import kotlinx.coroutines.sync.withLock
  * XMPP Client implementation using Smack library
  */
 class XMPPClient(
-    private val username: String,
-    private val password: String,
+    private var username: String,
+    private var password: String,
     private val settings: XMPPSettings? = null,
     /** DNS fallback overrides (host -> IP). Pass from ChatConfig so XMPP uses same overrides without relying on ChatStore at build time. */
     private val dnsFallbackOverrides: Map<String, String>? = null
@@ -308,6 +309,25 @@ class XMPPClient(
     }
 
     /**
+     * Replace the credentials used by the next connect. Called after a SASL
+     * `not-authorized` recovery.
+     */
+    fun updateCredentials(newUsername: String, newPassword: String) {
+        username = newUsername
+        password = newPassword
+    }
+
+    /**
+     * Source of fresh credentials after a SASL failure. Defaults to
+     * [XmppCredentialRecovery.recover]. Pass null to disable recovery.
+     */
+    fun setCredentialsProvider(provider: (suspend () -> Pair<String, String>?)?) {
+        credentialsProvider = provider
+    }
+
+    private var credentialsProvider: (suspend () -> Pair<String, String>?)? = { XmppCredentialRecovery.recover() }
+
+    /**
      * Initialize and connect XMPP client
      * Note: This is a simplified implementation. For WebSocket support, 
      * you may need to use Smack's WebSocket extension or a different library.
@@ -346,6 +366,11 @@ class XMPPClient(
                     dnsFallbackOverrides = dnsFallbackOverrides
                 )
                 webSocketConnection?.setClientWrapper(this@XMPPClient)
+                webSocketConnection?.credentialsProvider = {
+                    val fresh = credentialsProvider?.invoke()
+                    if (fresh != null) updateCredentials(fresh.first, fresh.second)
+                    fresh
+                }
                 webSocketConnection?.setDelegate(object : XMPPClientDelegate {
                     override fun onXMPPClientConnected(client: XMPPClient) {
                         reconnectAttempts = 0

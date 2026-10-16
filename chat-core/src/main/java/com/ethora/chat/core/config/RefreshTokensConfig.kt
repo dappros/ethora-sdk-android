@@ -13,5 +13,7 @@ data class RefreshTokensConfig(
  */
 data class TokenRefreshResult(
     val accessToken: String,
-    val refreshToken: String? = null
+    val refreshToken: String? = null,
+    val fileToken: String? = null,
+    val xmppPassword: String? = null
 )
