@@ -39,6 +39,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import com.ethora.chat.core.models.Room
+import com.ethora.chat.core.models.withAttachment
 import com.ethora.chat.core.models.MessageActionsProps
 import com.ethora.chat.core.models.MessageProps
 import com.ethora.chat.core.models.SendInputProps
@@ -226,6 +227,9 @@ fun ChatRoomView(
     
     // State for file preview dialog
     var previewMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
+    // Album viewer: the image attachments of the tapped message and the starting one.
+    var previewAlbumUrls by remember { mutableStateOf<List<String>?>(null) }
+    var previewAlbumIndex by remember { mutableStateOf(0) }
     
     // State for context menu (tap position + message bounds in root coords for placement)
     var contextMenuMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
@@ -910,7 +914,17 @@ fun ChatRoomView(
                                             showTimestamp = isLastInGroup,
                                             pendingMediaStatus = pendingMediaStatus,
                                             sendFailed = sendFailed,
-                                            onMediaClick = { msg -> previewMessage = msg },
+                                            onMediaClick = { msg -> previewMessage = msg; previewAlbumUrls = null },
+                                            onAttachmentClick = { source, index ->
+                                                val attachments = com.ethora.chat.core.models.MessageAttachments.forMessage(source)
+                                                val picked = attachments.getOrNull(index)
+                                                if (picked != null) {
+                                                    val images = attachments.filter { it.isImage }.map { it.location }
+                                                    previewAlbumUrls = images.takeIf { it.size > 1 }
+                                                    previewAlbumIndex = images.indexOf(picked.location).coerceAtLeast(0)
+                                                    previewMessage = source.withAttachment(picked)
+                                                }
+                                            },
                                             onFailedClick = openFailedActions,
                                             onLongPress = { tapX, tapY, left, top, right, bottom ->
                                                 contextMenuMessage = message
@@ -1209,6 +1223,19 @@ fun ChatRoomView(
                 )
             )
         } else {
+            val handleSendMediaBatch: ((List<Pair<java.io.File, String>>, String?, String?) -> Unit)? =
+                if (disableMedia) null else batchHandler@{ files, caption, replyId ->
+                    viewModel.sendMediaBatch(files, caption, replyId)
+                    pendingOwnMessageAutoScroll = true
+                    coroutineScope.launch {
+                        kotlinx.coroutines.delay(60)
+                        scrollToTrueBottom(animate = true)
+                    }
+                    if (replyingToMessage != null) {
+                        replyingToMessage = null
+                    }
+                    viewModel.sendStopTyping()
+                }
             val handleSendMediaWithCaption: ((java.io.File, String, String, String?) -> Unit)? =
                 if (disableMedia) null else comboHandler@{ file, mimeType, caption, replyId ->
                     viewModel.sendMediaWithCaption(file, mimeType, caption, replyId)
@@ -1226,6 +1253,7 @@ fun ChatRoomView(
                 onSendMessage = handleSendMessage,
                 onSendMedia = handleSendMedia,
                 onSendMediaWithCaption = handleSendMediaWithCaption,
+                onSendMediaBatch = handleSendMediaBatch,
                 onStartTyping = {
                     viewModel.sendStartTyping()
                 },
@@ -1257,9 +1285,12 @@ fun ChatRoomView(
         }
         FilePreviewDialog(
             message = previewMessage,
-            galleryImageUrls = roomImageUrls,
-            galleryInitialIndex = initialImageIndex,
-            onDismiss = { previewMessage = null }
+            galleryImageUrls = previewAlbumUrls ?: roomImageUrls,
+            galleryInitialIndex = if (previewAlbumUrls != null) previewAlbumIndex else initialImageIndex,
+            onDismiss = {
+                previewMessage = null
+                previewAlbumUrls = null
+            }
         )
         
         // Delete confirmation dialog (like web ChatWrapper delete modal)

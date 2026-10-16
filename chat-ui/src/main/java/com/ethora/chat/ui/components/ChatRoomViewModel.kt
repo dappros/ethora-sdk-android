@@ -8,6 +8,8 @@ import com.ethora.chat.core.config.MessageType
 import com.ethora.chat.core.config.OutgoingSendInput
 import com.ethora.chat.core.config.SendDecision
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.models.MessageAttachment
+import com.ethora.chat.core.models.MessageAttachments
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.networking.AuthAPIHelper
 import com.ethora.chat.core.store.ChatEventDispatcher
@@ -16,6 +18,7 @@ import com.ethora.chat.core.store.ConnectionStore
 import com.ethora.chat.core.store.MessageStore
 import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.store.ChatStore
+import com.ethora.chat.core.store.PendingMediaFile
 import com.ethora.chat.core.store.PendingMediaSend
 import com.ethora.chat.core.store.PendingMediaSendQueue
 import com.ethora.chat.core.store.PendingMediaSendStatus
@@ -598,62 +601,22 @@ class ChatRoomViewModel(
     }
     
     /**
-     * Queue media for durable upload + XMPP send. The optimistic message stays
-     * visible while the queue retries across reconnects and app foregrounds.
+     * Queue one media message holding every file in [files], in order. The
+     * message is one stanza: each file is uploaded (secure route, web parity),
+     * then a single media message goes out with the caption on <data>, and the
+     * `attachments` JSON when there is more than one file. The optimistic bubble
+     * stays visible while the queue retries across reconnects and foregrounds.
      */
-    /**
-     * Combo send: queue the media exactly like [sendMedia], and ask the
-     * queue processor to dispatch [caption] as a follow-up text message
-     * AFTER the XMPP media send succeeds. This guarantees the receiver
-     * sees `[image][caption]` in order — previously the two sends raced
-     * because the text-only path is a single stanza while the media path
-     * has to upload first, and the text usually won.
-     *
-     * Falls back to the plain caption-less path when [caption] is blank.
-     */
-    fun sendMediaWithCaption(
-        file: File,
-        mimeType: String,
-        caption: String,
-        replyToMessageId: String? = null
-    ) {
-        val trimmed = caption.trim()
-        if (trimmed.isEmpty()) {
-            sendMedia(file, mimeType)
-            return
-        }
-        sendMedia(
-            file = file,
-            mimeType = mimeType,
-            caption = trimmed,
-            replyToMessageId = replyToMessageId
-        )
-    }
-
-    fun sendMedia(
-        file: File,
-        mimeType: String,
-        retryCount: Int = 0,
+    fun sendMediaBatch(
+        files: List<Pair<File, String>>,
         caption: String? = null,
         replyToMessageId: String? = null
     ) {
         viewModelScope.launch {
             try {
                 val config = ChatStore.getConfig()
-                val interceptionInput = OutgoingSendInput(
-                    roomJid = room.jid,
-                    messageType = MessageType.MEDIA,
-                    fileName = file.name,
-                    mimeType = mimeType
-                )
-                val sendDecision = config?.onBeforeSend?.invoke(interceptionInput)
-                if (sendDecision is SendDecision.Cancel) return@launch
-                val effectiveInput = when (sendDecision) {
-                    is SendDecision.Proceed -> sendDecision.input
-                    else -> interceptionInput
-                }
-                val effectiveMimeType = effectiveInput.mimeType ?: mimeType
-
+                val limits = config?.attachments ?: com.ethora.chat.core.config.AttachmentsConfig()
+                if (files.isEmpty()) return@launch
                 val currentUser = UserStore.currentUser.value
                 if (currentUser == null) {
                     android.util.Log.e("ChatRoomViewModel", "Cannot send media: user or token is null")
@@ -662,55 +625,84 @@ class ChatRoomViewModel(
                             roomJid = room.jid,
                             messageType = MessageType.MEDIA,
                             error = IllegalStateException("User is null"),
-                            metadata = mapOf("fileName" to file.name, "mimeType" to effectiveMimeType)
-                        )
-                    )
-                    return@launch
-                }
-                
-                // Validate file exists and is readable
-                if (!file.exists() || !file.canRead()) {
-                    android.util.Log.e("ChatRoomViewModel", "File does not exist or cannot be read: ${file.absolutePath}")
-                    ChatEventDispatcher.emit(
-                        ChatEvent.MediaUploadResult(
-                            roomJid = room.jid,
-                            fileName = file.name,
-                            mimeType = effectiveMimeType,
-                            success = false,
-                            error = IllegalStateException("File does not exist or cannot be read")
+                            metadata = mapOf("fileName" to files.first().first.name, "mimeType" to files.first().second)
                         )
                     )
                     return@launch
                 }
 
-                val preparedMedia = prepareMediaForUpload(file, effectiveMimeType)
-                val uploadFile = preparedMedia.first
-                val uploadMimeType = preparedMedia.second
-                
-                // Validate file size (max 50MB)
-                val maxSizeBytes = 50 * 1024 * 1024L // 50MB
-                val fileSize = uploadFile.length()
-                if (fileSize > maxSizeBytes) {
-                    android.util.Log.e("ChatRoomViewModel", "File too large: ${fileSize} bytes (max: $maxSizeBytes)")
-                    ChatEventDispatcher.emit(
-                        ChatEvent.MediaUploadResult(
-                            roomJid = room.jid,
-                            fileName = uploadFile.name,
-                            mimeType = uploadMimeType,
-                            success = false,
-                            error = IllegalStateException("File too large")
-                        )
-                    )
-                    return@launch
+                val accepted = files.take(limits.effectiveMaxFiles)
+                if (accepted.size < files.size) {
+                    android.util.Log.w("ChatRoomViewModel", "Dropping ${files.size - accepted.size} files over attachments.maxFiles=${limits.effectiveMaxFiles}")
                 }
-                
-                // Create optimistic message
+
+                val prepared = mutableListOf<Pair<File, String>>()
+                for ((file, mimeType) in accepted) {
+                    val interceptionInput = OutgoingSendInput(
+                        roomJid = room.jid,
+                        messageType = MessageType.MEDIA,
+                        fileName = file.name,
+                        mimeType = mimeType
+                    )
+                    val sendDecision = config?.onBeforeSend?.invoke(interceptionInput)
+                    if (sendDecision is SendDecision.Cancel) return@launch
+                    val effectiveInput = when (sendDecision) {
+                        is SendDecision.Proceed -> sendDecision.input
+                        else -> interceptionInput
+                    }
+                    val effectiveMimeType = effectiveInput.mimeType ?: mimeType
+
+                    if (!file.exists() || !file.canRead()) {
+                        android.util.Log.e("ChatRoomViewModel", "File does not exist or cannot be read: ${file.absolutePath}")
+                        ChatEventDispatcher.emit(
+                            ChatEvent.MediaUploadResult(
+                                roomJid = room.jid,
+                                fileName = file.name,
+                                mimeType = effectiveMimeType,
+                                success = false,
+                                error = IllegalStateException("File does not exist or cannot be read")
+                            )
+                        )
+                        return@launch
+                    }
+
+                    val (uploadFile, uploadMimeType) = prepareMediaForUpload(file, effectiveMimeType)
+                    val fileSize = uploadFile.length()
+                    if (fileSize > limits.effectiveMaxFileBytes) {
+                        android.util.Log.e("ChatRoomViewModel", "File too large: $fileSize bytes (max: ${limits.effectiveMaxFileBytes})")
+                        ChatEventDispatcher.emit(
+                            ChatEvent.MediaUploadResult(
+                                roomJid = room.jid,
+                                fileName = uploadFile.name,
+                                mimeType = uploadMimeType,
+                                success = false,
+                                error = IllegalStateException("File too large")
+                            )
+                        )
+                        return@launch
+                    }
+                    prepared += uploadFile to uploadMimeType
+                }
+
+                val (firstFile, firstMime) = prepared.first()
                 // Use timestamp-based ID that will be replaced by server echo
                 val messageId = "send-media-message:${UUID.randomUUID()}"
                 // Same max(now, last+1) trick as text send — keeps the freshly
                 // sent media at the very bottom even if server clocks drift.
                 val lastKnownTs = MessageStore.lastKnownTimestamp(room.jid)
                 val optimisticTs = maxOf(System.currentTimeMillis(), lastKnownTs + 1)
+                val trimmedCaption = caption?.trim()?.takeIf { it.isNotEmpty() }
+                val optimisticAttachments = prepared.map { (file, mime) ->
+                    val localUri = "file://${file.absolutePath}"
+                    MessageAttachment(
+                        location = localUri,
+                        locationPreview = if (mime.startsWith("image/")) localUri else null,
+                        mimetype = mime,
+                        originalName = file.name,
+                        fileName = file.name,
+                        size = file.length().toString()
+                    )
+                }
                 val optimisticMessage = Message(
                     id = messageId,
                     body = "media",
@@ -724,62 +716,39 @@ class ChatRoomViewModel(
                     xmppFrom = "${room.jid}/${currentUser.id}",
                     isSystemMessage = "false",
                     isMediafile = "true",
-                    fileName = uploadFile.name,
-                    // Use the local file URI so the image/video appears in the bubble
-                    // immediately while the upload runs. Coil handles `file://` URIs.
-                    // When the server echo returns, both `location` and `locationPreview`
-                    // get replaced with the real CDN URL in the deep-merge.
-                    location = "file://${uploadFile.absolutePath}",
-                    locationPreview = if (uploadMimeType.startsWith("image/")) "file://${uploadFile.absolutePath}" else "",
-                    mimetype = uploadMimeType,
-                    originalName = uploadFile.name,
-                    size = uploadFile.length().toString()
+                    fileName = firstFile.name,
+                    // The local file URI shows the picture while the upload runs. When the
+                    // server echo returns, location and locationPreview are replaced by the CDN URLs.
+                    location = "file://${firstFile.absolutePath}",
+                    locationPreview = if (firstMime.startsWith("image/")) "file://${firstFile.absolutePath}" else "",
+                    mimetype = firstMime,
+                    originalName = firstFile.name,
+                    size = firstFile.length().toString(),
+                    caption = trimmedCaption,
+                    attachments = if (optimisticAttachments.size > 1) optimisticAttachments else null
                 )
                 MessageStore.addMessage(room.jid, optimisticMessage)
-                android.util.Log.d("ChatRoomViewModel", "Created optimistic media message with pending=true, ID: $messageId")
+                android.util.Log.d("ChatRoomViewModel", "Created optimistic media message with pending=true, ID: $messageId (${prepared.size} files)")
                 schedulePendingFallback(messageId)
-
-                // Optimistic CAPTION bubble — added now, not after the upload
-                // completes, so the user sees their text immediately in the
-                // "sending" state. When the upload finally fires the XMPP
-                // text send, we reuse this id as `customId` so the echo
-                // merges into THIS row instead of appending a second one.
-                val trimmedCaption = caption?.trim()?.takeIf { it.isNotEmpty() }
-                val captionMessageId = if (trimmedCaption != null) {
-                    val captionId = "send-text-message:${UUID.randomUUID()}"
-                    // Use optimisticTs+1 so the caption sorts AFTER the media
-                    // in the timestamp-ordered list (web parity: media
-                    // bubble first, caption second).
-                    val captionTs = optimisticTs + 1
-                    val captionMessage = Message(
-                        id = captionId,
-                        body = trimmedCaption,
-                        user = currentUser,
-                        date = Date(captionTs),
-                        timestamp = captionTs,
-                        roomJid = room.jid,
-                        pending = true,
-                        xmppId = captionId,
-                        xmppFrom = "${room.jid}/${currentUser.id}",
-                        isReply = replyToMessageId != null,
-                        mainMessage = replyToMessageId
-                    )
-                    MessageStore.addMessage(room.jid, captionMessage)
-                    schedulePendingFallback(captionId)
-                    captionId
-                } else null
 
                 PendingMediaSendQueue.enqueue(
                     PendingMediaSend(
                         roomJid = room.jid,
                         messageId = messageId,
-                        localFilePath = uploadFile.absolutePath,
-                        fileName = uploadFile.name,
-                        mimeType = uploadMimeType,
+                        localFilePath = firstFile.absolutePath,
+                        fileName = firstFile.name,
+                        mimeType = firstMime,
                         createdAt = optimisticTs,
                         caption = trimmedCaption,
                         replyToMessageId = replyToMessageId,
-                        captionMessageId = captionMessageId
+                        captionMessageId = null,
+                        files = prepared.map { (file, mime) ->
+                            PendingMediaFile(
+                                localFilePath = file.absolutePath,
+                                fileName = file.name,
+                                mimeType = mime
+                            )
+                        }
                     )
                 )
                 processPendingMediaQueue()
@@ -790,11 +759,35 @@ class ChatRoomViewModel(
                         roomJid = room.jid,
                         messageType = MessageType.MEDIA,
                         error = e,
-                        metadata = mapOf("fileName" to file.name, "mimeType" to mimeType)
+                        metadata = mapOf("fileName" to files.first().first.name, "mimeType" to files.first().second)
                     )
                 )
             }
         }
+    }
+
+    /** Single-file send. Kept for existing callers; the caption now rides on the media message. */
+    fun sendMedia(
+        file: File,
+        mimeType: String,
+        retryCount: Int = 0,
+        caption: String? = null,
+        replyToMessageId: String? = null
+    ) {
+        sendMediaBatch(listOf(file to mimeType), caption, replyToMessageId)
+    }
+
+    /**
+     * Combo send: one media message with the caption (web parity). Blank captions
+     * are dropped.
+     */
+    fun sendMediaWithCaption(
+        file: File,
+        mimeType: String,
+        caption: String,
+        replyToMessageId: String? = null
+    ) {
+        sendMediaBatch(listOf(file to mimeType), caption, replyToMessageId)
     }
 
     fun processPendingMediaQueue() {
@@ -817,8 +810,12 @@ class ChatRoomViewModel(
                     it.copy(status = PendingMediaSendStatus.UPLOADING)
                 } ?: return@forEach
 
-                val uploadPayload = working.uploaded ?: run {
-                    val file = File(working.localFilePath)
+                // Upload every file that has no payload yet. Each finished upload is saved
+                // at once, so a retry after a later failure never uploads a file twice.
+                val files = working.effectiveFiles.toMutableList()
+                for (index in files.indices) {
+                    if (files[index].uploaded != null) continue
+                    val file = File(files[index].localFilePath)
                     if (!file.exists() || !file.canRead()) {
                         markPendingMediaFailed(
                             working,
@@ -830,9 +827,10 @@ class ChatRoomViewModel(
                     val uploadResult = withContext(Dispatchers.IO) {
                         AuthAPIHelper.uploadFile(
                             file = file,
-                            mimeType = working.mimeType,
+                            mimeType = files[index].mimeType,
                             token = token,
-                            baseUrl = ChatStore.getEffectiveBaseUrl()
+                            baseUrl = ChatStore.getEffectiveBaseUrl(),
+                            chatName = working.roomJid.substringBefore('@')
                         )
                     }
                     if (uploadResult == null) {
@@ -857,26 +855,28 @@ class ChatRoomViewModel(
                             success = true
                         )
                     )
-                    PendingMediaUploadPayload.from(uploadResult)
+                    files[index] = files[index].copy(uploaded = PendingMediaUploadPayload.from(uploadResult))
+                    working = PendingMediaSendQueue.update(working.id) {
+                        it.withFiles(files.toList()).copy(nextRetryAt = 0L)
+                    } ?: return@forEach
                 }
 
+                val uploadResults = files.map { checkNotNull(it.uploaded).toFileUploadResult() }
                 working = PendingMediaSendQueue.update(working.id) {
-                    it.copy(
-                        uploaded = uploadPayload,
-                        status = PendingMediaSendStatus.READY_TO_SEND,
-                        nextRetryAt = 0L
-                    )
+                    it.copy(status = PendingMediaSendStatus.READY_TO_SEND, nextRetryAt = 0L)
                 } ?: return@forEach
 
-                val uploadResult = uploadPayload.toFileUploadResult()
-                updateOptimisticMediaMessage(working, uploadResult)
+                updateOptimisticMediaMessage(working, uploadResults)
 
                 if (!client.isFullyConnected() && !client.ensureConnected(15_000)) {
                     markPendingMediaFailed(working, IllegalStateException("XMPP not connected"))
                     return@forEach
                 }
 
-                val mediaData = buildMediaData(uploadResult, currentUser)
+                // Entries queued before the caption moved onto the media message still send it
+                // as a follow-up text (captionMessageId is set only for those).
+                val mediaCaption = if (working.captionMessageId == null) working.caption else null
+                val mediaData = buildMediaData(uploadResults, currentUser, mediaCaption)
                 val sent = try {
                     client.sendMediaMessage(working.roomJid, mediaData, working.messageId)
                 } catch (e: Exception) {
@@ -893,12 +893,8 @@ class ChatRoomViewModel(
                     val pendingCaptionId = working.captionMessageId
                     PendingMediaSendQueue.remove(working.id, deleteLocalFile = true)
                     if (!pendingCaption.isNullOrBlank() && !pendingCaptionId.isNullOrBlank()) {
-                        // The optimistic caption bubble was already added
-                        // at send-tap time (see `sendMedia`). Transmit the
-                        // XMPP stanza with `customId = pendingCaptionId` so
-                        // the server's echo merges into THAT row instead of
-                        // creating a second one. If the transport rejects,
-                        // mark only the caption row as failed.
+                        // Legacy entry: the optimistic caption bubble was added at send time.
+                        // Send the text with customId so the echo merges into that row.
                         viewModelScope.launch {
                             val sentId = try {
                                 client.sendMessage(
@@ -940,8 +936,8 @@ class ChatRoomViewModel(
                             messageType = MessageType.MEDIA,
                             user = currentUser,
                             metadata = mapOf(
-                                "location" to uploadResult.location,
-                                "mimetype" to uploadResult.mimetype
+                                "location" to uploadResults.first().location,
+                                "mimetype" to uploadResults.first().mimetype
                             )
                         )
                     )
@@ -990,60 +986,82 @@ class ChatRoomViewModel(
 
     private fun updateOptimisticMediaMessage(
         item: PendingMediaSend,
-        uploadResult: com.ethora.chat.core.networking.FileUploadResult
+        uploadResults: List<com.ethora.chat.core.networking.FileUploadResult>
     ) {
         val existing = MessageStore.getMessagesForRoom(item.roomJid)
             .firstOrNull { it.id == item.messageId }
+        val first = uploadResults.first()
         val updated = existing?.copy(
-            location = uploadResult.location,
-            locationPreview = uploadResult.locationPreview,
-            fileName = uploadResult.filename,
-            mimetype = uploadResult.mimetype,
-            originalName = uploadResult.originalName,
-            size = uploadResult.size,
+            location = first.location,
+            locationPreview = first.locationPreview,
+            fileName = first.filename,
+            mimetype = first.mimetype,
+            originalName = first.originalName,
+            size = first.size,
+            attachments = if (uploadResults.size > 1) uploadResults.map { it.toMessageAttachment() } else null,
             pending = true
         ) ?: return
         MessageStore.updateMessage(item.roomJid, updated)
     }
 
+    private fun com.ethora.chat.core.networking.FileUploadResult.toMessageAttachment(): MessageAttachment =
+        MessageAttachment(
+            attachmentId = attachmentId,
+            location = location,
+            locationPreview = locationPreview,
+            mimetype = mimetype,
+            originalName = originalName,
+            fileName = filename,
+            size = size,
+            duration = duration
+        )
+
     private fun buildMediaData(
-        uploadResult: com.ethora.chat.core.networking.FileUploadResult,
-        currentUser: com.ethora.chat.core.models.User
+        uploadResults: List<com.ethora.chat.core.networking.FileUploadResult>,
+        currentUser: com.ethora.chat.core.models.User,
+        caption: String?
     ): Map<String, Any> {
+        val uploadResult = uploadResults.first()
         val xmppHost = ChatStore.getEffectiveXmppSettings().host
         val senderJID = currentUser.xmppUsername?.let { "$it@$xmppHost" } ?: ""
-        return mapOf(
-            "senderJID" to senderJID,
-            "senderFirstName" to (currentUser.firstName ?: ""),
-            "senderLastName" to (currentUser.lastName ?: ""),
-            "senderWalletAddress" to (currentUser.walletAddress ?: ""),
-            "isSystemMessage" to "false",
-            "tokenAmount" to "0",
-            "receiverMessageId" to "0",
-            "mucname" to (room.name ?: ""),
-            "photoURL" to (currentUser.profileImage ?: ""),
-            "isMediafile" to "true",
-            "createdAt" to uploadResult.createdAt,
-            "expiresAt" to (uploadResult.expiresAt ?: ""),
-            "fileName" to uploadResult.filename,
-            "isVisible" to (uploadResult.isVisible?.toString() ?: "true"),
-            "location" to uploadResult.location,
-            "locationPreview" to (uploadResult.locationPreview ?: ""),
-            "mimetype" to uploadResult.mimetype,
-            "originalName" to uploadResult.originalName,
-            "ownerKey" to (uploadResult.ownerKey ?: ""),
-            "size" to uploadResult.size,
-            "duration" to (uploadResult.duration ?: ""),
-            "updatedAt" to (uploadResult.updatedAt ?: ""),
-            "userId" to (uploadResult.userId ?: currentUser.id),
-            "waveForm" to (uploadResult.waveForm ?: ""),
-            "attachmentId" to (uploadResult.attachmentId ?: ""),
-            "isReply" to "false",
-            "showInChannel" to "true",
-            "mainMessage" to "",
-            "roomJid" to room.jid,
-            "push" to "true"
-        )
+        return buildMap {
+            put("senderJID", senderJID)
+            put("senderFirstName", currentUser.firstName ?: "")
+            put("senderLastName", currentUser.lastName ?: "")
+            put("senderWalletAddress", currentUser.walletAddress ?: "")
+            put("isSystemMessage", "false")
+            put("tokenAmount", "0")
+            put("receiverMessageId", "0")
+            put("mucname", room.name ?: "")
+            put("photoURL", currentUser.profileImage ?: "")
+            put("isMediafile", "true")
+            put("createdAt", uploadResult.createdAt)
+            put("expiresAt", uploadResult.expiresAt ?: "")
+            put("fileName", uploadResult.filename)
+            put("isVisible", uploadResult.isVisible?.toString() ?: "true")
+            put("location", uploadResult.location)
+            put("locationPreview", uploadResult.locationPreview ?: "")
+            put("mimetype", uploadResult.mimetype)
+            put("originalName", uploadResult.originalName)
+            put("ownerKey", uploadResult.ownerKey ?: "")
+            put("size", uploadResult.size)
+            put("duration", uploadResult.duration ?: "")
+            put("updatedAt", uploadResult.updatedAt ?: "")
+            put("userId", uploadResult.userId ?: currentUser.id)
+            put("waveForm", uploadResult.waveForm ?: "")
+            put("attachmentId", uploadResult.attachmentId ?: "")
+            // Web: `attachments` only when there is more than one file; the flat
+            // fields above describe the first file for readers that predate it.
+            if (uploadResults.size > 1) {
+                put("attachments", MessageAttachments.serialize(uploadResults.map { it.toMessageAttachment() }))
+            }
+            if (!caption.isNullOrBlank()) put("caption", caption)
+            put("isReply", "false")
+            put("showInChannel", "true")
+            put("mainMessage", "")
+            put("roomJid", room.jid)
+            put("push", "true")
+        }
     }
 
     private fun restoreQueuedMediaMessages() {
@@ -1054,8 +1072,10 @@ class ChatRoomViewModel(
                 val exists = MessageStore.getMessagesForRoom(room.jid)
                     .any { it.id == item.messageId }
                 if (exists) return@forEach
-                val upload = item.uploaded
-                val localUri = "file://${item.localFilePath}"
+                val files = item.effectiveFiles
+                val first = files.first()
+                val upload = first.uploaded
+                val localUri = "file://${first.localFilePath}"
                 val message = Message(
                     id = item.messageId,
                     body = "media",
@@ -1069,12 +1089,31 @@ class ChatRoomViewModel(
                     xmppFrom = "${item.roomJid}/${currentUser.id}",
                     isSystemMessage = "false",
                     isMediafile = "true",
-                    fileName = upload?.filename ?: item.fileName,
+                    fileName = upload?.filename ?: first.fileName,
                     location = upload?.location ?: localUri,
-                    locationPreview = upload?.locationPreview ?: if (item.mimeType.startsWith("image/")) localUri else "",
-                    mimetype = upload?.mimetype ?: item.mimeType,
-                    originalName = upload?.originalName ?: item.fileName,
-                    size = upload?.size ?: File(item.localFilePath).length().toString()
+                    locationPreview = upload?.locationPreview ?: if (first.mimeType.startsWith("image/")) localUri else "",
+                    mimetype = upload?.mimetype ?: first.mimeType,
+                    originalName = upload?.originalName ?: first.fileName,
+                    size = upload?.size ?: File(first.localFilePath).length().toString(),
+                    caption = item.caption?.takeIf { item.captionMessageId == null },
+                    attachments = if (files.size > 1) {
+                        files.map { file ->
+                            val payload = file.uploaded
+                            val fileUri = "file://${file.localFilePath}"
+                            MessageAttachment(
+                                attachmentId = payload?.attachmentId,
+                                location = payload?.location ?: fileUri,
+                                locationPreview = payload?.locationPreview
+                                    ?: if (file.mimeType.startsWith("image/")) fileUri else null,
+                                mimetype = payload?.mimetype ?: file.mimeType,
+                                originalName = payload?.originalName ?: file.fileName,
+                                fileName = payload?.filename ?: file.fileName,
+                                size = payload?.size ?: File(file.localFilePath).length().toString()
+                            )
+                        }
+                    } else {
+                        null
+                    }
                 )
                 MessageStore.addMessage(room.jid, message)
             }
