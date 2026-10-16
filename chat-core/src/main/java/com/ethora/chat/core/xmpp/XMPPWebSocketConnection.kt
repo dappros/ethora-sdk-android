@@ -546,6 +546,18 @@ class XMPPWebSocketConnection(
         try {
             val stanzaType = extractAttribute(xml, "type")
             val stanzaId = extractAttribute(xml, "id") ?: ""
+
+            // Server push pointer (urn:ethora:events:1). Web handleStanza claims
+            // it before any other routing, so it goes no further when claimed.
+            if (xml.contains("<ethora-event") &&
+                com.ethora.chat.core.store.EthoraEvents.handle(
+                    xml,
+                    host,
+                    com.ethora.chat.core.store.ChatStore.getEffectiveAppId()
+                )
+            ) {
+                return
+            }
             
             // Check if this is a MAM result message
             if (xml.contains("urn:xmpp:mam:2") && xml.contains("<result")) {
@@ -638,6 +650,19 @@ class XMPPWebSocketConnection(
             if (xml.contains("<invite")) {
                 parseAndHandleChatInvite(xml)
                 return
+            }
+
+            // 2b. Members-refresh wake-up (web onMembersRefreshSignal)
+            if (xml.contains("<members-refresh")) {
+                val roomJidOfSignal = extractAttribute(xml, "from")?.substringBefore('/').orEmpty()
+                if (roomJidOfSignal.isNotEmpty()) {
+                    com.ethora.chat.core.store.EthoraEvents.refreshRoomMembers(roomJidOfSignal.substringBefore('@'))
+                }
+            }
+
+            // 2c. Server-driven membership change: <x muc#user><item jid affiliation/></x>
+            if (xml.contains(MUC_USER_NS)) {
+                parseAndHandleMembershipChange(xml)
             }
 
             // 3. Reactions (element-based — matches web's stanza.getChild('reactions'))
@@ -1637,12 +1662,38 @@ class XMPPWebSocketConnection(
                 if (hasStatus110 && hasStatus321) {
                     val roomJid = from.split("/").firstOrNull() ?: return
                     Log.d(TAG, "🚫 User was kicked from room: $roomJid")
-                    // TODO: Notify delegate or remove room from RoomStore
-                    // For now, just log it
+                    com.ethora.chat.core.store.RoomStore.removeRoom(roomJid)
+                    scope.launch {
+                        try {
+                            com.ethora.chat.core.store.RoomStore.setRooms(
+                                com.ethora.chat.core.networking.RoomsAPIHelper.getRooms()
+                            )
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Room list refresh after kick failed", e)
+                        }
+                    }
                     return
                 }
             }
             
+            // Another occupant joined, left or was kicked (web onPresenceInRoom).
+            // Our own echo is skipped: the membership of our own join is the REST load.
+            val occupantNick = from.substringAfter('/', "")
+            if (occupantNick.isNotEmpty() && occupantNick != resolveOccupantNick()) {
+                val itemTag = Regex("<item\\b[^>]*>").find(xml)?.value
+                val roomJidOfPresence = from.substringBefore('/')
+                val roomForPresence = com.ethora.chat.core.store.RoomStore.getRoomByJid(roomJidOfPresence)
+                if (itemTag != null && roomForPresence != null) {
+                    val affiliation = extractAttribute(itemTag, "affiliation").orEmpty()
+                    com.ethora.chat.core.store.RoomMembership.afterPresence(
+                        roomForPresence,
+                        occupantNick,
+                        affiliation,
+                        unavailable = type == "unavailable"
+                    )?.let { com.ethora.chat.core.store.RoomStore.updateRoom(it) }
+                }
+            }
+
             // Handle presence in room (id="presenceInRoom") OR any MUC presence response
             // with our own occupant JID. Either way, mark this room as presence-acked so
             // subsequent sends don't waste a roundtrip re-joining the MUC, and any pending
@@ -1656,6 +1707,14 @@ class XMPPWebSocketConnection(
                 val roleMatch = "role=\"([^\"]+)\"".toRegex().find(xml)
                 val role = roleMatch?.groupValues?.get(1)
                 Log.d(TAG, "👤 Presence in room ACK: $roomJid, role=$role")
+                // web setRoomRole: only our own requested join carries our role
+                if (presenceId == "presenceInRoom" && role != null) {
+                    com.ethora.chat.core.store.RoomStore.getRoomByJid(roomJid)?.let { room ->
+                        if (room.role != role) {
+                            com.ethora.chat.core.store.RoomStore.updateRoom(room.copy(role = role))
+                        }
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing presence stanza", e)
@@ -1886,6 +1945,71 @@ class XMPPWebSocketConnection(
     }
     
     /**
+     * Server-driven membership change (web onRoomMembershipChange): a
+     * `<message>` whose muc#user item carries a jid. Invites are not changes.
+     */
+    private fun parseAndHandleMembershipChange(rawXml: String) {
+        try {
+            val inner = unwrapMucSubInnerMessage(rawXml)
+            if (inner.contains("<invite")) return
+            val roomJid = extractAttribute(inner, "from")?.substringBefore('/').orEmpty()
+            if (roomJid.isEmpty()) return
+            val itemTag = Regex("<item\\b[^>]*>").find(inner)?.value ?: return
+            val memberJid = extractAttribute(itemTag, "jid").orEmpty()
+            if (memberJid.isEmpty()) return
+            val affiliation = extractAttribute(itemTag, "affiliation").orEmpty()
+            val room = com.ethora.chat.core.store.RoomStore.getRoomByJid(roomJid) ?: return
+            com.ethora.chat.core.store.RoomMembership.afterMembershipMessage(
+                room,
+                memberJid.substringBefore('@'),
+                memberJid,
+                affiliation
+            )?.let { com.ethora.chat.core.store.RoomStore.updateRoom(it) }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing membership change", e)
+        }
+    }
+
+    /** Invite to a MUC (web inviteRoomRequest). `xmppUsername` is `appId_userId`. */
+    fun sendInvite(roomJid: String, xmppUsername: String): Boolean =
+        sendRaw(
+            RoomStanzas.invite(
+                roomJid,
+                xmppUsername,
+                host,
+                "invite-rooms:${System.currentTimeMillis()}"
+            )
+        )
+
+    /** Leave a MUC for this session (web leaveTheRoom). */
+    fun sendLeavePresence(roomJid: String): Boolean =
+        sendRaw(RoomStanzas.leavePresence(roomJid, resolveOccupantNick()))
+
+    /**
+     * Chat invite (web onChatInvite): a placeholder room so the invite shows
+     * at once, our join to the MUC, and the real room list from REST.
+     */
+    private fun handleInviteRoom(chatId: String) {
+        val local = chatId.substringBefore('@')
+        if (local.isEmpty()) return
+        if (com.ethora.chat.core.store.RoomStore.getRoomByJid(chatId) == null) {
+            com.ethora.chat.core.store.RoomStore.addRoom(
+                com.ethora.chat.core.models.Room(id = local, jid = chatId, name = local, title = local)
+            )
+        }
+        scope.launch {
+            try {
+                sendPresenceInRoom(chatId)
+                com.ethora.chat.core.store.RoomStore.setRooms(
+                    com.ethora.chat.core.networking.RoomsAPIHelper.getRooms()
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Invited room refresh failed: $chatId", e)
+            }
+        }
+    }
+
+    /**
      * Parse and handle chat invite stanza
      * Matches web: onChatInvite in stanzaHandlers.ts
      */
@@ -1906,8 +2030,7 @@ class XMPPWebSocketConnection(
             if (inviteStart == -1) return
             
             Log.d(TAG, "📥 Chat invite received for: $chatId")
-            // TODO: Send presence to room and fetch rooms from API
-            // For now, just log it
+            handleInviteRoom(chatId)
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing chat invite stanza", e)
         }

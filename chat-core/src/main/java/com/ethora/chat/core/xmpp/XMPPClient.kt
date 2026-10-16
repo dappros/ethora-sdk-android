@@ -1177,6 +1177,9 @@ class XMPPClient(
      */
     suspend fun leaveRoom(roomJID: String): Boolean {
         return try {
+            if (useWebSocket) {
+                webSocketConnection?.sendLeavePresence(roomJID)
+            }
             val muc = activeMUCs[roomJID]
             muc?.leave()
             activeMUCs.remove(roomJID)
@@ -1185,6 +1188,15 @@ class XMPPClient(
             Log.e(TAG, "Failed to leave room", e)
             false
         }
+    }
+
+    /**
+     * Invite a user into a room (web inviteRoomRequest). Over the WebSocket
+     * transport only; `xmppUsername` is the `appId_userId` of the invitee.
+     */
+    fun inviteUser(xmppUsername: String, roomJID: String): Boolean {
+        if (!useWebSocket) return false
+        return webSocketConnection?.sendInvite(roomJID, xmppUsername) ?: false
     }
 
     /**

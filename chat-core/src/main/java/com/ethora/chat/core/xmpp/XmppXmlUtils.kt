@@ -140,7 +140,7 @@ internal fun extractBody(xml: String): String? {
     return decodeXmlEntities(match.groupValues[1])
 }
 
-private fun decodeXmlEntities(value: String): String =
+internal fun decodeXmlEntities(value: String): String =
     value.replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")

@@ -101,7 +101,9 @@ data class Room(
     val historyComplete: Boolean? = null,
     val historyPreloadState: HistoryPreloadState = HistoryPreloadState.IDLE,
     val isPlaceholder: Boolean = false,
-    val presenceReady: Boolean = false
+    val presenceReady: Boolean = false,
+    /** Per-user mute (web `IRoom.muted`). Null when the backend has not reported it. */
+    val muted: Boolean? = null
 )
 
 /**
@@ -121,7 +123,11 @@ data class ApiRoom(
     val createdAt: String? = null,
     val updatedAt: String? = null,
     val __v: Int? = null,
-    val reported: Boolean? = null
+    val reported: Boolean? = null,
+    /** Per-user mute, reported by /chats/my only when the backend supports it. */
+    val muted: Boolean? = null,
+    /** True total; `members` is capped (30) for big public rooms. */
+    val usersCnt: Int? = null
 )
 
 /**
@@ -134,7 +140,10 @@ fun createRoomFromApi(apiRoom: ApiRoom, conferenceDomain: String, usersArrayLeng
         jid = jid,
         name = apiRoom.title ?: apiRoom.name,
         title = apiRoom.title ?: apiRoom.name,
-        usersCnt = apiRoom.members?.size ?: (usersArrayLength + 1),
+        usersCnt = apiRoom.members
+            ?.let { maxOf(apiRoom.usersCnt ?: 0, it.size) }
+            ?: apiRoom.usersCnt?.takeIf { it > 0 }
+            ?: (usersArrayLength + 1),
         messages = emptyList(),
         isLoading = false,
         roomBg = null,
@@ -163,6 +172,7 @@ fun createRoomFromApi(apiRoom: ApiRoom, conferenceDomain: String, usersArrayLeng
         historyComplete = null,
         historyPreloadState = HistoryPreloadState.IDLE,
         isPlaceholder = false,
-        presenceReady = false
+        presenceReady = false,
+        muted = apiRoom.muted
     )
 }
