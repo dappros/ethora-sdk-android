@@ -79,7 +79,9 @@ data class ReportMessageRequest(
  * Create private room request
  */
 data class CreatePrivateRoomRequest(
-    val username: String
+    val username: String,
+    /** Sent only when true: older backends reject unknown keys, so null is omitted. */
+    val e2ee: Boolean? = null
 )
 
 /**
@@ -165,12 +167,13 @@ object RoomsAPIHelper {
     suspend fun createPrivateRoom(
         username: String,
         baseUrl: String = ChatStore.getEffectiveBaseUrl(),
-        appId: String = ChatStore.getEffectiveAppId()
+        appId: String = ChatStore.getEffectiveAppId(),
+        e2ee: Boolean = false
     ): ApiRoom {
         val api = ApiClient.createService<RoomsAPI>(baseUrl)
         val response = api.createPrivateRoom(
             appId,
-            CreatePrivateRoomRequest(username = username)
+            CreatePrivateRoomRequest(username = username, e2ee = if (e2ee) true else null)
         )
         if (response.isSuccessful) {
             val wrapper = response.body()

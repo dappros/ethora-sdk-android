@@ -130,7 +130,14 @@ data class ChatConfig(
 
     // Side-by-side room list and chat on wide screens. null = auto (on at >= 600dp),
     // false = always single pane, true = always two pane.
-    val twoPaneLayout: Boolean? = null
+    val twoPaneLayout: Boolean? = null,
+    // Room management (web parity)
+    /** Hides the per-room mute, report and leave actions on the room list rows. */
+    val disableRoomSwipeActions: Boolean? = null,
+    /** Hides the mute action (web disableRoomMute). */
+    val disableRoomMute: Boolean? = null,
+    /** Hides the public chats directory entry. */
+    val disablePublicChatsDirectory: Boolean? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -198,6 +205,13 @@ data class ChatConfig(
         private var onChatEvent: ((ChatEvent) -> Unit)? = null
         private var colorScheme: ChatColorScheme? = null
         private var twoPaneLayout: Boolean? = null
+        private var disableRoomSwipeActions: Boolean? = null
+        private var disableRoomMute: Boolean? = null
+        private var disablePublicChatsDirectory: Boolean? = null
+
+        fun disableRoomSwipeActions(value: Boolean) = apply { this.disableRoomSwipeActions = value }
+        fun disableRoomMute(value: Boolean) = apply { this.disableRoomMute = value }
+        fun disablePublicChatsDirectory(value: Boolean) = apply { this.disablePublicChatsDirectory = value }
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -324,7 +338,10 @@ data class ChatConfig(
             onBeforeSend = onBeforeSend,
             onChatEvent = onChatEvent,
             colorScheme = colorScheme,
-            twoPaneLayout = twoPaneLayout
+            twoPaneLayout = twoPaneLayout,
+            disableRoomSwipeActions = disableRoomSwipeActions,
+            disableRoomMute = disableRoomMute,
+            disablePublicChatsDirectory = disablePublicChatsDirectory
         )
     }
 
