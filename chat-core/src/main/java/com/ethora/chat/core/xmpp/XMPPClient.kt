@@ -42,7 +42,7 @@ class XMPPClient(
     private val settings: XMPPSettings? = null,
     /** DNS fallback overrides (host -> IP). Pass from ChatConfig so XMPP uses same overrides without relying on ChatStore at build time. */
     private val dnsFallbackOverrides: Map<String, String>? = null
-) {
+) : HistoryWindowClient {
     private val resolvedSettings: XMPPSettings = settings
         ?: throw IllegalArgumentException("ChatConfig.xmppSettings is required")
 
@@ -58,7 +58,7 @@ class XMPPClient(
         val beforeMessageId: String?,
         val priority: HistoryPriority,
         val createdAt: Long,
-        val deferred: CompletableDeferred<List<Message>>
+        val deferred: CompletableDeferred<HistoryPage>
     )
 
     private val TAG = "XMPPClient"
@@ -123,7 +123,7 @@ class XMPPClient(
     }
     private var historyProcessorJob: Job? = null
     private var historyInFlightCount: Int = 0
-    private val historyRequestInFlight = ConcurrentHashMap<String, Deferred<List<Message>>>()
+    private val historyRequestInFlight = ConcurrentHashMap<String, Deferred<HistoryPage>>()
     private val activeRoomBoostUntil = ConcurrentHashMap<String, Long>()
     private val sentMessageAtMs = ConcurrentHashMap<String, Long>()
     @Volatile
@@ -661,14 +661,22 @@ class XMPPClient(
      * - When beforeMessageId is provided: requests older messages before that ID
      * Note: Swift uses message ID (Int64) converted from message.id string using Number()
      */
-    suspend fun getHistory(roomJID: String, max: Int = 30, beforeMessageId: String? = null): List<Message> {
+    suspend fun getHistory(roomJID: String, max: Int = 30, beforeMessageId: String? = null): List<Message> =
+        getHistoryPage(roomJID, max, beforeMessageId).messages
+
+    /**
+     * One older (or the latest) page of live history, with the server's cursor
+     * and <fin complete>. Messages are stored as they arrive; the cursor is the
+     * server's RSM first, never a timestamp.
+     */
+    suspend fun getHistoryPage(roomJID: String, max: Int = 30, beforeMessageId: String? = null): HistoryPage {
         if (!isFullyConnected()) {
             Log.e(TAG, "Cannot get history: not fully connected")
-            return emptyList()
+            return HistoryPage.FAILED
         }
         if (!useWebSocket || webSocketConnection == null) {
             Log.e(TAG, "WebSocket connection not available for MAM query")
-            return emptyList()
+            return HistoryPage.FAILED
         }
 
         val requestKey = historyRequestKey(roomJID, max, beforeMessageId)
@@ -676,11 +684,11 @@ class XMPPClient(
             return try {
                 existing.await()
             } catch (_: Exception) {
-                emptyList()
+                HistoryPage.FAILED
             }
         }
 
-        val deferred = CompletableDeferred<List<Message>>()
+        val deferred = CompletableDeferred<HistoryPage>()
         historyRequestInFlight[requestKey] = deferred
         val request = HistoryRequest(
             roomJid = roomJID,
@@ -702,7 +710,7 @@ class XMPPClient(
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get history", e)
-            emptyList()
+            HistoryPage.FAILED
         } finally {
             historyRequestInFlight.remove(requestKey)
         }
@@ -771,7 +779,7 @@ class XMPPClient(
                         )
                         request.deferred.complete(result)
                     } catch (e: Exception) {
-                        request.deferred.complete(emptyList())
+                        request.deferred.complete(HistoryPage.FAILED)
                         Log.e(TAG, "History request failed for ${request.roomJid}", e)
                         LogStore.error("Perf", "history_request_failed room=${request.roomJid} error=${e.message}")
                     } finally {
@@ -811,16 +819,21 @@ class XMPPClient(
         roomJID: String,
         max: Int,
         beforeMessageId: String?
-    ): List<Message> {
-        val ws = webSocketConnection ?: return emptyList()
+    ): HistoryPage {
+        val ws = webSocketConnection ?: return HistoryPage.FAILED
         val queryId = "get-history:${System.currentTimeMillis()}:${roomJID.hashCode()}"
         val collected = mutableListOf<Message>()
         val collectedLock = Any()
+        // The <fin> IQ of this query, when it arrives: complete flag and RSM first.
+        val finRef = java.util.concurrent.atomic.AtomicReference<HistoryWindowFin?>(null)
 
         // Process synchronously on the WS parser thread. The previous
         // scope.launch+withLock version raced the completion IQ and dropped
         // the last few messages of each MAM page.
         val collector: (XMPPStanza) -> Unit = { stanza ->
+            if (stanza.type == "result") {
+                stanza.xml?.let { xml -> parseMamFin(xml)?.let { finRef.set(it) } }
+            }
             val parsed = parseMAMResult(stanza, roomJID)
                 .filter { it.roomJid == roomJID }
             if (parsed.isNotEmpty()) {
@@ -836,7 +849,7 @@ class XMPPClient(
             val sent = ws.sendMAMQuery(roomJID, max, beforeMessageId, queryId)
             if (!sent) {
                 Log.e(TAG, "Failed to send MAM query")
-                return emptyList()
+                return HistoryPage.FAILED
             }
 
             val timeout = 15000L
@@ -853,12 +866,67 @@ class XMPPClient(
             // (MessageStore's sort) then orders ascending by timestamp. Ascending
             // = oldest first, so the caller can use .first() as the pagination
             // anchor for an older page.
-            return synchronized(collectedLock) {
+            val fin = finRef.get()
+            val messages = synchronized(collectedLock) {
                 collected.toList().sortedBy { it.timestamp ?: it.date.time }
             }
+            return HistoryPage(
+                ok = queryComplete || fin != null,
+                messages = messages,
+                complete = fin?.complete == true,
+                first = fin?.first
+            )
         } finally {
             ws.unregisterMAMCollector(queryId)
             ws.clearMAMQueryStatus(queryId)
+        }
+    }
+
+    /**
+     * One page of archive around a message, RETURNED and never stored: no
+     * message store writes, no room cursor or historyComplete update, so the
+     * live history is untouched. Pass [WindowCursor.before] for the page ending
+     * before an archive id, [WindowCursor.after] for the page after one, or
+     * start/end for a time range. Messages come back oldest first.
+     */
+    override suspend fun getHistoryWindow(
+        roomJid: String,
+        max: Int,
+        cursor: WindowCursor
+    ): HistoryWindowPage {
+        if (!isFullyConnected()) return HistoryWindowPage.FAILED
+        val ws = webSocketConnection ?: return HistoryWindowPage.FAILED
+        val queryId = "$MAM_WINDOW_QUERY_PREFIX${System.nanoTime()}:${roomJid.hashCode()}"
+        val collected = mutableListOf<Message>()
+        val collectedLock = Any()
+        val fin = CompletableDeferred<HistoryWindowFin>()
+
+        val collector: (XMPPStanza) -> Unit = { stanza ->
+            val xml = stanza.xml
+            if (stanza.type == "result" && xml != null && xml.contains("<fin")) {
+                parseMamFin(xml)?.let { fin.complete(it) }
+            } else {
+                val parsed = parseMAMResult(stanza, roomJid).filter { it.roomJid == roomJid }
+                if (parsed.isNotEmpty()) synchronized(collectedLock) { collected.addAll(parsed) }
+            }
+        }
+
+        ws.registerMAMCollector(queryId, collector)
+        try {
+            if (!ws.sendMamWindowQuery(roomJid, max, queryId, cursor)) return HistoryWindowPage.FAILED
+            val result = withTimeoutOrNull(8_000L) { fin.await() } ?: return HistoryWindowPage.FAILED
+            val messages = synchronized(collectedLock) {
+                collected.toList().sortedBy { it.timestamp ?: it.date.time }
+            }
+            return HistoryWindowPage(
+                ok = true,
+                messages = messages,
+                complete = result.complete,
+                first = result.first,
+                last = result.last
+            )
+        } finally {
+            ws.unregisterMAMCollector(queryId)
         }
     }
     

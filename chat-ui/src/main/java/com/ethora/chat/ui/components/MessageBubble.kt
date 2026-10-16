@@ -65,6 +65,8 @@ fun MessageBubble(
     onLongPress: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onFailedClick: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onAvatarClick: ((User) -> Unit)? = null,
+    /** Tapping the quote of a reply: the parent message (web: jump to the replied message). */
+    onQuoteClick: ((Message) -> Unit)? = null,
     pendingMediaStatus: PendingMediaSendStatus? = null,
     sendFailed: Boolean = false,
     modifier: Modifier = Modifier
@@ -291,6 +293,7 @@ fun MessageBubble(
                                 QuotedMessage(
                                     message = parent,
                                     isUser = isUser,
+                                    onClick = onQuoteClick?.let { open -> { open(parent) } },
                                     modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 8.dp)
                                 )
                             }
@@ -803,12 +806,14 @@ private fun UrlPreviewCard(
 private fun QuotedMessage(
     message: Message,
     isUser: Boolean,
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp)),
+            .clip(RoundedCornerShape(8.dp))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         color = if (isUser) 
             MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.1f) 
         else 

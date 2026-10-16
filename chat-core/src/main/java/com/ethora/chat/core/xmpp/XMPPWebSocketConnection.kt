@@ -1502,6 +1502,20 @@ class XMPPWebSocketConnection(
     }
     
     /**
+     * MAM query for a window or a time range (see [buildMamQueryStanza]).
+     * Results and the <fin> are routed to the collector registered under [queryId].
+     */
+    suspend fun sendMamWindowQuery(roomJid: String, max: Int, queryId: String, cursor: WindowCursor): Boolean {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot send MAM window query: not authenticated")
+            return false
+        }
+        val fixedRoomJid = if (roomJid.contains("@")) roomJid else "$roomJid@$conference"
+        sendRaw(buildMamQueryStanza(fixedRoomJid, queryId, max, cursor))
+        return true
+    }
+
+    /**
      * Edit message
      * Matches web: editMessage.xmpp.ts
      */
@@ -1688,7 +1702,8 @@ class XMPPWebSocketConnection(
 
             // Handle MAM query completion (contains <fin> element)
             // Matches web: onGetLastMessageArchive in stanzaHandlers.ts
-            if (type == "result" && xml.contains("<fin")) {
+            // Windowed queries (jump) answer their own collector; their <fin> must not move the room's history cursor.
+            if (type == "result" && xml.contains("<fin") && !iqId.startsWith(MAM_WINDOW_QUERY_PREFIX)) {
                 parseAndHandleMAMQueryCompletion(xml, iqId)
             }
             

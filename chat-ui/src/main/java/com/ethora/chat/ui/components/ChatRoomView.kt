@@ -48,6 +48,14 @@ import com.ethora.chat.core.store.PendingMediaSendQueue
 import com.ethora.chat.core.store.ScrollPositionStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.xmpp.XMPPClient
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.style.TextOverflow
+import com.ethora.chat.core.config.isMessageSearchEnabled
+import com.ethora.chat.core.store.JumpRequestStore
+import com.ethora.chat.core.store.PendingJumpPreview
+import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.core.xmpp.replyParentIdOf
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 
@@ -92,6 +100,8 @@ fun ChatRoomView(
     room: Room,
     xmppClient: XMPPClient?,
     onBack: () -> Unit,
+    /** Opens another chat (a search hit in a different room). Without it, only this chat's hits open. */
+    onOpenRoom: ((Room) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val viewModel = remember(room.jid, xmppClient) { ChatRoomViewModel(room, xmppClient) }
@@ -104,6 +114,17 @@ fun ChatRoomView(
     val scrollRestoreAnchor by viewModel.scrollRestoreAnchor.collectAsState()
     val connectionState by ConnectionStore.state.collectAsState()
     val pendingMediaItems by PendingMediaSendQueue.items.collectAsState()
+
+    // ---- Jump to message and message search (web useJumpToMessage / MessageSearchModal) ----
+    val jumpTarget by viewModel.jumpTarget.collectAsState()
+    val jumpWindow by viewModel.jumpWindow.collectAsState()
+    val jumpNotice by viewModel.jumpNotice.collectAsState()
+    val allRooms by RoomStore.rooms.collectAsState()
+    var showSearch by remember(room.jid) { mutableStateOf(false) }
+    var highlightedId by remember(room.jid) { mutableStateOf<String?>(null) }
+    // Set when "jump to latest" leaves a window: the list then goes to the live tail.
+    var scrollToLiveTail by remember(room.jid) { mutableStateOf(false) }
+    val searchEnabled = isMessageSearchEnabled(config) && config?.chatHeaderSettings?.hideSearch != true
     
     // Update lastViewedTimestamp when room is opened; send presence to receive real-time messages
     LaunchedEffect(room.jid, xmppClient) {
@@ -356,8 +377,46 @@ fun ChatRoomView(
     // check always runs AFTER the previous auto-scroll has settled — if we
     // were pinned, canScrollForward is still false and we re-pin.
     var initialAutoScrollDone by remember(room.jid) { mutableStateOf(false) }
+
+    // ---- Jump to message: scroll to the target, flash it, page the window at its edges ----
+    LaunchedEffect(jumpTarget, messages) {
+        val target = jumpTarget ?: return@LaunchedEffect
+        val index = messages.indexOfFirst { it.id == target.messageId }
+        if (index < 0) return@LaunchedEffect
+        // A jump places the list: the bottom pin below must not undo it.
+        initialAutoScrollDone = true
+        listState.scrollToItem(index, -(listState.layoutInfo.viewportSize.height / 3))
+        highlightedId = messages[index].id
+        viewModel.consumeJumpTarget(target.at)
+    }
+    LaunchedEffect(highlightedId) {
+        if (highlightedId == null) return@LaunchedEffect
+        kotlinx.coroutines.delay(1000)
+        highlightedId = null
+    }
+    LaunchedEffect(room.jid) {
+        snapshotFlow { listState.firstVisibleItemIndex to (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) }
+            .collect { (first, last) ->
+                if (viewModel.jumpWindow.value == null) return@collect
+                if (first <= 3) viewModel.loadOlderInWindow()
+                val count = viewModel.messages.value.size
+                if (count > 0 && last >= count - 4) viewModel.loadNewerInWindow()
+            }
+    }
+    LaunchedEffect(jumpWindow, messages.size) {
+        if (jumpWindow == null && scrollToLiveTail && messages.isNotEmpty()) {
+            scrollToLiveTail = false
+            scrollToTrueBottom(animate = false)
+        }
+    }
     LaunchedEffect(room.jid, messages.size) {
         if (messages.isEmpty()) return@LaunchedEffect
+        // A jump window is not the live tail: nothing to pin, nothing unread to count.
+        if (jumpWindow != null) {
+            lastMessageCount = messages.size
+            lastTailId = messages.lastOrNull()?.id
+            return@LaunchedEffect
+        }
 
         // Let the new items measure before we inspect listState.
         kotlinx.coroutines.delay(60)
@@ -657,10 +716,42 @@ fun ChatRoomView(
                     },
                     onInfoClick = { showChatInfo = true },
                     showInfoButton = !hideChatInfoButton,
-                    showBackButton = showBackButton
+                    showBackButton = showBackButton,
+                    onSearchClick = if (searchEnabled) ({ showSearch = true }) else null
                 )
             }
         
+        // Message search (header button): full-screen over the room.
+        if (showSearch) {
+            MessageSearchDialog(
+                currentRoom = room,
+                rooms = allRooms,
+                myXmppUsername = currentUser?.xmppUsername,
+                canOpenOtherRooms = onOpenRoom != null,
+                onDismiss = { showSearch = false },
+                onOpenHit = { hit, target ->
+                    showSearch = false
+                    val senderName = target.members.orEmpty().firstOrNull { it.id == hit.fromUserId }
+                        ?.let { member ->
+                            "${member.firstName.orEmpty()} ${member.lastName.orEmpty()}".trim()
+                                .ifEmpty { member.name.orEmpty() }
+                        }
+                        .orEmpty()
+                    JumpRequestStore.request(
+                        roomJid = target.jid,
+                        ids = listOf(hit.stanzaId, hit.messageId),
+                        createdAt = hit.createdAt,
+                        body = hit.body,
+                        preview = PendingJumpPreview(target.jid, senderName, hit.body, hit.createdAt)
+                    )
+                    if (target.jid != room.jid) {
+                        RoomStore.setCurrentRoom(target)
+                        onOpenRoom?.invoke(target)
+                    }
+                }
+            )
+        }
+
         // Messages list
         Box(
             modifier = Modifier
@@ -852,9 +943,9 @@ fun ChatRoomView(
                                 }
                                 
                                 // Find parent message for replies
-                                val parentMessage = if (message.isReply == true && message.mainMessage != null) {
-                                    messages.find { it.id == message.mainMessage }
-                                } else null
+                                val parentMessage = replyParentIdOf(message)?.let { parentId ->
+                                    messages.find { it.id == parentId }
+                                }
                                 
                                 // Add spacing between different users (add extra top padding if first in group and different user)
                                 val topPadding = if (isFirstInGroup && prevChronological != null && prevChronological.user.id != message.user.id) {
@@ -863,7 +954,17 @@ fun ChatRoomView(
                                     0.dp
                                 }
                                 
-                                Box(modifier = Modifier.padding(top = topPadding)) {
+                                Box(
+                                    modifier = Modifier
+                                        .padding(top = topPadding)
+                                        .background(
+                                            if (highlightedId == message.id) {
+                                                MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                            } else {
+                                                androidx.compose.ui.graphics.Color.Transparent
+                                            }
+                                        )
+                                ) {
                                     val customMessageComponent = config?.customComponents?.customMessageComponent
                                     if (customMessageComponent != null) {
                                         customMessageComponent(
@@ -917,6 +1018,7 @@ fun ChatRoomView(
                                                 contextMenuTap = Pair(tapX, tapY)
                                                 contextMenuBounds = Pair(left, top) to Pair(right, bottom)
                                             },
+                                            onQuoteClick = { parent -> viewModel.jumpToQuotedMessage(parent) },
                                             onAvatarClick = { user ->
                                                 val disableProfiles = config?.disableProfilesInteractions == true
                                                 if (!disableProfiles && user.name != "Deleted User") {
@@ -980,6 +1082,34 @@ fun ChatRoomView(
                         }
                     }
                     
+                    // Jump window: the list shows archive messages around a target.
+                    if (jumpWindow != null) {
+                        Surface(
+                            modifier = Modifier
+                                .align(androidx.compose.ui.Alignment.BottomCenter)
+                                .padding(bottom = 16.dp),
+                            shape = MaterialTheme.shapes.extraLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            shadowElevation = 4.dp
+                        ) {
+                            TextButton(onClick = {
+                                scrollToLiveTail = true
+                                viewModel.jumpToLatest()
+                            }) {
+                                Text("Jump to latest messages", color = MaterialTheme.colorScheme.onPrimary)
+                            }
+                        }
+                    }
+                    jumpNotice?.let { notice ->
+                        JumpNoticeCard(
+                            notice = notice,
+                            onDismiss = { viewModel.dismissJumpNotice() },
+                            modifier = Modifier
+                                .align(androidx.compose.ui.Alignment.TopCenter)
+                                .padding(12.dp)
+                        )
+                    }
+
                     // Scroll to bottom button (floating action button) with animation
                     Box(
                         modifier = Modifier
@@ -1002,8 +1132,12 @@ fun ChatRoomView(
                             Box {
                                 FloatingActionButton(
                                     onClick = {
+                                        if (jumpWindow != null) {
+                                            scrollToLiveTail = true
+                                            viewModel.jumpToLatest()
+                                        }
                                         coroutineScope.launch {
-                                            scrollToTrueBottom(animate = true)
+                                            if (jumpWindow == null) scrollToTrueBottom(animate = true)
                                             unreadCount = 0
                                         }
                                     },
@@ -1296,7 +1430,8 @@ private fun ChatRoomHeader(
     onBack: () -> Unit,
     onInfoClick: () -> Unit,
     showInfoButton: Boolean,
-    showBackButton: Boolean
+    showBackButton: Boolean,
+    onSearchClick: (() -> Unit)? = null
 ) {
     val headerColor = com.ethora.chat.ui.styling.LocalChatThemeOverrides.current.headerBackground
         ?: MaterialTheme.colorScheme.surface
@@ -1332,6 +1467,15 @@ private fun ChatRoomHeader(
                 maxLines = 1
             )
 
+            if (onSearchClick != null) {
+                IconButton(onClick = onSearchClick, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "Search messages"
+                    )
+                }
+            }
+
             if (showInfoButton) {
                 IconButton(onClick = onInfoClick, modifier = Modifier.size(40.dp)) {
                     Icon(
@@ -1339,6 +1483,53 @@ private fun ChatRoomHeader(
                         contentDescription = "Chat info"
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun JumpNoticeCard(
+    notice: JumpNotice,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 3.dp,
+        color = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            when (notice) {
+                is JumpNotice.Archived -> {
+                    Text(
+                        text = "Older message",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = notice.preview.body,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "This message is older than the history available in this chat, so it cannot be shown in place.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                is JumpNotice.NotFound -> Text(
+                    text = "That message is too far back to load.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+                Text("Dismiss")
             }
         }
     }

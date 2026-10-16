@@ -920,6 +920,8 @@ fun Chat(
                         com.ethora.chat.core.store.RoomStore.setCurrentRoom(null)
                         selectedRoom = null 
                     },
+                    // A search hit in another chat opens that chat (message search).
+                    onOpenRoom = { room -> selectedRoom = room },
                     modifier = modifier
                 )
             } else {

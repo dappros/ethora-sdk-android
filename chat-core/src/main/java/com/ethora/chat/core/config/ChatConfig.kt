@@ -120,7 +120,11 @@ data class ChatConfig(
     val onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null,
 
     // Structured event stream
-    val onChatEvent: ((ChatEvent) -> Unit)? = null
+    val onChatEvent: ((ChatEvent) -> Unit)? = null,
+
+    // Message search (web enableMessageSearch / disableMessageSearch). Needs appId too.
+    val enableMessageSearch: Boolean? = null,
+    val disableMessageSearch: Boolean? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -185,6 +189,8 @@ data class ChatConfig(
         private var customComponents: CustomComponents? = null
         private var onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null
         private var onChatEvent: ((ChatEvent) -> Unit)? = null
+        private var enableMessageSearch: Boolean? = null
+        private var disableMessageSearch: Boolean? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -245,6 +251,8 @@ data class ChatConfig(
         fun customComponents(value: CustomComponents) = apply { this.customComponents = value }
         fun onBeforeSend(value: (OutgoingSendInput) -> SendDecision) = apply { this.onBeforeSend = value }
         fun onChatEvent(value: (ChatEvent) -> Unit) = apply { this.onChatEvent = value }
+        fun enableMessageSearch(value: Boolean) = apply { this.enableMessageSearch = value }
+        fun disableMessageSearch(value: Boolean) = apply { this.disableMessageSearch = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -305,7 +313,9 @@ data class ChatConfig(
             eventHandlers = eventHandlers,
             customComponents = customComponents,
             onBeforeSend = onBeforeSend,
-            onChatEvent = onChatEvent
+            onChatEvent = onChatEvent,
+            enableMessageSearch = enableMessageSearch,
+            disableMessageSearch = disableMessageSearch
         )
     }
 

@@ -20,9 +20,23 @@ import com.ethora.chat.core.store.PendingMediaSend
 import com.ethora.chat.core.store.PendingMediaSendQueue
 import com.ethora.chat.core.store.PendingMediaSendStatus
 import com.ethora.chat.core.store.PendingMediaUploadPayload
+import com.ethora.chat.core.store.JumpRequestStore
+import com.ethora.chat.core.store.PendingJump
+import com.ethora.chat.core.store.PendingJumpPreview
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
+import com.ethora.chat.core.xmpp.JumpContent
+import com.ethora.chat.core.xmpp.JumpWindow
+import com.ethora.chat.core.xmpp.JumpWindowResult
+import com.ethora.chat.core.xmpp.MAX_HISTORY_PAGE_FAILURES
 import com.ethora.chat.core.xmpp.XMPPClient
+import com.ethora.chat.core.xmpp.advanceOlderCursor
+import com.ethora.chat.core.xmpp.findMessageIndex
+import com.ethora.chat.core.xmpp.loadJumpWindow
+import com.ethora.chat.core.xmpp.loadNewerWindowPage
+import com.ethora.chat.core.xmpp.loadOlderWindowPage
+import com.ethora.chat.core.xmpp.oldestArchiveCursor
+import com.ethora.chat.core.xmpp.replyParentIdOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -57,6 +71,26 @@ class ChatRoomViewModel(
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
     
     private var isLoadingMoreInProgress = false
+
+    // ---- Jump to message (web useJumpToMessage) ----
+    /** Archive messages shown in place of the live list while a jump is open; null = live list. */
+    private val _jumpWindow = MutableStateFlow<JumpWindow?>(null)
+    val jumpWindow: StateFlow<JumpWindow?> = _jumpWindow.asStateFlow()
+
+    /** Message the list should scroll to and flash. The list calls [consumeJumpTarget]. */
+    private val _jumpTarget = MutableStateFlow<JumpTarget?>(null)
+    val jumpTarget: StateFlow<JumpTarget?> = _jumpTarget.asStateFlow()
+
+    /** Shown when a jump cannot place its message: the archived card, or "too far back". */
+    private val _jumpNotice = MutableStateFlow<JumpNotice?>(null)
+    val jumpNotice: StateFlow<JumpNotice?> = _jumpNotice.asStateFlow()
+
+    private var windowBusy = false
+
+    // Older-history paging state, owned here (web cursorRef / exhaustedRef / failuresRef).
+    private var pagingCursor: Long? = null
+    private var pagingFailures = 0
+    private var pagingExhausted = false
     
     private val _hasMoreMessages = MutableStateFlow(true)
     val hasMoreMessages: StateFlow<Boolean> = _hasMoreMessages.asStateFlow()
@@ -93,7 +127,7 @@ class ChatRoomViewModel(
                 }
                 .distinctUntilChanged()
                 .collect { 
-                    _messages.value = it
+                    publishLive(it)
                 }
         }
         
@@ -126,6 +160,16 @@ class ChatRoomViewModel(
                 }
         }
         
+        // A "scroll to this message" request for this room (search hit, quote, link).
+        viewModelScope.launch {
+            JumpRequestStore.pending.collect { jump ->
+                if (jump == null || jump.roomJid != room.jid) return@collect
+                JumpRequestStore.consume(jump.at)
+                if (JumpRequestStore.isExpired(jump)) return@collect
+                runJump(jump)
+            }
+        }
+
         // Check if messages exist in store - only load if they don't
         val storedMessages = MessageStore.messages.value[room.jid] ?: emptyList()
         if (storedMessages.isEmpty()) {
@@ -135,7 +179,7 @@ class ChatRoomViewModel(
                 val persistedMessages = MessageStore.loadMessagesFromPersistence(room.jid)
                 if (persistedMessages.isNotEmpty()) {
                     MessageStore.setMessagesForRoom(room.jid, persistedMessages)
-                    _messages.value = persistedMessages.sortedBy { it.timestamp ?: it.date.time }
+                    publishLive(persistedMessages.sortedBy { it.timestamp ?: it.date.time })
                     RoomStore.setRoomLoading(room.jid, false)
                     android.util.Log.d("ChatRoomViewModel", "Loaded ${persistedMessages.size} messages from persistence")
                     // Critical: even when cache hit, refresh newest MAM in background so any messages
@@ -155,7 +199,7 @@ class ChatRoomViewModel(
                     kotlinx.coroutines.delay(400)
                     val afterWaitMessages = MessageStore.messages.value[room.jid] ?: emptyList()
                     if (afterWaitMessages.isNotEmpty()) {
-                        _messages.value = afterWaitMessages.sortedBy { it.timestamp ?: it.date.time }
+                        publishLive(afterWaitMessages.sortedBy { it.timestamp ?: it.date.time })
                         android.util.Log.d("ChatRoomViewModel", "Global loader filled messages (${afterWaitMessages.size})")
                         RoomStore.setRoomLoading(room.jid, false)
                         refreshNewestMessages()
@@ -169,7 +213,7 @@ class ChatRoomViewModel(
         } else {
             // Messages already loaded globally, just use them (no loader)
             val sorted = storedMessages.sortedBy { it.timestamp ?: it.date.time }
-            _messages.value = sorted
+            publishLive(sorted)
             android.util.Log.d("ChatRoomViewModel", "Using pre-loaded messages (${sorted.size} messages, sorted oldest-first)")
             // Refresh newest MAM to catch anything missed while on another screen.
             viewModelScope.launch { refreshNewestMessages() }
@@ -479,106 +523,32 @@ class ChatRoomViewModel(
     }
     
     /**
-     * Load more messages (pagination) when scrolling to top
-     * Matches web: loadMoreMessages in ChatRoom.tsx exactly
-     * 
-     * React logic:
-     * - Check: !isLoadingMore && !roomsList?.[chatJID]?.historyComplete
-     * - Get lastMsgId: if idOfMessageBefore provided, use it; else use messages[length-2].id (skip delimiter-new)
-     * - Call: client?.getHistoryStanza(chatJID, max, lastMsgId)
+     * Load older messages when the reader scrolls to the top (web loadMoreMessages).
+     * While a jump window is shown, the same gesture pages the window instead.
+     *
+     * The cursor is the server's archive id of the oldest row, never a
+     * millisecond timestamp: the server reads a timestamp as a far older id and
+     * answers with the first page of the archive.
      */
-    fun loadMoreMessages(idOfMessageBefore: String? = null) {
-        // historyComplete from initial MAM query means "that query finished", NOT "no older messages exist".
-        // We must always attempt loadMore when user scrolls up; empty response will set hasMoreMessages=false.
+    fun loadMoreMessages(@Suppress("UNUSED_PARAMETER") idOfMessageBefore: String? = null) {
+        if (_jumpWindow.value != null) {
+            loadOlderInWindow()
+            return
+        }
         if (isLoadingMoreInProgress) {
             android.util.Log.d("ChatRoomViewModel", "Skipping loadMore: already in progress")
             return
         }
-        
         viewModelScope.launch {
             isLoadingMoreInProgress = true
             _isLoadingMore.value = true
             try {
-                val currentMessages = _messages.value
-                if (currentMessages.isEmpty()) {
+                val oldest = _messages.value.firstOrNull { it.id != "delimiter-new" }
+                if (oldest == null) {
                     android.util.Log.d("ChatRoomViewModel", "No messages to paginate from")
-                    isLoadingMoreInProgress = false
-                    _isLoadingMore.value = false
-                    return@launch
-                }
-                
-                val messagesWithoutDelimiter = currentMessages.filter { it.id != "delimiter-new" }
-                val oldestMessage = messagesWithoutDelimiter.firstOrNull()
-                if (oldestMessage == null) {
-                    android.util.Log.d("ChatRoomViewModel", "No valid message ID found for pagination")
-                    isLoadingMoreInProgress = false
-                    _isLoadingMore.value = false
-                    return@launch
-                }
-                
-                _scrollRestoreAnchor.value = oldestMessage.id
-
-                // Use OLDEST SERVER message for beforeId - optimistic ids are not in server archive.
-                val anchorMsg = messagesWithoutDelimiter.firstOrNull { msg ->
-                    !msg.id.startsWith("send-text-message-") && !msg.id.startsWith("pending-")
-                } ?: oldestMessage
-
-                // Match web's `loadMoreMessages(chatJID, 30, Number(firstMessageId))`:
-                // the server expects a NUMERIC `<before>` value. If the message id
-                // has a 10+ digit numeric chunk (Ethora's archive ids embed a ms
-                // timestamp — e.g. "1704067200000" or "send-media-message:…-1704067200000"),
-                // use that; otherwise fall through to the message timestamp.
-                // Sending a non-numeric id was making the server drop the `<before>`
-                // constraint and return the FIRST page of the archive, producing
-                // the classic "skip middle, jump to 1-9" pagination bug.
-                val idStr = anchorMsg.id
-                val numericFromId = Regex("\\d{10,}").find(idStr)?.value
-                val beforeId = numericFromId
-                    ?: anchorMsg.timestamp?.takeIf { it > 0 }?.toString()
-                    ?: anchorMsg.date.time.toString()
-
-                android.util.Log.d(
-                    "ChatRoomViewModel",
-                    "Triggering loadMoreMessages room=${room.jid} anchorId=${anchorMsg.id} beforeId=$beforeId"
-                )
-                
-                xmppClient?.let { client ->
-                    if (!client.isFullyConnected()) {
-                        val reconnected = client.ensureConnected(5_000)
-                        if (!reconnected) {
-                            android.util.Log.w(
-                                "ChatRoomViewModel",
-                                "Skipping loadMoreMessages: client not connected for ${room.jid}"
-                            )
-                            return@let
-                        }
-                    }
-                    client.promoteRoomHistory(room.jid)
-                    val history = client.getHistory(room.jid, max = 30, beforeMessageId = beforeId)
-                    android.util.Log.d("ChatRoomViewModel", "  Received ${history.size} older messages")
-                    
-                    if (history.isNotEmpty()) {
-                        MessageStore.addMessages(room.jid, history)
-                        android.util.Log.d("ChatRoomViewModel", "   Added ${history.size} older messages to store")
-                        kotlinx.coroutines.delay(50)
-                        val updated = (MessageStore.messages.value[room.jid] ?: emptyList())
-                            .sortedBy { it.timestamp ?: it.date.time }
-                        _messages.value = updated
-                        android.util.Log.d("ChatRoomViewModel", "   UI updated: ${updated.size} total messages")
-                    }
-
-                    val historyComplete = RoomStore.getRoomByJid(room.jid)?.historyComplete == true
-                    if (historyComplete) {
-                        android.util.Log.d("ChatRoomViewModel", "   No more messages available (historyComplete=true)")
-                        _hasMoreMessages.value = false
-                    } else if (history.isEmpty()) {
-                        android.util.Log.w(
-                            "ChatRoomViewModel",
-                            "   Empty pagination response before historyComplete for ${room.jid}; keeping hasMoreMessages=true"
-                        )
-                    }
-                } ?: run {
-                    android.util.Log.w("ChatRoomViewModel", "   XMPP client is null")
+                } else {
+                    _scrollRestoreAnchor.value = oldest.id
+                    fetchOlderPage()
                 }
             } catch (e: CancellationException) {
                 // Expected when coroutine is cancelled - don't log as error
@@ -588,9 +558,203 @@ class ChatRoomViewModel(
             } finally {
                 isLoadingMoreInProgress = false
                 _isLoadingMore.value = false
-                android.util.Log.d("ChatRoomViewModel", "  Finished loading more, isLoadingMore: false")
             }
         }
+    }
+
+    /**
+     * One page of older history into the store, with the server's cursor.
+     * Returns false when no request was made (not connected, nothing to page
+     * from, or the history is exhausted).
+     */
+    private suspend fun fetchOlderPage(): Boolean {
+        val client = xmppClient ?: return false
+        if (pagingExhausted) return false
+        val before = pagingCursor ?: oldestArchiveCursor(liveMessages()) ?: run {
+            android.util.Log.d("ChatRoomViewModel", "No archive id to page from in ${room.jid}")
+            return false
+        }
+        if (!client.isFullyConnected() && !client.ensureConnected(5_000)) {
+            android.util.Log.w("ChatRoomViewModel", "Skipping loadMoreMessages: client not connected for ${room.jid}")
+            return false
+        }
+        client.promoteRoomHistory(room.jid)
+        val page = client.getHistoryPage(room.jid, max = 30, beforeMessageId = before.toString())
+        if (page.messages.isNotEmpty()) {
+            MessageStore.addMessages(room.jid, page.messages)
+        }
+        val state = advanceOlderCursor(before, page.ok, page.complete, page.first)
+        pagingFailures = if (page.ok) 0 else pagingFailures + 1
+        pagingCursor = state.cursor
+        pagingExhausted = state.exhausted || pagingFailures >= MAX_HISTORY_PAGE_FAILURES
+        _hasMoreMessages.value = !pagingExhausted
+        android.util.Log.d(
+            "ChatRoomViewModel",
+            "History page before=$before got=${page.messages.size} ok=${page.ok} complete=${page.complete} exhausted=$pagingExhausted"
+        )
+        return true
+    }
+
+    /** Opens the window around a message, or scrolls the live list when the message is already there. */
+    private suspend fun runJump(jump: PendingJump) {
+        val content = JumpContent(createdAt = jump.createdAt, body = jump.body)
+        _jumpNotice.value = null
+
+        if (_jumpWindow.value != null) {
+            val live = liveMessages()
+            val liveIndex = findMessageIndex(live, jump.ids, content)
+            if (liveIndex >= 0) {
+                exitJumpWindow()
+                _jumpTarget.value = JumpTarget(live[liveIndex].id, jump.at)
+                return
+            }
+        } else {
+            val shown = _messages.value
+            val index = findMessageIndex(shown, jump.ids, content)
+            if (index >= 0) {
+                _jumpTarget.value = JumpTarget(shown[index].id, jump.at)
+                return
+            }
+        }
+
+        val client = xmppClient
+        if (client == null || (!client.isFullyConnected() && !client.ensureConnected(10_000))) {
+            showJumpNotice(jump)
+            return
+        }
+        when (val result = loadJumpWindow(client, room.jid, jump.ids, content)) {
+            is JumpWindowResult.Found -> showJumpWindow(result.window, jump.at)
+            JumpWindowResult.Missing -> showJumpNotice(jump)
+            JumpWindowResult.Unavailable -> {
+                // No window could be asked for: page older history until the message shows up.
+                val id = pageUntilFound(jump, content)
+                if (id != null) _jumpTarget.value = JumpTarget(id, jump.at) else showJumpNotice(jump)
+            }
+        }
+    }
+
+    private suspend fun pageUntilFound(jump: PendingJump, content: JumpContent): String? {
+        var pages = 0
+        while (true) {
+            val live = liveMessages()
+            val index = findMessageIndex(live, jump.ids, content)
+            if (index >= 0) return live[index].id
+            if (pages >= MAX_JUMP_HISTORY_PAGES || !fetchOlderPage()) return null
+            pages += 1
+        }
+    }
+
+    private fun showJumpWindow(window: JumpWindow, at: Long) {
+        _jumpWindow.value = window
+        _messages.value = window.messages
+        _jumpTarget.value = JumpTarget(window.targetId, at)
+    }
+
+    private fun showJumpNotice(jump: PendingJump) {
+        val preview = jump.preview
+        _jumpNotice.value = if (preview != null) {
+            JumpNotice.Archived(preview, jump.at)
+        } else {
+            JumpNotice.NotFound(jump.at)
+        }
+    }
+
+    /** "Jump to latest messages": back to the live list. */
+    fun jumpToLatest() {
+        if (_jumpWindow.value != null) exitJumpWindow()
+    }
+
+    private fun exitJumpWindow() {
+        _jumpWindow.value = null
+        _messages.value = liveMessages()
+    }
+
+    /** Pages the window toward older messages (the list reached its top). */
+    fun loadOlderInWindow() = pageWindow(older = true)
+
+    /** Pages the window toward newer messages (the list reached its bottom). */
+    fun loadNewerInWindow() = pageWindow(older = false)
+
+    private fun pageWindow(older: Boolean) {
+        val client = xmppClient ?: return
+        val window = _jumpWindow.value ?: return
+        if (windowBusy) return
+        if (older && !window.hasOlder) return
+        if (!older && !window.hasNewer) return
+        viewModelScope.launch {
+            windowBusy = true
+            try {
+                if (older) {
+                    val page = loadOlderWindowPage(client, window) ?: return@launch
+                    val current = _jumpWindow.value ?: return@launch
+                    if (current.targetId != window.targetId) return@launch
+                    _scrollRestoreAnchor.value = current.messages.firstOrNull()?.id
+                    updateWindow(
+                        current.copy(
+                            messages = mergeWindowMessages(current.messages, page.messages),
+                            olderCursor = page.olderCursor,
+                            hasOlder = page.hasOlder
+                        )
+                    )
+                } else {
+                    val page = loadNewerWindowPage(client, window) ?: return@launch
+                    val current = _jumpWindow.value ?: return@launch
+                    if (current.targetId != window.targetId) return@launch
+                    updateWindow(
+                        current.copy(
+                            messages = mergeWindowMessages(current.messages, page.messages),
+                            newerCursor = page.newerCursor,
+                            hasNewer = page.hasNewer
+                        )
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("ChatRoomViewModel", "Error paging jump window", e)
+            } finally {
+                windowBusy = false
+            }
+        }
+    }
+
+    private fun updateWindow(window: JumpWindow) {
+        _jumpWindow.value = window
+        _messages.value = window.messages
+    }
+
+    /** The list scrolled to [JumpTarget] and flashed it. */
+    fun consumeJumpTarget(at: Long) {
+        if (_jumpTarget.value?.at == at) _jumpTarget.value = null
+    }
+
+    fun dismissJumpNotice() {
+        _jumpNotice.value = null
+    }
+
+    /** Opens the message [parent] that a reply quotes. */
+    fun jumpToQuotedMessage(parent: com.ethora.chat.core.models.Message) {
+        val createdAt = java.time.Instant.ofEpochMilli(parent.timestamp ?: parent.date.time).toString()
+        JumpRequestStore.request(
+            roomJid = room.jid,
+            ids = listOf(parent.id, parent.xmppId),
+            createdAt = createdAt,
+            body = parent.body,
+            preview = PendingJumpPreview(
+                roomJid = room.jid,
+                sender = parent.user.fullName,
+                body = parent.body,
+                createdAt = createdAt
+            )
+        )
+    }
+
+    private fun liveMessages(): List<com.ethora.chat.core.models.Message> =
+        (MessageStore.messages.value[room.jid] ?: emptyList()).sortedBy { it.timestamp ?: it.date.time }
+
+    /** Writes the live list unless a jump window owns the list. */
+    private fun publishLive(list: List<com.ethora.chat.core.models.Message>) {
+        if (_jumpWindow.value == null) _messages.value = list
     }
 
     fun clearScrollRestoreAnchor() {
@@ -1452,3 +1616,19 @@ class ChatRoomViewModel(
         }
     }
 }
+
+/** Where the list should scroll. [at] identifies the request, so it is acted on once. */
+data class JumpTarget(val messageId: String, val at: Long)
+
+/** Why a jump could not place its message in the transcript. */
+sealed interface JumpNotice {
+    val at: Long
+
+    /** The message is known (a search hit or quote): show it in a card. */
+    data class Archived(val preview: PendingJumpPreview, override val at: Long) : JumpNotice
+
+    /** Nothing is known about the message and the archive does not have it. */
+    data class NotFound(override val at: Long) : JumpNotice
+}
+
+private const val MAX_JUMP_HISTORY_PAGES = 40
