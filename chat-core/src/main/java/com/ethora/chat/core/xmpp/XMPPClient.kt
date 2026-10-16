@@ -1076,6 +1076,8 @@ class XMPPClient(
             // Admin-broadcast / system flag (see realtime parser). Carried so
             // history-loaded banners render the same as live ones.
             val isSystemMessage = extractAttribute(dataXml, "isSystemMessage")
+            // Reply and thread fields (see replyFieldsFrom in XmppXmlUtils.kt).
+            val replyFields = replyFieldsFrom(dataXml)
 
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
@@ -1144,7 +1146,10 @@ class XMPPClient(
                 originalName = originalName,
                 size = size,
                 waveForm = waveForm,
-                archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId
+                archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId,
+                isReply = replyFields.isReply,
+                showInChannel = replyFields.showInChannel,
+                mainMessage = replyFields.mainMessage
             )
             
             messages.add(message)

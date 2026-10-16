@@ -120,7 +120,14 @@ data class ChatConfig(
     val onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null,
 
     // Structured event stream
-    val onChatEvent: ((ChatEvent) -> Unit)? = null
+    val onChatEvent: ((ChatEvent) -> Unit)? = null,
+
+    // Reactions and replies (web/RN key names). disableReactions hard-disables
+    // reactions; reactions.enabled=false does the same. disableReplies hides only
+    // the "Reply" menu item, threads still open from the quote or the reply count.
+    val disableReactions: Boolean? = null,
+    val reactions: ReactionsConfig? = null,
+    val disableReplies: Boolean? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -185,6 +192,9 @@ data class ChatConfig(
         private var customComponents: CustomComponents? = null
         private var onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null
         private var onChatEvent: ((ChatEvent) -> Unit)? = null
+        private var disableReactions: Boolean? = null
+        private var reactions: ReactionsConfig? = null
+        private var disableReplies: Boolean? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -245,6 +255,9 @@ data class ChatConfig(
         fun customComponents(value: CustomComponents) = apply { this.customComponents = value }
         fun onBeforeSend(value: (OutgoingSendInput) -> SendDecision) = apply { this.onBeforeSend = value }
         fun onChatEvent(value: (ChatEvent) -> Unit) = apply { this.onChatEvent = value }
+        fun disableReactions(value: Boolean) = apply { this.disableReactions = value }
+        fun reactions(value: ReactionsConfig) = apply { this.reactions = value }
+        fun disableReplies(value: Boolean) = apply { this.disableReplies = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -305,7 +318,10 @@ data class ChatConfig(
             eventHandlers = eventHandlers,
             customComponents = customComponents,
             onBeforeSend = onBeforeSend,
-            onChatEvent = onChatEvent
+            onChatEvent = onChatEvent,
+            disableReactions = disableReactions,
+            reactions = reactions,
+            disableReplies = disableReplies
         )
     }
 

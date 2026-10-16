@@ -897,6 +897,9 @@ class XMPPWebSocketConnection(
             // as a centered banner (SystemMessage.tsx) rather than a chat
             // bubble; carry the flag through so the Android UI can do the same.
             val isSystemMessage = extractAttribute(dataXml, "isSystemMessage")
+            // Reply and thread fields, as web getDataFromXml reads them. `mainMessage`
+            // is the parent reference JSON (see ThreadSupport).
+            val replyFields = replyFieldsFrom(dataXml)
             
             // Extract media fields for media message matching (already extracted above)
             val locationPreview = extractAttribute(dataXml, "locationPreview")
@@ -961,7 +964,10 @@ class XMPPWebSocketConnection(
                 originalName = originalName,
                 size = size,
                 waveForm = waveForm,
-                archiveId = archiveId?.takeIf { it.isNotBlank() }
+                archiveId = archiveId?.takeIf { it.isNotBlank() },
+                isReply = replyFields.isReply,
+                showInChannel = replyFields.showInChannel,
+                mainMessage = replyFields.mainMessage
             )
             
             // Add to MessageStore with pending reconciliation
@@ -1084,69 +1090,46 @@ class XMPPWebSocketConnection(
     }
     
     /**
-     * Parse and handle reaction stanza
-     * Matches web: onReactionMessage in stanzaHandlers.ts
+     * Parse and handle reaction stanza (live MUC reflection).
+     * Matches web: onReactionMessage in stanzaHandlers.ts. The room comes from
+     * `<stanza-id by>`, not from `to` (which is the recipient occupant here).
      */
     private fun parseAndHandleReaction(xml: String) {
         try {
-            // Extract <reactions> element
-            val reactionsStart = xml.indexOf("<reactions")
-            val reactionsEnd = xml.indexOf(">", reactionsStart)
-            if (reactionsStart == -1 || reactionsEnd == -1) {
-                Log.w(TAG, "⚠️ Reaction stanza missing <reactions> element")
+            val parsed = ReactionStanza.parse(xml)
+            if (parsed == null) {
+                Log.w(TAG, "⚠️ Reaction stanza missing <reactions> id/from")
                 return
             }
-            
-            val reactionsXml = xml.substring(reactionsStart, xml.indexOf("</reactions>", reactionsEnd) + "</reactions>".length)
-            val messageId = extractAttribute(reactionsXml, "id")
-            val from = extractAttribute(reactionsXml, "from")
-            
-            if (messageId.isNullOrBlank() || from.isNullOrBlank()) {
-                Log.w(TAG, "⚠️ Reaction stanza missing id or from attribute")
-                return
-            }
-            
-            // Extract reaction emojis
-            val reactionElements = mutableListOf<String>()
-            var searchStart = reactionsEnd + 1
-            while (true) {
-                val reactionStart = xml.indexOf("<reaction>", searchStart)
-                if (reactionStart == -1) break
-                val reactionEnd = xml.indexOf("</reaction>", reactionStart)
-                if (reactionEnd == -1) break
-                val reactionText = xml.substring(reactionStart + "<reaction>".length, reactionEnd)
-                reactionElements.add(reactionText)
-                searchStart = reactionEnd + "</reaction>".length
-            }
-            
-            // Extract data element
-            val dataStart = xml.indexOf("<data")
-            val dataEnd = xml.indexOf("/>", dataStart)
-            val dataXml = if (dataStart != -1 && dataEnd != -1) {
-                xml.substring(dataStart, dataEnd + 2)
-            } else ""
-            
-            val senderFirstName = extractAttribute(dataXml, "senderFirstName") ?: ""
-            val senderLastName = extractAttribute(dataXml, "senderLastName") ?: ""
-            val data = mapOf(
-                "senderFirstName" to senderFirstName,
-                "senderLastName" to senderLastName
-            )
-            
-            // Extract room JID from from attribute
-            val roomJid = extractAttribute(xml, "to")?.split("/")?.firstOrNull() ?: return
-            
-            Log.d(TAG, "😀 Reaction received: room=$roomJid, messageId=$messageId, from=$from, reactions=$reactionElements")
-            
-            // Notify delegate
-            clientWrapper?.let { client ->
-                delegate?.onReactionReceived(client, roomJid, messageId, from, reactionElements, data)
-            }
+            Log.d(TAG, "😀 Reaction received: target=${parsed.targetId}, from=${parsed.from}, reactions=${parsed.emoji}")
+            applyReactionStanza(parsed)
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing reaction stanza", e)
         }
     }
-    
+
+    /**
+     * Stores one parsed reaction and tells the delegate. Shared by the live and
+     * the MAM path, so both get the same newest-wins rule.
+     */
+    private fun applyReactionStanza(parsed: ParsedReactionStanza) {
+        val roomJid = parsed.roomJid ?: run {
+            Log.w(TAG, "⚠️ Reaction without a room (no stanza-id by), target=${parsed.targetId}")
+            return
+        }
+        com.ethora.chat.core.store.MessageStore.setReaction(
+            roomJid = roomJid,
+            targetId = parsed.targetId,
+            reactorId = parsed.reactorId,
+            emoji = parsed.emoji,
+            data = parsed.data,
+            timestamp = parsed.timestamp
+        )
+        clientWrapper?.let { client ->
+            delegate?.onReactionReceived(client, roomJid, parsed.targetId, parsed.from, parsed.emoji, parsed.data)
+        }
+    }
+
     /**
      * Parse and handle delete message stanza
      * Matches web: onDeleteMessage in stanzaHandlers.ts
@@ -1559,8 +1542,8 @@ class XMPPWebSocketConnection(
     }
     
     /**
-     * Send message reaction
-     * Matches web: sendMessageReaction.xmpp.ts
+     * Send message reaction. Sends my FULL reaction set for [messageId]: an empty
+     * list removes all of mine. Matches web: sendMessageReaction.xmpp.ts.
      */
     suspend fun sendMessageReaction(roomJid: String, messageId: String, reactions: List<String>) {
         if (!isAuthenticated) {
@@ -1575,31 +1558,24 @@ class XMPPWebSocketConnection(
         }
 
         val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
-        val senderFirstName = currentUser?.firstName ?: ""
-        val senderLastName = currentUser?.lastName ?: ""
         val fromJid = resolveBareJid(currentUser?.userJID)
             ?: resolveBareJid(currentUser?.xmppUsername)
             ?: resolveBareJid(username)
             ?: ""
-        
-        val id = "message-reaction:${System.currentTimeMillis()}"
-        
-        // Build reactions XML
-        val reactionsXml = reactions.joinToString("") { reaction ->
-            "<reaction>$reaction</reaction>"
-        }
-        
-        val stanza = """<message type="groupchat" id="$id" from="$fromJid" to="$fixedRoomJid">
-            |<reactions id="$messageId" from="$fromJid" xmlns="urn:xmpp:reactions:0">
-            |$reactionsXml
-            |</reactions>
-            |<data senderFirstName="${escapeXml(senderFirstName)}" senderLastName="${escapeXml(senderLastName)}"/>
-            |<store xmlns="urn:xmpp:hints"/>
-            |</message>""".trimMargin()
+
+        val stanza = ReactionStanza.buildSend(
+            stanzaId = ReactionStanza.newStanzaId(),
+            fromJid = fromJid,
+            roomJid = fixedRoomJid,
+            targetId = messageId,
+            emoji = reactions,
+            firstName = currentUser?.firstName ?: "",
+            lastName = currentUser?.lastName ?: ""
+        )
         sendRaw(stanza)
         Log.d(TAG, "😀 Sent reaction to $fixedRoomJid: messageId=$messageId, reactions=$reactions")
     }
-    
+
     /**
      * Parse and handle room creation stanza
      * Matches web: onNewRoomCreated in stanzaHandlers.ts
@@ -1914,67 +1890,15 @@ class XMPPWebSocketConnection(
     }
     
     /**
-     * Parse and handle reaction history from MAM
-     * Matches web: onReactionHistory in stanzaHandlers.ts
+     * Parse and handle reaction history from MAM.
+     * Matches web: onReactionHistory in stanzaHandlers.ts. A reaction whose
+     * target is not loaded yet is kept by MessageStore until the target arrives.
      */
     private fun parseAndHandleReactionHistory(xml: String) {
         try {
-            // Extract reactions from MAM result
-            // Format: <result><forwarded><message><reactions>...</reactions></message></forwarded></result>
-            val reactionsStart = xml.indexOf("<reactions")
-            if (reactionsStart == -1) return
-            
-            val reactionsEnd = xml.indexOf("</reactions>", reactionsStart)
-            if (reactionsEnd == -1) return
-            
-            val reactionsXml = xml.substring(reactionsStart, reactionsEnd + "</reactions>".length)
-            val messageId = extractAttribute(reactionsXml, "id") ?: return
-            val from = extractAttribute(reactionsXml, "from") ?: return
-            
-            // Extract reaction emojis
-            val reactionElements = mutableListOf<String>()
-            var searchStart = reactionsEnd + 1
-            while (true) {
-                val reactionStart = xml.indexOf("<reaction>", searchStart)
-                if (reactionStart == -1) break
-                val reactionEnd = xml.indexOf("</reaction>", reactionStart)
-                if (reactionEnd == -1) break
-                val reactionText = xml.substring(reactionStart + "<reaction>".length, reactionEnd)
-                reactionElements.add(reactionText)
-                searchStart = reactionEnd + "</reaction>".length
-            }
-            
-            // Extract data element
-            val dataStart = xml.indexOf("<data")
-            val dataEnd = xml.indexOf("/>", dataStart)
-            val dataXml = if (dataStart != -1 && dataEnd != -1) {
-                xml.substring(dataStart, dataEnd + 2)
-            } else ""
-            
-            val senderFirstName = extractAttribute(dataXml, "senderFirstName") ?: ""
-            val senderLastName = extractAttribute(dataXml, "senderLastName") ?: ""
-            val data = mapOf(
-                "senderFirstName" to senderFirstName,
-                "senderLastName" to senderLastName
-            )
-            
-            // Extract room JID from stanza-id
-            val stanzaIdStart = xml.indexOf("<stanza-id")
-            val stanzaIdEnd = xml.indexOf(">", stanzaIdStart)
-            val stanzaIdXml = if (stanzaIdStart != -1 && stanzaIdEnd != -1) {
-                xml.substring(stanzaIdStart, stanzaIdEnd + 1)
-            } else ""
-            
-            val roomJid = extractAttribute(stanzaIdXml, "by") 
-                ?: extractAttribute(xml, "from")?.split("/")?.firstOrNull()
-                ?: return
-            
-            Log.d(TAG, "😀 Reaction history received: room=$roomJid, messageId=$messageId, from=$from, reactions=$reactionElements")
-            
-            // Notify delegate (same as real-time reaction)
-            clientWrapper?.let { client ->
-                delegate?.onReactionReceived(client, roomJid, messageId, from, reactionElements, data)
-            }
+            val parsed = ReactionStanza.parse(xml) ?: return
+            Log.d(TAG, "😀 Reaction history received: target=${parsed.targetId}, from=${parsed.from}, reactions=${parsed.emoji}")
+            applyReactionStanza(parsed)
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing reaction history", e)
         }

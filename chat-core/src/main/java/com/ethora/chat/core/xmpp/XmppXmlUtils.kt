@@ -146,3 +146,16 @@ private fun decodeXmlEntities(value: String): String =
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+
+/** Reply fields read off a `<data>` element (web getDataFromXml: isReply, showInChannel, mainMessage). */
+internal data class ReplyFields(val isReply: Boolean, val showInChannel: String?, val mainMessage: String?)
+
+/**
+ * Reads `isReply`, `showInChannel` and `mainMessage` off a `<data>` element.
+ * `mainMessage` is the parent reference JSON, XML-escaped in the attribute.
+ */
+internal fun replyFieldsFrom(dataXml: String): ReplyFields = ReplyFields(
+    isReply = extractAttribute(dataXml, "isReply") == "true",
+    showInChannel = extractAttribute(dataXml, "showInChannel")?.takeIf { it == "true" || it == "false" },
+    mainMessage = extractAttribute(dataXml, "mainMessage")?.takeIf { it.isNotBlank() && it != "\"\"" }
+)
