@@ -172,6 +172,7 @@ fun ChatInput(
         ?: MaterialTheme.colorScheme.surface
     val inputTextColor = themeOverrides.inputTextColor
         ?: MaterialTheme.colorScheme.onSurface
+    val iconTint = themeOverrides.iconTint ?: MaterialTheme.colorScheme.primary
     Surface(
         modifier = modifier.fillMaxWidth(),
         tonalElevation = 2.dp,
@@ -213,7 +214,7 @@ fun ChatInput(
                                     imageVector = Icons.Default.PlayArrow,
                                     contentDescription = "Video",
                                     modifier = Modifier.size(48.dp),
-                                    tint = MaterialTheme.colorScheme.primary
+                                    tint = iconTint
                                 )
                             }
                             else -> {
@@ -221,7 +222,7 @@ fun ChatInput(
                                     imageVector = Icons.Default.InsertDriveFile,
                                     contentDescription = "File",
                                     modifier = Modifier.size(48.dp),
-                                    tint = MaterialTheme.colorScheme.primary
+                                    tint = iconTint
                                 )
                             }
                         }
@@ -329,7 +330,7 @@ fun ChatInput(
                         Icon(
                             imageVector = Icons.Default.AttachFile,
                             contentDescription = "Attach file",
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = iconTint
                         )
                     }
                 }

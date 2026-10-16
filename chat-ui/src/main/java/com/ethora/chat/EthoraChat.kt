@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.ethora.chat.core.config.ChatConfig
 import com.ethora.chat.core.config.ChatEvent
+import com.ethora.chat.core.config.resolveDarkTheme
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.networking.ApiClient
@@ -53,7 +54,9 @@ import com.ethora.chat.internal.ChatXMPPClientOwnership
 import com.ethora.chat.ui.components.ChatRoomView
 import com.ethora.chat.ui.components.ConfigErrorScreen
 import com.ethora.chat.ui.components.RoomListView
+import com.ethora.chat.ui.components.TwoPaneRoomLayout
 import com.ethora.chat.ui.styling.ChatTheme
+import com.ethora.chat.ui.styling.shouldUseTwoPane
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CancellationException
@@ -284,7 +287,8 @@ fun Chat(
     }
     
     ChatTheme(
-        darkTheme = config.forceDarkTheme ?: androidx.compose.foundation.isSystemInDarkTheme(),
+        darkTheme = resolveDarkTheme(config.colorScheme, config.forceDarkTheme)
+            ?: androidx.compose.foundation.isSystemInDarkTheme(),
         colors = config.colors,
         bubble = config.bubleMessage,
         background = config.backgroundChat,
@@ -909,17 +913,27 @@ fun Chat(
                 }
             }
         } else {
-            if (selectedRoom != null) {
+            val closeSelectedRoom = {
+                selectedRoom?.let { room ->
+                    com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, System.currentTimeMillis())
+                }
+                com.ethora.chat.core.store.RoomStore.setCurrentRoom(null)
+                selectedRoom = null
+            }
+            val screenWidthDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
+            if (shouldUseTwoPane(screenWidthDp, config.twoPaneLayout)) {
+                TwoPaneRoomLayout(
+                    selectedRoom = selectedRoom,
+                    xmppClient = xmppClient,
+                    onRoomSelected = { room -> selectedRoom = room },
+                    onRoomClosed = closeSelectedRoom,
+                    modifier = modifier
+                )
+            } else if (selectedRoom != null) {
                 ChatRoomView(
                     room = selectedRoom!!,
                     xmppClient = xmppClient,
-                    onBack = { 
-                        selectedRoom?.let { room ->
-                            com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, System.currentTimeMillis())
-                        }
-                        com.ethora.chat.core.store.RoomStore.setCurrentRoom(null)
-                        selectedRoom = null 
-                    },
+                    onBack = closeSelectedRoom,
                     modifier = modifier
                 )
             } else {

@@ -759,7 +759,12 @@ private fun UrlPreviewCard(
     // the primary colour of an own bubble made the card read as "dimmed /
     // disabled". Keep the preview visually prominent so the URL is actually
     // readable against both purple (user) and light-gray (other) backgrounds.
-    val previewBg = androidx.compose.ui.graphics.Color(0xFFF4F4F6) // soft gray-white
+    // Light: soft gray-white. Dark: the scheme's surface, so the dark text reads on it.
+    val previewBg = if (com.ethora.chat.ui.styling.isDarkSurface(MaterialTheme.colorScheme.surface)) {
+        MaterialTheme.colorScheme.surface
+    } else {
+        androidx.compose.ui.graphics.Color(0xFFF4F4F6)
+    }
     val previewText = MaterialTheme.colorScheme.onSurface
     Surface(
         modifier = modifier.clickable {

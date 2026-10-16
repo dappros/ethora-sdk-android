@@ -29,7 +29,9 @@ data class ChatThemeOverrides(
     val chatBackgroundImage: String? = null,
     val headerBackground: Color? = null,
     val inputBarBackground: Color? = null,
-    val inputTextColor: Color? = null
+    val inputTextColor: Color? = null,
+    /** Tint for the chat's icons (web `colors.icons`). Null = primary. */
+    val iconTint: Color? = null
 ) {
     companion object {
         val Empty = ChatThemeOverrides()
@@ -55,8 +57,12 @@ internal fun resolveOverrides(
         return parseHexColor(raw)
     }
     return ChatThemeOverrides(
-        outgoingBubbleBackground = pick(bubble?.backgroundMessageUser, bubble?.backgroundMessageUserDark),
-        incomingBubbleBackground = pick(bubble?.backgroundMessage, bubble?.backgroundMessageDark),
+        // Web-style flat colour keys (`colors.ownMessageBackground` etc.) are the
+        // fallback when the bubble / input style doesn't set the same thing.
+        outgoingBubbleBackground = pick(bubble?.backgroundMessageUser, bubble?.backgroundMessageUserDark)
+            ?: parseHexColor(colors?.ownMessageBackground),
+        incomingBubbleBackground = pick(bubble?.backgroundMessage, bubble?.backgroundMessageDark)
+            ?: parseHexColor(colors?.otherMessageBackground),
         outgoingBubbleText = pick(bubble?.colorUser, bubble?.colorUserDark),
         incomingBubbleText = pick(bubble?.color, bubble?.colorDark),
         chatBackground = pick(background?.color, background?.colorDark),
@@ -64,8 +70,11 @@ internal fun resolveOverrides(
             background?.imageDark ?: background?.image
         } else background?.image,
         headerBackground = pick(colors?.headerColor, colors?.headerColorDark),
-        inputBarBackground = pick(colors?.inputBarColor, colors?.inputBarColorDark),
+        inputBarBackground = pick(colors?.inputBarColor, colors?.inputBarColorDark)
+            ?: parseHexColor(colors?.inputBackground),
         inputTextColor = pick(colors?.inputTextColor, colors?.inputTextColorDark)
+            ?: parseHexColor(colors?.colorInput),
+        iconTint = parseHexColor(colors?.icons)
     )
 }
 
