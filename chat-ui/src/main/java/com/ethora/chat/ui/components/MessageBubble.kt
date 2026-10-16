@@ -1,6 +1,9 @@
 package com.ethora.chat.ui.components
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.ClickableText
@@ -67,6 +70,16 @@ fun MessageBubble(
     onAvatarClick: ((User) -> Unit)? = null,
     pendingMediaStatus: PendingMediaSendStatus? = null,
     sendFailed: Boolean = false,
+    /** Reaction chips under the bubble. False hides the row (web `disableReactions`). */
+    showReactions: Boolean = true,
+    /** Toggles my reaction from a chip. Null makes the chips read-only (web `disableInteractions`). */
+    onReactionToggle: ((String) -> Unit)? = null,
+    /** My xmpp localpart, used for the "mine" highlight on chips. */
+    currentUserLocalPart: String? = null,
+    /** Opens this message's thread: the quote tap and the reply count pill. */
+    onOpenThread: (() -> Unit)? = null,
+    /** Replies that belong to this message's thread, shown as a pill under a root. */
+    threadReplyCount: Int = 0,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -291,6 +304,7 @@ fun MessageBubble(
                                 QuotedMessage(
                                     message = parent,
                                     isUser = isUser,
+                                    onClick = onOpenThread,
                                     modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 8.dp)
                                 )
                             }
@@ -337,6 +351,14 @@ fun MessageBubble(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        if (message.isEdited == true && message.isDeleted != true) {
+                            Text(
+                                text = "edited",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isUser) outgoingTextColor.copy(alpha = 0.7f) else incomingTextColor.copy(alpha = 0.6f),
+                                fontStyle = FontStyle.Italic
+                            )
+                        }
                         Text(
                             text = formatTime(message.date),
                             style = MaterialTheme.typography.labelSmall,
@@ -383,15 +405,33 @@ fun MessageBubble(
                 }
             }
     
-    // Reactions
-    message.reaction?.let { reactions ->
-        if (reactions.isNotEmpty()) {
-            ReactionsRow(
-                reactions = reactions,
-                isUser = isUser,
-                modifier = Modifier.padding(top = 4.dp, start = 8.dp, end = 8.dp)
-            )
+    // Reactions: chips under the bubble (web MessageReaction)
+    if (showReactions && message.isDeleted != true) {
+        message.reaction?.let { reactions ->
+            if (reactions.isNotEmpty()) {
+                ReactionsRow(
+                    reactions = reactions,
+                    isUser = isUser,
+                    currentUserLocalPart = currentUserLocalPart,
+                    onToggle = onReactionToggle,
+                    modifier = Modifier.padding(top = 4.dp, start = 8.dp, end = 8.dp)
+                )
+            }
         }
+    }
+
+    // Thread pill: replies to this message (web thread reply count on the root)
+    if (threadReplyCount > 0 && onOpenThread != null && message.isDeleted != true) {
+        Text(
+            text = if (threadReplyCount == 1) "1 reply" else "$threadReplyCount replies",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .padding(top = 4.dp, start = 12.dp, end = 12.dp)
+                .clickable(onClickLabel = "Open thread") { onOpenThread() }
+                .padding(horizontal = 4.dp, vertical = 2.dp)
+        )
     }
             
     // Sending/failed status text stays OUTSIDE the bubble so the longer
@@ -803,12 +843,14 @@ private fun UrlPreviewCard(
 private fun QuotedMessage(
     message: Message,
     isUser: Boolean,
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp)),
+            .clip(RoundedCornerShape(8.dp))
+            .then(if (onClick != null) Modifier.clickable(onClickLabel = "Open thread") { onClick() } else Modifier),
         color = if (isUser) 
             MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.1f) 
         else 
@@ -859,52 +901,99 @@ private fun QuotedMessage(
 }
 
 /**
- * Row for message reactions
+ * Reaction chips under a bubble (web MessageReaction): glyph and count per
+ * shortcode. A chip I reacted with is highlighted and a tap toggles it. A long
+ * press lists the reactors. Read-only when [onToggle] is null.
  */
 @Composable
 private fun ReactionsRow(
     reactions: Map<String, com.ethora.chat.core.models.ReactionMessage>,
     isUser: Boolean,
+    currentUserLocalPart: String?,
+    onToggle: ((String) -> Unit)?,
     modifier: Modifier = Modifier
 ) {
-    // Group reactions by emoji
-    val counts = mutableMapOf<String, Int>()
-    reactions.values.forEach { reactionMsg ->
+    // Per shortcode: count and reactor names, in first-seen order.
+    val counts = LinkedHashMap<String, Int>()
+    val reactorNames = LinkedHashMap<String, MutableList<String>>()
+    reactions.forEach { (reactorId, reactionMsg) ->
+        val name = listOfNotNull(
+            reactionMsg.data["senderFirstName"]?.takeIf { it.isNotBlank() },
+            reactionMsg.data["senderLastName"]?.takeIf { it.isNotBlank() }
+        ).joinToString(" ").ifBlank { reactorId }
         reactionMsg.emoji.forEach { emoji ->
             counts[emoji] = (counts[emoji] ?: 0) + 1
+            reactorNames.getOrPut(emoji) { mutableListOf() }.add(name)
         }
     }
-    
-    Row(
+    val mineSet: Set<String> = currentUserLocalPart
+        ?.let { reactions[it]?.emoji?.toSet() }
+        .orEmpty()
+    var namesFor by remember { mutableStateOf<String?>(null) }
+
+    FlowRow(
         modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         counts.forEach { (emoji, count) ->
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp, 
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+            val mine = emoji in mineSet
+            val chipModifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(
+                    if (mine) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f)
                 )
+                .border(
+                    1.dp,
+                    if (mine) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                    RoundedCornerShape(12.dp)
+                )
+                .combinedClickable(
+                    enabled = true,
+                    onClickLabel = emoji,
+                    onClick = { onToggle?.invoke(emoji) },
+                    onLongClickLabel = "Who reacted",
+                    onLongClick = { namesFor = emoji }
+                )
+                .padding(horizontal = 8.dp, vertical = 2.dp)
+            Row(
+                modifier = chipModifier,
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(text = emoji, fontSize = 12.sp)
-                    if (count > 1) {
-                        Text(
-                            text = count.toString(),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
+                Text(
+                    text = com.ethora.chat.core.reactions.ReactionEmojis.glyphFor(emoji),
+                    fontSize = 14.sp
+                )
+                Text(
+                    text = count.toString(),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
+    }
+
+    namesFor?.let { emoji ->
+        AlertDialog(
+            onDismissRequest = { namesFor = null },
+            title = {
+                Text("${com.ethora.chat.core.reactions.ReactionEmojis.glyphFor(emoji)}  ${counts[emoji] ?: 0}")
+            },
+            text = {
+                Column {
+                    reactorNames[emoji].orEmpty().forEach { name ->
+                        Text(text = name, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { namesFor = null }) { Text("Close") }
+            }
+        )
     }
 }
 

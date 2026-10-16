@@ -1,6 +1,7 @@
 package com.ethora.chat.ui.components
 
 import androidx.compose.animation.*
+import com.ethora.chat.core.threads.ThreadSupport
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.animateScrollBy
@@ -96,7 +97,9 @@ fun ChatRoomView(
 ) {
     val viewModel = remember(room.jid, xmppClient) { ChatRoomViewModel(room, xmppClient) }
     val lifecycleOwner = LocalLifecycleOwner.current
-    val messages by viewModel.messages.collectAsState()
+    val allRoomMessages by viewModel.messages.collectAsState()
+    // Main list: thread-only replies are shown in their thread instead (web MessageList filter).
+    val messages = remember(allRoomMessages) { allRoomMessages.filter(ThreadSupport::isMainListMessage) }
     val isLoading by viewModel.isLoading.collectAsState()
     val currentUser by UserStore.currentUser.collectAsState()
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
@@ -244,6 +247,9 @@ fun ChatRoomView(
     
     // State for replying
     var replyingToMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
+
+    // Open thread (web ThreadWrapper). Set by Reply, the quote, or the reply count pill.
+    var openThread by remember(room.jid) { mutableStateOf<ThreadTarget?>(null) }
 
     // State for delete confirmation (like web: modal before delete)
     var deleteConfirmMessageId by remember { mutableStateOf<String?>(null) }
@@ -594,6 +600,18 @@ fun ChatRoomView(
 
     // Get chat config
     val config by com.ethora.chat.core.store.ChatStore.config.collectAsState()
+    // Reactions, replies and interactions (web config keys; see ReactionsConfig)
+    val disableInteractions = config?.disableInteractions == true
+    val reactionsEnabled = config?.disableReactions != true && config?.reactions?.enabled != false
+    val reactionPickerEnabled = config?.reactions?.picker != false
+    val quickReactionList = config?.reactions?.quickReactions
+        ?.filter { it.isNotBlank() }
+        ?.take(8)
+        ?.takeIf { it.isNotEmpty() }
+        ?: com.ethora.chat.core.reactions.ReactionEmojis.DEFAULT_QUICK_REACTIONS
+    val repliesEnabled = config?.disableReplies != true
+    val currentUserLocalPart = currentUser?.xmppUsername?.substringBefore("@")?.takeIf { it.isNotBlank() }
+        ?: currentUser?.id
     val themeOverrides = com.ethora.chat.ui.styling.LocalChatThemeOverrides.current
     val chatBackgroundColor = themeOverrides.chatBackground ?: MaterialTheme.colorScheme.background
 
@@ -851,10 +869,25 @@ fun ChatRoomView(
                                     }
                                 }
                                 
-                                // Find parent message for replies
-                                val parentMessage = if (message.isReply == true && message.mainMessage != null) {
-                                    messages.find { it.id == message.mainMessage }
-                                } else null
+                                // Quote for a reply shown in the main list (web `referencedMessage`):
+                                // the loaded parent, else a stub built from the reference JSON.
+                                val parentRef = ThreadSupport.parseMessageReference(message.mainMessage)
+                                val parentMessage = parentRef?.id?.let { parentId ->
+                                    allRoomMessages.firstOrNull {
+                                        ThreadSupport.threadKey(it) == parentId || it.id == parentId
+                                    } ?: com.ethora.chat.core.models.Message(
+                                        id = parentId,
+                                        user = com.ethora.chat.core.models.User(
+                                            id = parentId,
+                                            name = parentRef.userName
+                                        ),
+                                        date = java.util.Date(),
+                                        body = parentRef.text ?: "",
+                                        roomJid = room.jid
+                                    )
+                                }
+                                // Thread this message opens: its parent for a reply, else itself.
+                                val threadKeyForMessage = ThreadSupport.threadParentFor(message)
                                 
                                 // Add spacing between different users (add extra top padding if first in group and different user)
                                 val topPadding = if (isFirstInGroup && prevChronological != null && prevChronological.user.id != message.user.id) {
@@ -896,10 +929,24 @@ fun ChatRoomView(
                                             contextMenuTap = Pair(tapX, tapY)
                                             contextMenuBounds = Pair(left, top) to Pair(right, bottom)
                                         }
+                                        val openThreadFor: () -> Unit = {
+                                            openThread = threadTargetFor(message, allRoomMessages, threadKeyForMessage)
+                                        }
                                         MessageBubble(
                                             message = message,
                                             isUser = isUser,
                                             parentMessage = parentMessage,
+                                            showReactions = reactionsEnabled,
+                                            onReactionToggle = if (reactionsEnabled && !disableInteractions) ({ emoji: String ->
+                                                viewModel.toggleReaction(message, emoji)
+                                            }) else null,
+                                            currentUserLocalPart = currentUserLocalPart,
+                                            onOpenThread = openThreadFor,
+                                            threadReplyCount = if (threadKeyForMessage == null) {
+                                                allRoomMessages.count { reply ->
+                                                    ThreadSupport.isThreadReplyOf(reply, ThreadSupport.threadKey(message))
+                                                }
+                                            } else 0,
                                             showAvatar = isFirstInGroup, // Show avatar on first message in group
                                             showUsername = isFirstInGroup, // Only show username on first message
                                             // Web parity: timestamp only on the LAST message of a
@@ -912,11 +959,11 @@ fun ChatRoomView(
                                             sendFailed = sendFailed,
                                             onMediaClick = { msg -> previewMessage = msg },
                                             onFailedClick = openFailedActions,
-                                            onLongPress = { tapX, tapY, left, top, right, bottom ->
+                                            onLongPress = if (disableInteractions) null else ({ tapX: Float, tapY: Float, left: Float, top: Float, right: Float, bottom: Float ->
                                                 contextMenuMessage = message
                                                 contextMenuTap = Pair(tapX, tapY)
                                                 contextMenuBounds = Pair(left, top) to Pair(right, bottom)
-                                            },
+                                            }),
                                             onAvatarClick = { user ->
                                                 val disableProfiles = config?.disableProfilesInteractions == true
                                                 if (!disableProfiles && user.name != "Deleted User") {
@@ -1141,7 +1188,18 @@ fun ChatRoomView(
                         onResend = {
                             viewModel.resendMessage(msg.id)
                             dismissMenu()
-                        }
+                        },
+                        quickReactions = if (reactionsEnabled) quickReactionList else null,
+                        myReactions = msg.reaction?.get(currentUserLocalPart)?.emoji?.toSet().orEmpty(),
+                        pickerEnabled = reactionPickerEnabled,
+                        onReaction = if (reactionsEnabled) ({ emoji: String ->
+                            viewModel.toggleReaction(msg, emoji)
+                            dismissMenu()
+                        }) else null,
+                        onReply = if (repliesEnabled) ({
+                            openThread = threadTargetFor(msg, allRoomMessages, ThreadSupport.threadParentFor(msg))
+                            dismissMenu()
+                        }) else null
                     )
                 }
             }
@@ -1245,6 +1303,29 @@ fun ChatRoomView(
             )
         }
         
+        // Thread panel (full screen)
+        openThread?.let { target ->
+            ThreadDialog(
+                room = room,
+                target = target,
+                viewModel = viewModel,
+                allMessages = allRoomMessages,
+                isMine = { msg ->
+                    isMessageFromCurrentUser(
+                        message = msg,
+                        currentUserXmppUsername = viewModel.currentUserXmppUsername,
+                        currentUserId = viewModel.currentUserId
+                    )
+                },
+                localPartOfCurrentUser = currentUserLocalPart,
+                reactionsEnabled = reactionsEnabled,
+                quickReactions = quickReactionList,
+                pickerEnabled = reactionPickerEnabled,
+                interactionsEnabled = !disableInteractions,
+                onClose = { openThread = null }
+            )
+        }
+
         // File preview dialog
         val roomImageUrls = remember(messages) {
             messages
