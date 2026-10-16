@@ -39,6 +39,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import com.ethora.chat.core.models.Room
+import com.ethora.chat.ui.call.CallHeaderButtons
 import com.ethora.chat.core.models.MessageActionsProps
 import com.ethora.chat.core.models.MessageProps
 import com.ethora.chat.core.models.SendInputProps
@@ -657,7 +658,14 @@ fun ChatRoomView(
                     },
                     onInfoClick = { showChatInfo = true },
                     showInfoButton = !hideChatInfoButton,
-                    showBackButton = showBackButton
+                    showBackButton = showBackButton,
+                    trailingActions = {
+                        CallHeaderButtons(
+                            room = room,
+                            xmppClient = xmppClient,
+                            videoCalls = config?.videoCalls
+                        )
+                    }
                 )
             }
         
@@ -1296,7 +1304,8 @@ private fun ChatRoomHeader(
     onBack: () -> Unit,
     onInfoClick: () -> Unit,
     showInfoButton: Boolean,
-    showBackButton: Boolean
+    showBackButton: Boolean,
+    trailingActions: @Composable () -> Unit = {}
 ) {
     val headerColor = com.ethora.chat.ui.styling.LocalChatThemeOverrides.current.headerBackground
         ?: MaterialTheme.colorScheme.surface
@@ -1331,6 +1340,8 @@ private fun ChatRoomHeader(
                     .padding(horizontal = 8.dp),
                 maxLines = 1
             )
+
+            trailingActions()
 
             if (showInfoButton) {
                 IconButton(onClick = onInfoClick, modifier = Modifier.size(40.dp)) {

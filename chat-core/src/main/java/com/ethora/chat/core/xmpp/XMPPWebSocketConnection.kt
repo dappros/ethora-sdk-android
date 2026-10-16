@@ -628,6 +628,13 @@ class XMPPWebSocketConnection(
                 return
             }
 
+            // 0. Call signalling (web: onCallTokenMessage runs before the chat handlers).
+            //    call-token / call-invite / call-state never reach the chat pipeline.
+            //    Archived rows are handled in XMPPClient.parseMAMResult instead.
+            if (!xml.contains("urn:xmpp:mam:2") && com.ethora.chat.core.call.CallSignaling.handleInbound(xml)) {
+                return
+            }
+
             // 1. Message error
             if (stanzaType == "error") {
                 parseAndHandleMessageError(xml)

@@ -50,6 +50,7 @@ import com.ethora.chat.core.push.PushNotificationManager
 import com.ethora.chat.core.xmpp.XMPPClientDelegate
 import com.ethora.chat.core.xmpp.ConnectionStatus
 import com.ethora.chat.internal.ChatXMPPClientOwnership
+import com.ethora.chat.ui.call.CallOverlayHost
 import com.ethora.chat.ui.components.ChatRoomView
 import com.ethora.chat.ui.components.ConfigErrorScreen
 import com.ethora.chat.ui.components.RoomListView
@@ -929,6 +930,10 @@ fun Chat(
                 )
             }
         }
+
+        // Call UI (incoming ring, outgoing ring, active session). Hosted here so a
+        // call rings on any screen. Renders nothing while idle or when calls are off.
+        CallOverlayHost(videoCalls = config.videoCalls, xmppClient = xmppClient)
     }
 }
 

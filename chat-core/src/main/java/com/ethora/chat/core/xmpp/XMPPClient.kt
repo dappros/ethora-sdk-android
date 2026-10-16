@@ -1121,9 +1121,19 @@ class XMPPClient(
             Log.d(TAG, "  User: ${user.fullName}, profileImage: ${user.profileImage?.take(50)}")
             
             // Check if message is deleted (has <deleted> element)
-            val isDeleted = messageXml.contains("<deleted") || messageXml.contains("<deleted>") || 
+            val isDeleted = messageXml.contains("<deleted") || messageXml.contains("<deleted>") ||
                            forwardedXml.contains("<deleted") || forwardedXml.contains("<deleted>")
-            
+
+            // Call signalling in the archive: a call-state log becomes a call-log
+            // row; any other call-* payload is never a chat message.
+            if (messageXml.contains("call-")) {
+                com.ethora.chat.core.call.CallSignaling.archivedCallLog(messageXml, actualRoomJid, timestamp)?.let { log ->
+                    messages.add(log)
+                    return messages
+                }
+                if (com.ethora.chat.core.call.CallStanzas.isCallSignal(messageXml)) return messages
+            }
+
             // Create Message object - use actual room JID from stanza
             val message = Message(
                 id = archiveMessageId,
@@ -1427,6 +1437,21 @@ class XMPPClient(
         }
     }
     
+    /**
+     * XMPP host, used to address a peer as `localpart@host` for call signals.
+     */
+    fun xmppHost(): String = host
+
+    /**
+     * Sends one call-signalling stanza (see [com.ethora.chat.core.call.CallService]).
+     * Returns false when the WebSocket transport is not up. Call signalling is
+     * WebSocket only, like the rest of the live traffic on this path.
+     */
+    fun sendCallSignal(stanzaXml: String): Boolean {
+        if (!useWebSocket) return false
+        return webSocketConnection?.sendRaw(stanzaXml) == true
+    }
+
     /**
      * Send typing indicator (composing/paused)
      * Matches web: useComposing hook
