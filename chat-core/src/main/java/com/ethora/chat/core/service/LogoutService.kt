@@ -2,6 +2,7 @@ package com.ethora.chat.core.service
 
 import android.util.Log
 import com.ethora.chat.core.networking.TokenManager
+import com.ethora.chat.core.push.PushNotificationManager
 import com.ethora.chat.core.store.*
 import com.ethora.chat.core.xmpp.XMPPClient
 import kotlinx.coroutines.CoroutineScope
@@ -9,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Logout service for the chat component
@@ -41,6 +43,9 @@ object LogoutService {
     private val xmppLock = Any()
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    /** Web `withTimeout(disconnect, 1500)`. */
+    private const val DISCONNECT_TIMEOUT_MS = 1500L
     
     /**
      * Set XMPP client reference
@@ -92,13 +97,16 @@ object LogoutService {
      * This is the main function that external apps should call
      * Matches web: logoutService.performLogout()
      * 
-     * This will:
-     * 1. Disconnect XMPP client
-     * 2. Clear all stores (UserStore, RoomStore, MessageStore)
-     * 3. Clear all persistence data
-     * 4. Call the logout callback if set
+     * Same order as web `logoutService.performLogout` (useLogout.tsx):
+     * 1. Flush the read marker of the open room (the socket is still up)
+     * 2. Clear the in-memory stores, the reader's language picks and the push registration
+     * 3. Disconnect XMPP (bounded to 1.5 s) in parallel with the push teardown
+     * 4. Clear all persistence data
+     * 5. Run the internal shutdown hook and the logout callback
+     *
+     * @param onComplete Called once the logout finished, after the logout callback.
      */
-    fun performLogout() {
+    fun performLogout(onComplete: (() -> Unit)? = null) {
         Log.d(TAG, "🚪 Starting logout process...")
 
         // Capture before the composable teardown clears it.
@@ -129,6 +137,7 @@ object LogoutService {
                     Log.d(TAG, "🧹 Clearing stores...")
                     UserStore.clear()
                     UserStore.clearSelectedUser()
+                    ReaderLanguageStore.clear()
                     RoomStore.clear()
                     MessageStore.clear()
                     PendingMediaSendQueue.clear(deleteLocalFiles = true)
@@ -140,18 +149,28 @@ object LogoutService {
                 // Wait for the flush to finish before we disconnect the socket.
                 flushJob.join()
 
-                // 1. Disconnect XMPP client
+                // 1. Disconnect XMPP client, bounded like web (1.5 s) and alongside the push teardown.
                 withContext(Dispatchers.IO) {
                     val clientToDisconnect = synchronized(xmppLock) {
                         val client = xmppClient
                         xmppClient = null
                         client
                     }
+                    val pushTeardown = launch {
+                        // Web disablePushNotifications: local push registration only (no server call exists).
+                        runCatching { PushNotificationManager.reset() }
+                            .onFailure { Log.w(TAG, "⚠️ Push teardown failed", it) }
+                    }
                     clientToDisconnect?.let { client ->
                         Log.d(TAG, "🔌 Disconnecting XMPP client...")
-                        client.disconnect()
+                        val finished = withTimeoutOrNull(DISCONNECT_TIMEOUT_MS) {
+                            runCatching { client.disconnect() }
+                                .onFailure { Log.w(TAG, "⚠️ XMPP disconnect failed", it) }
+                        }
+                        if (finished == null) Log.w(TAG, "⚠️ XMPP disconnect timed out, continuing logout")
                         Log.d(TAG, "✅ XMPP client disconnected")
                     } ?: Log.w(TAG, "⚠️ XMPP client is null, skipping disconnect")
+                    pushTeardown.join()
                 }
                 
                 // 3. Clear persistence (background)
@@ -201,11 +220,13 @@ object LogoutService {
                 Log.d(TAG, "✅ Logout completed successfully")
 
                 onLogoutCallback?.invoke()
+                onComplete?.invoke()
                 
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Error during logout", e)
                 // Still call callback even on error
                 onLogoutCallback?.invoke()
+                onComplete?.invoke()
             }
         }
     }

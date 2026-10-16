@@ -120,7 +120,16 @@ data class ChatConfig(
     val onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null,
 
     // Structured event stream
-    val onChatEvent: ((ChatEvent) -> Unit)? = null
+    val onChatEvent: ((ChatEvent) -> Unit)? = null,
+
+    // Static UI captions (locale + string overrides)
+    val i18n: I18nConfig? = null,
+
+    // Account settings screen (language card, change password)
+    val settings: SettingsConfig? = null,
+
+    // Logout action in the account settings screen
+    val logout: LogoutConfig? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -185,6 +194,9 @@ data class ChatConfig(
         private var customComponents: CustomComponents? = null
         private var onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null
         private var onChatEvent: ((ChatEvent) -> Unit)? = null
+        private var i18n: I18nConfig? = null
+        private var settings: SettingsConfig? = null
+        private var logout: LogoutConfig? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -245,6 +257,9 @@ data class ChatConfig(
         fun customComponents(value: CustomComponents) = apply { this.customComponents = value }
         fun onBeforeSend(value: (OutgoingSendInput) -> SendDecision) = apply { this.onBeforeSend = value }
         fun onChatEvent(value: (ChatEvent) -> Unit) = apply { this.onChatEvent = value }
+        fun i18n(value: I18nConfig) = apply { this.i18n = value }
+        fun settings(value: SettingsConfig) = apply { this.settings = value }
+        fun logout(value: LogoutConfig) = apply { this.logout = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -305,7 +320,10 @@ data class ChatConfig(
             eventHandlers = eventHandlers,
             customComponents = customComponents,
             onBeforeSend = onBeforeSend,
-            onChatEvent = onChatEvent
+            onChatEvent = onChatEvent,
+            i18n = i18n,
+            settings = settings,
+            logout = logout
         )
     }
 

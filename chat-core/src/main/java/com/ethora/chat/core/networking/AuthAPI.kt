@@ -95,7 +95,9 @@ data class UserResponse(
     val updatedAt: String? = null,
     val authMethod: String? = null,
     val description: String? = null,
-    val defaultWallet: WalletResponse? = null
+    val defaultWallet: WalletResponse? = null,
+    val appLanguage: String? = null,
+    val chatLanguage: String? = null
 ) {
     fun toUser(): User {
         return User(
@@ -118,7 +120,9 @@ data class UserResponse(
             updatedAt = updatedAt,
             authMethod = authMethod,
             description = description,
-            walletAddress = defaultWallet?.walletAddress
+            walletAddress = defaultWallet?.walletAddress,
+            appLanguage = appLanguage,
+            chatLanguage = chatLanguage
         )
     }
 }

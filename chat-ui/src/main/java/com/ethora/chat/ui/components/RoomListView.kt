@@ -8,8 +8,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -27,18 +30,43 @@ import com.ethora.chat.core.models.RoomListItemProps
 import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.MessageStore
 import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.ui.i18n.rememberChatTranslator
 import java.text.SimpleDateFormat
 import java.util.*
 
 /**
  * Room list view with search and create chat functionality
  */
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Room list with the account settings screen as an in-place page. The header's settings action
+ * opens it, unless the host took over the menu with `ChatConfig.headerMenu`.
+ */
 @Composable
 fun RoomListView(
     onRoomSelected: (Room) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showAccountSettings by remember { mutableStateOf(false) }
+    if (showAccountSettings) {
+        BackHandler { showAccountSettings = false }
+        AccountSettingsScreen(onBack = { showAccountSettings = false }, modifier = modifier)
+    } else {
+        RoomListContent(
+            onRoomSelected = onRoomSelected,
+            onOpenAccountSettings = { showAccountSettings = true },
+            modifier = modifier
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RoomListContent(
+    onRoomSelected: (Room) -> Unit,
+    onOpenAccountSettings: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val t = rememberChatTranslator()
     val viewModel = remember { RoomListViewModel() }
     val rooms by viewModel.rooms.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
@@ -165,7 +193,7 @@ fun RoomListView(
             TopAppBar(
                 title = { 
                     Text(
-                        "Chats",
+                        t("tabs.chats"),
                         style = MaterialTheme.typography.titleLarge.copy(
                             fontWeight = FontWeight.Bold
                         )
@@ -178,8 +206,17 @@ fun RoomListView(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Add,
-                            contentDescription = "Create new chat"
+                            contentDescription = t("action.newChat")
                         )
+                    }
+                    // Host-owned menu (ChatConfig.headerMenu) replaces the built-in settings entry.
+                    val headerMenu = config?.headerMenu
+                    IconButton(onClick = { if (headerMenu != null) headerMenu() else onOpenAccountSettings() }) {
+                        if (headerMenu != null) {
+                            Icon(imageVector = Icons.Default.MoreVert, contentDescription = t("header.menu"))
+                        } else {
+                            Icon(imageVector = Icons.Default.Settings, contentDescription = t("settings.menu.title"))
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -226,13 +263,13 @@ fun RoomListView(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = if (searchText.text.isNotBlank()) "No chats found" else "No chats yet",
+                            text = if (searchText.text.isNotBlank()) t("rooms.noResults") else t("rooms.empty"),
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         if (searchText.text.isNotBlank()) {
                             TextButton(onClick = { searchText = TextFieldValue("") }) {
-                                Text("Clear search")
+                                Text(t("search.clear"))
                             }
                         }
                     }
@@ -294,6 +331,7 @@ private fun SearchBar(
     onSearchTextChange: (TextFieldValue) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val t = rememberChatTranslator()
     OutlinedTextField(
         value = searchText,
         onValueChange = onSearchTextChange,
@@ -301,13 +339,13 @@ private fun SearchBar(
         leadingIcon = {
             Icon(
                 imageVector = Icons.Default.Search,
-                contentDescription = "Search",
+                contentDescription = t("search.placeholder"),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
             )
         },
         placeholder = { 
             Text(
-                "Search chats...",
+                t("search.placeholder"),
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             ) 
         },

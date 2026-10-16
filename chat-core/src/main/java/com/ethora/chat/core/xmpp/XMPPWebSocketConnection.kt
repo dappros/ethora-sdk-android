@@ -961,7 +961,9 @@ class XMPPWebSocketConnection(
                 originalName = originalName,
                 size = size,
                 waveForm = waveForm,
-                archiveId = archiveId?.takeIf { it.isNotBlank() }
+                archiveId = archiveId?.takeIf { it.isNotBlank() },
+                translations = MessageTranslationXml.parseTranslations(xml)?.takeIf { it.isNotEmpty() },
+                langSource = MessageTranslationXml.parseSource(xml)
             )
             
             // Add to MessageStore with pending reconciliation
@@ -1274,7 +1276,8 @@ class XMPPWebSocketConnection(
         isReply: Boolean = false,
         showInChannel: Boolean = false,
         mainMessage: String? = null,
-        customId: String? = null
+        customId: String? = null,
+        translateSource: String? = null
     ): String? {
         if (!isAuthenticated) {
             Log.e(TAG, "Cannot send message: not authenticated")
@@ -1339,7 +1342,12 @@ class XMPPWebSocketConnection(
         // bookkeeping.
         val originIdElement = """<origin-id xmlns="urn:xmpp:sid:0" id="$messageId"/>"""
 
-        val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$originIdElement$dataElement<body>$escapedBody</body></message>"""
+        // Web sendTextMessageWithTranslateTag: `<translate source>` declares the text's language so
+        // each reader's server can translate it. Only when the reader has translation sending on.
+        val translateElement = translateSource?.takeIf { it.isNotBlank() }
+            ?.let { MessageTranslationXml.translateElement(it) }
+            ?: ""
+        val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$originIdElement$dataElement<body>$escapedBody</body>$translateElement</message>"""
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMessage() to $fixedRoomJid")
         // Surface OkHttp queue rejection (the silent-drop root cause behind
         // "spam 15 messages, 2 don't go"). Three attempts with tiny exp.

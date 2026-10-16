@@ -314,7 +314,9 @@ class ChatRoomViewModel(
                 walletAddress = currentUser.walletAddress,
                 isReply = finalParentMessageId != null,
                 mainMessage = finalParentMessageId,
-                customId = messageId
+                customId = messageId,
+                translateSource = com.ethora.chat.core.store.ReaderLanguageStore
+                    .outgoingTranslateSource(com.ethora.chat.core.store.ChatStore.getConfig())
             )
 
             if (sentMessageId != null) {

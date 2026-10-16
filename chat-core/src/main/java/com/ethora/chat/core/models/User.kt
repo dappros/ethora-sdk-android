@@ -29,7 +29,11 @@ data class User(
     val isAssetsOpen: Boolean? = null,
     val isAgreeWithTerms: Boolean? = null,
     val isSuperAdmin: Boolean? = null,
-    val appId: String? = null
+    val appId: String? = null,
+    /** Profile `appLanguage`: language of the SDK's captions (BCP-47). */
+    val appLanguage: String? = null,
+    /** Profile `chatLanguage`: language incoming messages are translated into (BCP-47). */
+    val chatLanguage: String? = null
 ) {
     val fullName: String
         get() = when {

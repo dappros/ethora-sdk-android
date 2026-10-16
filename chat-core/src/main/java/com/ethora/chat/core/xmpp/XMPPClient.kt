@@ -541,7 +541,8 @@ class XMPPClient(
         isReply: Boolean = false,
         showInChannel: Boolean = false,
         mainMessage: String? = null,
-        customId: String? = null
+        customId: String? = null,
+        translateSource: String? = null
     ): String? {
         return try {
             onCriticalSend()
@@ -570,7 +571,8 @@ class XMPPClient(
                         isReply,
                         showInChannel,
                         mainMessage,
-                        customId
+                        customId,
+                        translateSource
                     )
                     if (!sentId.isNullOrBlank()) {
                         sentMessageAtMs[sentId] = sendStartedAt
@@ -1144,7 +1146,9 @@ class XMPPClient(
                 originalName = originalName,
                 size = size,
                 waveForm = waveForm,
-                archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId
+                archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId,
+                translations = MessageTranslationXml.parseTranslations(messageXml)?.takeIf { it.isNotEmpty() },
+                langSource = MessageTranslationXml.parseSource(messageXml)
             )
             
             messages.add(message)

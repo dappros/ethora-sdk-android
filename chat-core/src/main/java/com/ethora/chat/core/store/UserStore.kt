@@ -116,6 +116,12 @@ object UserStore {
     private val _refreshToken = MutableStateFlow<String?>(null)
     val refreshToken: StateFlow<String?> = _refreshToken.asStateFlow()
 
+    /** Session start: the profile's languages win when the Language card is enabled (web: profile is the truth). */
+    private fun applyProfileLanguages(user: User?) {
+        val languagesEnabled = ChatStore.getConfig()?.settings?.languages?.enabled == true
+        ReaderLanguageStore.applyProfile(user?.appLanguage, user?.chatLanguage, languagesEnabled)
+    }
+
     /**
      * Set current user
      */
@@ -123,6 +129,7 @@ object UserStore {
         _currentUser.value = user
         _token.value = user?.token
         _refreshToken.value = user?.refreshToken
+        applyProfileLanguages(user)
         // Persist user (background)
         persistUser()
         persistTokens()
@@ -140,6 +147,7 @@ object UserStore {
         _currentUser.value = user.copy(token = token, refreshToken = refreshToken)
         _token.value = token
         _refreshToken.value = refreshToken
+        applyProfileLanguages(user)
         // Persist user and tokens (background)
         persistUser()
         persistTokens()
