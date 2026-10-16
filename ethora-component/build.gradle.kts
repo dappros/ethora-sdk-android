@@ -164,6 +164,8 @@ dependencies {
     implementation(libs.coil.network.okhttp)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
+    // 1:1 audio and video calls (LiveKit native SDK, see ui/call/).
+    implementation(libs.livekit.android)
 
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
