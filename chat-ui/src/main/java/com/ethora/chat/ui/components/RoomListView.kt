@@ -26,7 +26,13 @@ import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.RoomListItemProps
 import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.MessageStore
+import com.ethora.chat.core.store.JumpRequestStore
+import com.ethora.chat.core.store.PendingJumpPreview
 import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.core.store.UserStore
+import com.ethora.chat.core.config.isMessageSearchEnabled
+import com.ethora.chat.core.search.MESSAGE_SEARCH_MIN_QUERY_LENGTH
+import androidx.compose.runtime.rememberCoroutineScope
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -48,6 +54,23 @@ fun RoomListView(
     val messagesByRoom by MessageStore.messages.collectAsState()
     
     var searchText by remember { mutableStateOf(TextFieldValue("")) }
+
+    // Message hits under the chat matches (web: chat-list search). Opt-in via enableMessageSearch + appId.
+    val messageSearchEnabled = isMessageSearchEnabled(config)
+    val messageSearchScope = rememberCoroutineScope()
+    val messageSearch = remember { MessageSearchController(messageSearchScope) }
+    val messageState by messageSearch.state.collectAsState()
+    val messageSenderNames = rememberSenderNames(rooms)
+    val showMessageHits = messageSearchEnabled && searchText.text.trim().length >= MESSAGE_SEARCH_MIN_QUERY_LENGTH
+    LaunchedEffect(searchText.text, messageSearchEnabled) {
+        messageSearch.update(
+            query = if (messageSearchEnabled) searchText.text else "",
+            chatId = null,
+            fromUserId = null,
+            since = null,
+            until = null
+        )
+    }
     var showCreateChatDialog by remember { mutableStateOf(false) }
     
     // Track selected room for active state
@@ -216,7 +239,7 @@ fun RoomListView(
                 ) {
                     CircularProgressIndicator()
                 }
-            } else if (filteredRooms.isEmpty()) {
+            } else if (filteredRooms.isEmpty() && !(showMessageHits && messageState.status != MessageSearchController.Status.IDLE)) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = androidx.compose.ui.Alignment.Center
@@ -245,6 +268,40 @@ fun RoomListView(
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    if (showMessageHits) {
+                        item(key = "message-hits-header") {
+                            Text(
+                                text = "Messages",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 8.dp, top = 8.dp, bottom = 4.dp)
+                            )
+                        }
+                        searchHitItems(
+                            query = searchText.text.trim(),
+                            state = messageState,
+                            controller = messageSearch,
+                            rooms = rooms,
+                            names = messageSenderNames,
+                            myXmppUsername = UserStore.currentUser.value?.xmppUsername,
+                            showRoomHeadline = true,
+                            canOpen = { hit -> messageHitRoom(hit, rooms) != null },
+                            onOpen = { hit ->
+                                val target = messageHitRoom(hit, rooms)
+                                if (target != null) {
+                                    JumpRequestStore.request(
+                                        roomJid = target.jid,
+                                        ids = listOf(hit.stanzaId, hit.messageId),
+                                        createdAt = hit.createdAt,
+                                        body = hit.body,
+                                        preview = PendingJumpPreview(target.jid, "", hit.body, hit.createdAt)
+                                    )
+                                    RoomStore.setCurrentRoom(target)
+                                    onRoomSelected(target)
+                                }
+                            }
+                        )
+                    }
                     items(filteredRooms) { room ->
                         val onClick = {
                             RoomStore.setCurrentRoom(room)

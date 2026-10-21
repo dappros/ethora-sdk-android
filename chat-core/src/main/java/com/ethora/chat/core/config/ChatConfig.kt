@@ -143,7 +143,10 @@ data class ChatConfig(
     // the "Reply" menu item, threads still open from the quote or the reply count.
     val disableReactions: Boolean? = null,
     val reactions: ReactionsConfig? = null,
-    val disableReplies: Boolean? = null
+    val disableReplies: Boolean? = null,
+    // Message search (web enableMessageSearch / disableMessageSearch). Needs appId too.
+    val enableMessageSearch: Boolean? = null,
+    val disableMessageSearch: Boolean? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -221,6 +224,8 @@ data class ChatConfig(
         private var disableReactions: Boolean? = null
         private var reactions: ReactionsConfig? = null
         private var disableReplies: Boolean? = null
+        private var enableMessageSearch: Boolean? = null
+        private var disableMessageSearch: Boolean? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -287,6 +292,8 @@ data class ChatConfig(
         fun disableReactions(value: Boolean) = apply { this.disableReactions = value }
         fun reactions(value: ReactionsConfig) = apply { this.reactions = value }
         fun disableReplies(value: Boolean) = apply { this.disableReplies = value }
+        fun enableMessageSearch(value: Boolean) = apply { this.enableMessageSearch = value }
+        fun disableMessageSearch(value: Boolean) = apply { this.disableMessageSearch = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -356,7 +363,9 @@ data class ChatConfig(
             disablePublicChatsDirectory = disablePublicChatsDirectory,
             disableReactions = disableReactions,
             reactions = reactions,
-            disableReplies = disableReplies
+            disableReplies = disableReplies,
+            enableMessageSearch = enableMessageSearch,
+            disableMessageSearch = disableMessageSearch
         )
     }
 

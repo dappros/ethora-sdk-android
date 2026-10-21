@@ -934,6 +934,8 @@ fun Chat(
                     room = selectedRoom!!,
                     xmppClient = xmppClient,
                     onBack = closeSelectedRoom,
+                    // A search hit in another chat opens that chat (message search).
+                    onOpenRoom = { room -> selectedRoom = room },
                     modifier = modifier
                 )
             } else {

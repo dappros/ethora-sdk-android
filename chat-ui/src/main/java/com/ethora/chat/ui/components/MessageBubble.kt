@@ -68,6 +68,8 @@ fun MessageBubble(
     onLongPress: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onFailedClick: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onAvatarClick: ((User) -> Unit)? = null,
+    /** Tapping the quote of a reply: the parent message (web: jump to the replied message). */
+    onQuoteClick: ((Message) -> Unit)? = null,
     pendingMediaStatus: PendingMediaSendStatus? = null,
     sendFailed: Boolean = false,
     /** Reaction chips under the bubble. False hides the row (web `disableReactions`). */
@@ -304,7 +306,8 @@ fun MessageBubble(
                                 QuotedMessage(
                                     message = parent,
                                     isUser = isUser,
-                                    onClick = onOpenThread,
+                                    // A quote jumps to the quoted message; without a jump handler it opens the thread.
+                                    onClick = onQuoteClick?.let { open -> { open(parent) } } ?: onOpenThread,
                                     modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 8.dp)
                                 )
                             }
