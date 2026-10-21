@@ -120,6 +120,12 @@ object UserStore {
     /** Viewer's fileToken for secure media URLs. Observed by media composables. */
     val fileToken: StateFlow<String?> = _fileToken.asStateFlow()
 
+    /** Session start: the profile's languages win when the Language card is enabled (web: profile is the truth). */
+    private fun applyProfileLanguages(user: User?) {
+        val languagesEnabled = ChatStore.getConfig()?.settings?.languages?.enabled == true
+        ReaderLanguageStore.applyProfile(user?.appLanguage, user?.chatLanguage, languagesEnabled)
+    }
+
     /**
      * Set current user
      */
@@ -128,6 +134,7 @@ object UserStore {
         _token.value = user?.token
         _refreshToken.value = user?.refreshToken
         _fileToken.value = user?.fileToken
+        applyProfileLanguages(user)
         // Persist user (background)
         persistUser()
         persistTokens()
@@ -146,6 +153,7 @@ object UserStore {
         _token.value = token
         _refreshToken.value = refreshToken
         _fileToken.value = user.fileToken
+        applyProfileLanguages(user)
         // Persist user and tokens (background)
         persistUser()
         persistTokens()

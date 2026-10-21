@@ -739,7 +739,8 @@ fun ChatRoomView(
                     onInfoClick = { showChatInfo = true },
                     showInfoButton = !hideChatInfoButton,
                     showBackButton = showBackButton,
-                    onSearchClick = if (searchEnabled) ({ showSearch = true }) else null
+                    onSearchClick = if (searchEnabled) ({ showSearch = true }) else null,
+                    showLanguageButton = com.ethora.chat.core.i18n.shouldShowLanguageSelector(config?.translates)
                 )
             }
         
@@ -1543,8 +1544,10 @@ private fun ChatRoomHeader(
     onInfoClick: () -> Unit,
     showInfoButton: Boolean,
     showBackButton: Boolean,
-    onSearchClick: (() -> Unit)? = null
+    onSearchClick: (() -> Unit)? = null,
+    showLanguageButton: Boolean
 ) {
+    val t = com.ethora.chat.ui.i18n.rememberChatTranslator()
     val headerColor = com.ethora.chat.ui.styling.LocalChatThemeOverrides.current.headerBackground
         ?: MaterialTheme.colorScheme.surface
     Surface(
@@ -1563,7 +1566,7 @@ private fun ChatRoomHeader(
                 IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
                     Icon(
                         imageVector = Icons.Default.ArrowBack,
-                        contentDescription = "Back"
+                        contentDescription = t("header.action.back")
                     )
                 }
             } else {
@@ -1588,11 +1591,15 @@ private fun ChatRoomHeader(
                 }
             }
 
+            if (showLanguageButton) {
+                LanguageSelectorButton()
+            }
+
             if (showInfoButton) {
                 IconButton(onClick = onInfoClick, modifier = Modifier.size(40.dp)) {
                     Icon(
                         imageVector = Icons.Default.MoreVert,
-                        contentDescription = "Chat info"
+                        contentDescription = t("header.chatMenu")
                     )
                 }
             }

@@ -368,14 +368,21 @@ fun MessageBubble(
                                 }
                             } else {
                                 // Show text message with formatting
-                                FormattedMessageText(
-                                    text = message.body,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                                    textColor = if (isUser) outgoingTextColor else incomingTextColor,
-                                    lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4,
-                                    onLongPress = { triggerLongPress(null) },
-                                    onPressChange = { isPressed = it }
-                                )
+                                MessageTranslationBlock(
+                                    message = message,
+                                    isUser = isUser,
+                                    accentColor = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                                ) { text ->
+                                    FormattedMessageText(
+                                        text = text,
+                                        modifier = Modifier,
+                                        textColor = if (isUser) outgoingTextColor else incomingTextColor,
+                                        lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4,
+                                        onLongPress = { triggerLongPress(null) },
+                                        onPressChange = { isPressed = it }
+                                    )
+                                }
                                 val firstUrl = remember(message.body) { extractFirstUrl(message.body) }
                                 if (!firstUrl.isNullOrBlank()) {
                                     UrlPreviewCard(

@@ -386,7 +386,9 @@ class ChatRoomViewModel(
                 isReply = finalParentMessageId != null,
                 showInChannel = alsoSendToRoom && finalParentMessageId != null,
                 mainMessage = mainMessage,
-                customId = messageId
+                customId = messageId,
+                translateSource = com.ethora.chat.core.store.ReaderLanguageStore
+                    .outgoingTranslateSource(com.ethora.chat.core.store.ChatStore.getConfig())
             )
 
             if (sentMessageId != null) {

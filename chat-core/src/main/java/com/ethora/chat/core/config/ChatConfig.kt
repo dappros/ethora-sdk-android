@@ -148,7 +148,15 @@ data class ChatConfig(
     val enableMessageSearch: Boolean? = null,
     val disableMessageSearch: Boolean? = null,
     // Composer limits for multi-file media messages (web `attachments`)
-    val attachments: AttachmentsConfig = AttachmentsConfig()
+    val attachments: AttachmentsConfig = AttachmentsConfig(),
+    // Static UI captions (locale + string overrides)
+    val i18n: I18nConfig? = null,
+
+    // Account settings screen (language card, change password)
+    val settings: SettingsConfig? = null,
+
+    // Logout action in the account settings screen
+    val logout: LogoutConfig? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -229,6 +237,9 @@ data class ChatConfig(
         private var disableReplies: Boolean? = null
         private var enableMessageSearch: Boolean? = null
         private var disableMessageSearch: Boolean? = null
+        private var i18n: I18nConfig? = null
+        private var settings: SettingsConfig? = null
+        private var logout: LogoutConfig? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -298,6 +309,9 @@ data class ChatConfig(
         fun enableMessageSearch(value: Boolean) = apply { this.enableMessageSearch = value }
         fun disableMessageSearch(value: Boolean) = apply { this.disableMessageSearch = value }
         fun attachments(value: AttachmentsConfig) = apply { this.attachments = value }
+        fun i18n(value: I18nConfig) = apply { this.i18n = value }
+        fun settings(value: SettingsConfig) = apply { this.settings = value }
+        fun logout(value: LogoutConfig) = apply { this.logout = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -370,7 +384,10 @@ data class ChatConfig(
             disableReplies = disableReplies,
             enableMessageSearch = enableMessageSearch,
             disableMessageSearch = disableMessageSearch,
-            attachments = attachments
+            attachments = attachments,
+            i18n = i18n,
+            settings = settings,
+            logout = logout
         )
     }
 
