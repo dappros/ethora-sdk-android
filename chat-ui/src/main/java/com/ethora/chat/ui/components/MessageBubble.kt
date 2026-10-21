@@ -48,7 +48,9 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.ui.graphics.Color
 import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.models.MessageAttachments
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.models.withAttachment
 import com.ethora.chat.core.store.PendingMediaSendStatus
 import com.ethora.chat.ui.styling.LocalChatThemeOverrides
 import java.util.regex.Pattern
@@ -65,6 +67,12 @@ fun MessageBubble(
     showUsername: Boolean = true,
     showTimestamp: Boolean = true,
     onMediaClick: ((Message) -> Unit)? = null,
+    /**
+     * Tap on one file of a message: (message, index in message.attachments).
+     * Takes precedence over [onMediaClick] for multi-file messages, so the viewer can
+     * swipe across the album.
+     */
+    onAttachmentClick: ((Message, Int) -> Unit)? = null,
     onLongPress: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onFailedClick: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onAvatarClick: ((User) -> Unit)? = null,
@@ -313,15 +321,51 @@ fun MessageBubble(
                             }
 
                             if (message.isMediafile == "true") {
-                                // Show media component (only if not deleted)
-                                MediaMessage(
-                                    message = message,
-                                    isUser = isUser,
-                                    onMediaClick = { msg -> onMediaClick?.invoke(msg) },
+                                // Media: an album for two or more visual files, file rows for the rest,
+                                // then the caption typed with them (web MediaCaption).
+                                val attachments = remember(message) { MessageAttachments.forMessage(message) }
+                                val partition = remember(attachments) { MessageAttachments.partition(attachments) }
+                                Column(
                                     modifier = Modifier
                                         .padding(horizontal = 8.dp, vertical = 8.dp)
                                         .testTag(MessageBubbleTestTags.MEDIA_CONTENT)
-                                )
+                                ) {
+                                    if (partition.tiles.isNotEmpty()) {
+                                        AlbumGrid(
+                                            tiles = partition.tiles,
+                                            onTileClick = { index ->
+                                                if (onAttachmentClick != null) {
+                                                    onAttachmentClick.invoke(message, index)
+                                                } else {
+                                                    onMediaClick?.invoke(message.withAttachment(attachments[index]))
+                                                }
+                                            }
+                                        )
+                                        if (partition.rows.isNotEmpty()) Spacer(modifier = Modifier.height(4.dp))
+                                    }
+                                    partition.rows.forEachIndexed { rowPosition, row ->
+                                        if (rowPosition > 0) Spacer(modifier = Modifier.height(4.dp))
+                                        MediaMessage(
+                                            message = message.withAttachment(row.attachment),
+                                            isUser = isUser,
+                                            onMediaClick = { msg ->
+                                                if (onAttachmentClick != null) {
+                                                    onAttachmentClick.invoke(message, row.index)
+                                                } else {
+                                                    onMediaClick?.invoke(msg)
+                                                }
+                                            }
+                                        )
+                                    }
+                                    message.caption?.takeIf { it.isNotBlank() }?.let { caption ->
+                                        Text(
+                                            text = caption,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = if (isUser) outgoingTextColor else incomingTextColor,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                }
                             } else {
                                 // Show text message with formatting
                                 FormattedMessageText(

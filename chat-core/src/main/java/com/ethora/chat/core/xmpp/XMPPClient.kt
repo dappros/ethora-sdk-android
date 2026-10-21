@@ -4,6 +4,7 @@ import kotlin.jvm.Volatile
 import android.util.Log
 import com.ethora.chat.core.config.XMPPSettings
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.models.MessageAttachments
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.networking.XmppCredentialRecovery
 import com.ethora.chat.core.store.RoomStore
@@ -1171,6 +1172,8 @@ class XMPPClient(
             val isSystemMessage = extractAttribute(dataXml, "isSystemMessage")
             // Reply and thread fields (see replyFieldsFrom in XmppXmlUtils.kt).
             val replyFields = replyFieldsFrom(dataXml)
+            val caption = extractAttribute(dataXml, "caption")?.takeIf { it.isNotBlank() }
+            val attachments = MessageAttachments.parse(extractAttribute(dataXml, "attachments")).takeIf { it.isNotEmpty() }
 
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
@@ -1239,6 +1242,8 @@ class XMPPClient(
                 originalName = originalName,
                 size = size,
                 waveForm = waveForm,
+                caption = caption,
+                attachments = attachments,
                 archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId,
                 isReply = replyFields.isReply,
                 showInChannel = replyFields.showInChannel,

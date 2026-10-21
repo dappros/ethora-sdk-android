@@ -116,6 +116,10 @@ object UserStore {
     private val _refreshToken = MutableStateFlow<String?>(null)
     val refreshToken: StateFlow<String?> = _refreshToken.asStateFlow()
 
+    private val _fileToken = MutableStateFlow<String?>(null)
+    /** Viewer's fileToken for secure media URLs. Observed by media composables. */
+    val fileToken: StateFlow<String?> = _fileToken.asStateFlow()
+
     /**
      * Set current user
      */
@@ -123,6 +127,7 @@ object UserStore {
         _currentUser.value = user
         _token.value = user?.token
         _refreshToken.value = user?.refreshToken
+        _fileToken.value = user?.fileToken
         // Persist user (background)
         persistUser()
         persistTokens()
@@ -140,6 +145,7 @@ object UserStore {
         _currentUser.value = user.copy(token = token, refreshToken = refreshToken)
         _token.value = token
         _refreshToken.value = refreshToken
+        _fileToken.value = user.fileToken
         // Persist user and tokens (background)
         persistUser()
         persistTokens()
@@ -152,7 +158,8 @@ object UserStore {
     fun setUser(loginResponse: com.ethora.chat.core.networking.LoginResponse) {
         val user = loginResponse.user.toUser().copy(
             token = loginResponse.token,
-            refreshToken = loginResponse.refreshToken
+            refreshToken = loginResponse.refreshToken,
+            fileToken = loginResponse.fileToken
         )
         setUserFromLoginResponse(user, loginResponse.token, loginResponse.refreshToken)
     }
@@ -160,13 +167,15 @@ object UserStore {
     /**
      * Update tokens
      */
-    fun updateTokens(token: String, refreshToken: String?) {
+    fun updateTokens(token: String, refreshToken: String?, fileToken: String? = null) {
         _token.value = token
         refreshToken?.let { _refreshToken.value = it }
+        fileToken?.let { _fileToken.value = it }
         // Keep current user in sync so persisted user object remains valid across restarts.
         _currentUser.value = _currentUser.value?.copy(
             token = token,
-            refreshToken = refreshToken ?: _currentUser.value?.refreshToken
+            refreshToken = refreshToken ?: _currentUser.value?.refreshToken,
+            fileToken = fileToken ?: _currentUser.value?.fileToken
         )
         // Persist tokens (background)
         persistTokens()
@@ -213,6 +222,7 @@ object UserStore {
         _currentUser.value = null
         _token.value = null
         _refreshToken.value = null
+        _fileToken.value = null
         _selectedUser.value = null
         // Persist cleared state (background)
         persistenceScope.launch {

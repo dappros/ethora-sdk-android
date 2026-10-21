@@ -2,6 +2,7 @@ package com.ethora.chat.core.persistence
 
 import androidx.room.*
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.models.MessageAttachments
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -39,7 +40,11 @@ data class MessageEntity(
     val size: String? = null,
     val xmppId: String? = null,
     val xmppFrom: String? = null,
-    val waveForm: String? = null
+    val waveForm: String? = null,
+    /** JSON array of the message's files (web `attachments`), null for single-file messages. */
+    val attachments: String? = null,
+    /** Caption typed with the files. */
+    val caption: String? = null
 ) {
     fun toMessage(): Message {
         return Message(
@@ -74,7 +79,9 @@ data class MessageEntity(
             size = size,
             xmppId = xmppId,
             xmppFrom = xmppFrom,
-            waveForm = waveForm
+            waveForm = waveForm,
+            attachments = attachments?.let { MessageAttachments.parse(it) }?.takeIf { it.isNotEmpty() },
+            caption = caption
         )
     }
 
@@ -110,7 +117,9 @@ data class MessageEntity(
                 size = message.size,
                 xmppId = message.xmppId,
                 xmppFrom = message.xmppFrom,
-                waveForm = message.waveForm
+                waveForm = message.waveForm,
+                attachments = message.attachments?.takeIf { it.isNotEmpty() }?.let { MessageAttachments.serialize(it) },
+                caption = message.caption
             )
         }
     }
@@ -143,11 +152,19 @@ interface MessageDao {
 /**
  * Chat database
  */
-@Database(entities = [MessageEntity::class], version = 1, exportSchema = false)
+@Database(entities = [MessageEntity::class], version = 2, exportSchema = false)
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
 
     companion object {
+        /** v1 -> v2: multi-attach `attachments` JSON and the `caption` text. Existing rows keep null. */
+        val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE messages ADD COLUMN attachments TEXT")
+                db.execSQL("ALTER TABLE messages ADD COLUMN caption TEXT")
+            }
+        }
+
         @Volatile
         private var INSTANCE: ChatDatabase? = null
 
@@ -157,7 +174,7 @@ abstract class ChatDatabase : RoomDatabase() {
                     context.applicationContext,
                     ChatDatabase::class.java,
                     "chat_database"
-                ).build()
+                ).addMigrations(MIGRATION_1_2).build()
                 INSTANCE = instance
                 instance
             }

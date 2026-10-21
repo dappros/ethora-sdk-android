@@ -159,3 +159,30 @@ internal fun replyFieldsFrom(dataXml: String): ReplyFields = ReplyFields(
     showInChannel = extractAttribute(dataXml, "showInChannel")?.takeIf { it == "true" || it == "false" },
     mainMessage = extractAttribute(dataXml, "mainMessage")?.takeIf { it.isNotBlank() && it != "\"\"" }
 )
+/**
+ * The media stanza (web sendMediaMessage.xmpp.ts). Every entry of [mediaData] becomes an
+ * attribute of `<data>`, so `attachments` (JSON array for multi-file messages) and
+ * `caption` travel as plain attributes, and a client that predates them keeps reading the
+ * flat fields, which describe attachment #0.
+ *
+ * XEP-0359 origin-id mirrors [safeId] so echoes that come back through MUC-SUB rewrites can
+ * be matched to the optimistic row without the heuristic content match.
+ */
+internal fun buildMediaMessageXml(
+    fixedRoomJid: String,
+    fromAttribute: String,
+    mediaData: Map<String, Any>,
+    safeId: String
+): String {
+    val dataAttributes = mediaData.map { (key, value) ->
+        val escapedValue = value.toString()
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&apos;")
+        "$key=\"$escapedValue\""
+    }.joinToString(" ")
+    val originIdElement = """<origin-id xmlns="urn:xmpp:sid:0" id="$safeId"/>"""
+    return """<message id="$safeId" type="groupchat"$fromAttribute to="$fixedRoomJid">$originIdElement<body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
+}

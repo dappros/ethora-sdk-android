@@ -52,7 +52,11 @@ data class Message(
      *  directly, so this field is only needed for the in-session window. */
     val archiveId: String? = null,
     /** True once an edit (live `<replace>` or a local edit) changed the body. Web `isEdited`. */
-    val isEdited: Boolean? = null
+    val isEdited: Boolean? = null,
+    /** Caption typed with the files (web `caption` attribute on <data>). Null when none. */
+    val caption: String? = null,
+    /** All files of a multi-attach media message (web `attachments`). Null for single-file messages. */
+    val attachments: List<MessageAttachment>? = null
 )
 
 /**

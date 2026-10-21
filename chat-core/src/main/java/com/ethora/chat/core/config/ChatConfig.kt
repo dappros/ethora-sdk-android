@@ -146,7 +146,9 @@ data class ChatConfig(
     val disableReplies: Boolean? = null,
     // Message search (web enableMessageSearch / disableMessageSearch). Needs appId too.
     val enableMessageSearch: Boolean? = null,
-    val disableMessageSearch: Boolean? = null
+    val disableMessageSearch: Boolean? = null,
+    // Composer limits for multi-file media messages (web `attachments`)
+    val attachments: AttachmentsConfig = AttachmentsConfig()
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -154,6 +156,7 @@ data class ChatConfig(
     class Builder {
         private var disableHeader: Boolean? = null
         private var disableMedia: Boolean? = null
+        private var attachments: AttachmentsConfig = AttachmentsConfig()
         private var colors: ChatColors? = null
         private var typography: ChatTypographyConfig? = null
         private var forceDarkTheme: Boolean? = null
@@ -294,6 +297,7 @@ data class ChatConfig(
         fun disableReplies(value: Boolean) = apply { this.disableReplies = value }
         fun enableMessageSearch(value: Boolean) = apply { this.enableMessageSearch = value }
         fun disableMessageSearch(value: Boolean) = apply { this.disableMessageSearch = value }
+        fun attachments(value: AttachmentsConfig) = apply { this.attachments = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -365,7 +369,8 @@ data class ChatConfig(
             reactions = reactions,
             disableReplies = disableReplies,
             enableMessageSearch = enableMessageSearch,
-            disableMessageSearch = disableMessageSearch
+            disableMessageSearch = disableMessageSearch,
+            attachments = attachments
         )
     }
 
