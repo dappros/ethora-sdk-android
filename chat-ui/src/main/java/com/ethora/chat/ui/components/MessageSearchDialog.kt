@@ -55,7 +55,7 @@ import com.ethora.chat.core.search.MESSAGE_SEARCH_MIN_QUERY_LENGTH
 import com.ethora.chat.core.search.MESSAGE_SEARCH_PAGE_SIZE
 import com.ethora.chat.core.search.MessageSearchHit
 import com.ethora.chat.core.search.MessageSearchParams
-import com.ethora.chat.core.search.MessageSearchService
+import com.ethora.chat.core.networking.MessageSearchService
 import com.ethora.chat.core.search.SearchSender
 import com.ethora.chat.core.search.buildSnippet
 import com.ethora.chat.core.search.dayEndIso
@@ -498,7 +498,7 @@ fun MessageSearchDialog(
  * Status line, results and "Show more", as list items. Shared by the header
  * dialog and the chat list (where the hits sit under the chat matches).
  */
-fun LazyListScope.searchHitItems(
+internal fun LazyListScope.searchHitItems(
     query: String,
     state: MessageSearchController.State,
     controller: MessageSearchController,

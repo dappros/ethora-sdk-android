@@ -200,6 +200,17 @@ suspend fun loadNewerWindowPage(client: HistoryWindowClient, window: JumpWindow)
     return NewerWindowPage(page.messages, state.cursor, hasNewer = !state.exhausted)
 }
 
+/**
+ * Adds a freshly loaded [incoming] page to a window's [current] messages: messages
+ * already shown stay as they are, the rest join and the list stays ascending by time.
+ */
+fun mergeWindowMessages(current: List<Message>, incoming: List<Message>): List<Message> {
+    val seen = current.mapTo(HashSet()) { it.id }
+    val added = incoming.filter { seen.add(it.id) }
+    if (added.isEmpty()) return current
+    return (current + added).sortedBy { it.timestamp ?: it.date.time }
+}
+
 data class OlderWindowPage(val messages: List<Message>, val olderCursor: Long?, val hasOlder: Boolean)
 data class NewerWindowPage(val messages: List<Message>, val newerCursor: Long?, val hasNewer: Boolean)
 

@@ -18,8 +18,6 @@ data class User(
     val username: String? = null,
     val xmppPassword: String? = null,
     val xmppUsername: String? = null,
-    /** File upload token, refreshed together with [token] (web `fileToken`). */
-    val fileToken: String? = null,
     val langSource: String? = null,
     val homeScreen: String? = null,
     val registrationChannelType: String? = null,
