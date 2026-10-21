@@ -78,6 +78,9 @@ data class Room(
     val composing: Boolean? = null,
     val composingList: List<String>? = null,
     val lastViewedTimestamp: Long? = null,
+    /** XEP-0333 read marker per user: local part -> id of the newest message they displayed.
+     *  Mirrors web IRoom.lastDisplayedByUser. Session-only. */
+    val lastDisplayedByUser: Map<String, String>? = null,
     /**
      * Web parity (`@ethora/chat-component@26.3.20`, room reducer):
      *   `unreadBaselineTimestamp: i?.lastViewedTimestamp ?? n.unreadBaselineTimestamp

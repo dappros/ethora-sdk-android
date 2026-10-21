@@ -930,6 +930,23 @@ object MessageStore {
     }
     
     /**
+     * XEP-0184 delivery receipt from [fromXmppUsername] for [messageId].
+     * Matches web setReceivedReceipt. Session-only: receivedBy is not persisted.
+     */
+    fun applyReceivedReceipt(roomJid: String, messageId: String, fromXmppUsername: String, timestamp: Long) {
+        if (messageId.isBlank() || fromXmppUsername.isBlank()) return
+        val currentMessages = _messages.value.toMutableMap()
+        val roomMessages = currentMessages[roomJid]?.toMutableList() ?: return
+        val index = roomMessages.indexOfFirst { it.id == messageId || it.archiveId == messageId }
+        if (index < 0) return
+        val original = roomMessages[index]
+        val receipts = (original.receivedBy ?: emptyMap()) + (fromXmppUsername to timestamp)
+        roomMessages[index] = original.copy(receivedBy = receipts)
+        currentMessages[roomJid] = roomMessages
+        _messages.value = currentMessages
+    }
+
+    /**
      * One reactor's latest reaction on one target message. An empty [emoji] list
      * is a removal marker: it is kept so an older reaction replayed later cannot
      * bring the removed emoji back.

@@ -301,6 +301,17 @@ object RoomStore {
     }
 
     /**
+     * XEP-0333 read marker: [xmppUsername] has displayed up to [messageId] in [roomJid].
+     * Matches web setDisplayedMarker (room-level watermark, not per message).
+     */
+    fun applyDisplayedMarker(roomJid: String, xmppUsername: String, messageId: String) {
+        if (roomJid.isBlank() || xmppUsername.isBlank() || messageId.isBlank()) return
+        val room = getRoomByJid(roomJid) ?: return
+        val marks = (room.lastDisplayedByUser ?: emptyMap()) + (xmppUsername to messageId)
+        updateRoom(room.copy(lastDisplayedByUser = marks))
+    }
+
+    /**
      * Set composing state for a room (matches web: setComposing)
      * Tracks multiple users typing by adding/removing them from the composingList
      * Auto-clears typing indicators after 5 seconds if no update received
