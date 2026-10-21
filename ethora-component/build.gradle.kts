@@ -131,6 +131,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
     implementation(libs.gson)
+    implementation(libs.bouncycastle.bcprov)
 
     implementation("org.igniterealtime.smack:smack-core:4.4.7") {
         exclude(group = "xpp3", module = "xpp3")

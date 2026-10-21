@@ -159,6 +159,19 @@ internal fun replyFieldsFrom(dataXml: String): ReplyFields = ReplyFields(
     showInChannel = extractAttribute(dataXml, "showInChannel")?.takeIf { it == "true" || it == "false" },
     mainMessage = extractAttribute(dataXml, "mainMessage")?.takeIf { it.isNotBlank() && it != "\"\"" }
 )
+
+/** `key="value"` pairs of a media `<data>` element, XML-escaped. */
+internal fun mediaDataAttributes(mediaData: Map<String, Any>): String =
+    mediaData.map { (key, value) ->
+        val escapedValue = value.toString()
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&apos;")
+        "$key=\"$escapedValue\""
+    }.joinToString(" ")
+
 /**
  * The media stanza (web sendMediaMessage.xmpp.ts). Every entry of [mediaData] becomes an
  * attribute of `<data>`, so `attachments` (JSON array for multi-file messages) and
@@ -174,15 +187,7 @@ internal fun buildMediaMessageXml(
     mediaData: Map<String, Any>,
     safeId: String
 ): String {
-    val dataAttributes = mediaData.map { (key, value) ->
-        val escapedValue = value.toString()
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\"", "&quot;")
-            .replace("'", "&apos;")
-        "$key=\"$escapedValue\""
-    }.joinToString(" ")
+    val dataAttributes = mediaDataAttributes(mediaData)
     val originIdElement = """<origin-id xmlns="urn:xmpp:sid:0" id="$safeId"/>"""
     return """<message id="$safeId" type="groupchat"$fromAttribute to="$fixedRoomJid">$originIdElement<body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
 }

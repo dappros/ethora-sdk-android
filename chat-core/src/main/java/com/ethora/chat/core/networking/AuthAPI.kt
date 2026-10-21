@@ -51,7 +51,8 @@ interface AuthAPI {
     suspend fun uploadFile(
         @Header("Authorization") token: String,
         @Header("Accept") accept: String = "*/*",
-        @Part file: MultipartBody.Part
+        @Part file: MultipartBody.Part,
+        @Part("clientEncrypted") clientEncrypted: RequestBody?
     ): Response<JsonObject>
 
     /**
@@ -65,7 +66,8 @@ interface AuthAPI {
         @Header("Authorization") token: String,
         @Header("Accept") accept: String = "*/*",
         @Part file: MultipartBody.Part,
-        @Part("chatName") chatName: RequestBody
+        @Part("chatName") chatName: RequestBody,
+        @Part("clientEncrypted") clientEncrypted: RequestBody?
     ): Response<JsonObject>
 }
 
@@ -300,13 +302,16 @@ object AuthAPIHelper {
         mimeType: String,
         token: String,
         baseUrl: String = ChatStore.getEffectiveBaseUrl(),
-        chatName: String? = null
+        chatName: String? = null,
+        /** The file is ciphertext sealed by the caller (E2EE room): the backend stores it verbatim. */
+        clientEncrypted: Boolean = false
     ): FileUploadResult? {
+        val encryptedFlag: RequestBody? = if (clientEncrypted) "true".toRequestBody("text/plain".toMediaType()) else null
         if (!chatName.isNullOrBlank() && !secureUploadUnavailable) {
             val secureUrl = secureUploadUrl(baseUrl)
             val chatNameBody = chatName.toRequestBody("text/plain".toMediaType())
             when (val attempt = attemptUpload(file, mimeType, token, baseUrl) { api, authHeader, part ->
-                api.uploadFileSecure(secureUrl, authHeader, "*/*", part, chatNameBody)
+                api.uploadFileSecure(secureUrl, authHeader, "*/*", part, chatNameBody, encryptedFlag)
             }) {
                 is UploadAttempt.Done -> return attempt.result
                 is UploadAttempt.Failed -> return null
@@ -321,7 +326,7 @@ object AuthAPIHelper {
             }
         }
         return when (val attempt = attemptUpload(file, mimeType, token, baseUrl) { api, authHeader, part ->
-            api.uploadFile(authHeader, "*/*", part)
+            api.uploadFile(authHeader, "*/*", part, encryptedFlag)
         }) {
             is UploadAttempt.Done -> attempt.result
             else -> null

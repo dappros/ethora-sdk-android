@@ -56,7 +56,13 @@ data class Message(
     /** Caption typed with the files (web `caption` attribute on <data>). Null when none. */
     val caption: String? = null,
     /** All files of a multi-attach media message (web `attachments`). Null for single-file messages. */
-    val attachments: List<MessageAttachment>? = null
+    val attachments: List<MessageAttachment>? = null,
+    /** E2EE room, and this message did not arrive inside an OMEMO payload (sent in clear). */
+    val unencrypted: Boolean? = null,
+    /** Per-file keys of a sealed attachment, from the decrypted OMEMO body. */
+    val e2eeKeys: List<String>? = null,
+    /** Set by the sender when this message's attachments are sealed. */
+    val clientEncrypted: String? = null
 )
 
 /**

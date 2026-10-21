@@ -158,7 +158,9 @@ data class ChatConfig(
     // Logout action in the account settings screen
     val logout: LogoutConfig? = null,
     // 1:1 audio and video calls (LiveKit). Off unless enabled.
-    val videoCalls: VideoCallsConfig? = null
+    val videoCalls: VideoCallsConfig? = null,
+    // End-to-end encryption (OMEMO 2). Off by default.
+    val e2ee: E2eeConfig? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -243,6 +245,7 @@ data class ChatConfig(
         private var settings: SettingsConfig? = null
         private var logout: LogoutConfig? = null
         private var videoCalls: VideoCallsConfig? = null
+        private var e2ee: E2eeConfig? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -316,6 +319,7 @@ data class ChatConfig(
         fun settings(value: SettingsConfig) = apply { this.settings = value }
         fun logout(value: LogoutConfig) = apply { this.logout = value }
         fun videoCalls(value: VideoCallsConfig) = apply { this.videoCalls = value }
+        fun e2ee(value: E2eeConfig) = apply { this.e2ee = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -392,7 +396,8 @@ data class ChatConfig(
             i18n = i18n,
             settings = settings,
             logout = logout,
-            videoCalls = videoCalls
+            videoCalls = videoCalls,
+            e2ee = e2ee
         )
     }
 

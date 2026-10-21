@@ -103,7 +103,9 @@ data class Room(
     val isPlaceholder: Boolean = false,
     val presenceReady: Boolean = false,
     /** Per-user mute (web `IRoom.muted`). Null when the backend has not reported it. */
-    val muted: Boolean? = null
+    val muted: Boolean? = null,
+    /** Backend marked this room end-to-end encrypted. Only acted on when E2EE is enabled. */
+    val e2ee: Boolean = false
 )
 
 /**
@@ -127,7 +129,9 @@ data class ApiRoom(
     /** Per-user mute, reported by /chats/my only when the backend supports it. */
     val muted: Boolean? = null,
     /** True total; `members` is capped (30) for big public rooms. */
-    val usersCnt: Int? = null
+    val usersCnt: Int? = null,
+    /** End-to-end encrypted (OMEMO) room, as the backend reports it on GET chats/my. */
+    val e2ee: Boolean? = null
 )
 
 /**
@@ -162,6 +166,7 @@ fun createRoomFromApi(apiRoom: ApiRoom, conferenceDomain: String, usersArrayLeng
         composing = null,
         composingList = null,
         lastViewedTimestamp = 0,
+        e2ee = apiRoom.e2ee == true,
         unreadBaselineTimestamp = 0,
         unreadMessages = 0,
         pendingMessages = 0,
