@@ -10,6 +10,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -100,6 +101,7 @@ private fun RoomListContent(
         )
     }
     var showCreateChatDialog by remember { mutableStateOf(false) }
+    var showPublicChats by remember { mutableStateOf(false) }
     
     // Track selected room for active state
     val selectedRoom by RoomStore.currentRoom.collectAsState()
@@ -223,6 +225,14 @@ private fun RoomListContent(
                     ) 
                 },
                 actions = {
+                    if (config?.disablePublicChatsDirectory != true) {
+                        IconButton(onClick = { showPublicChats = true }) {
+                            Icon(
+                                imageVector = Icons.Default.Explore,
+                                contentDescription = t("publicChats.title")
+                            )
+                        }
+                    }
                     IconButton(
                         onClick = { showCreateChatDialog = true },
                         modifier = Modifier.testTag(RoomListViewTestTags.CREATE_ROOM_BUTTON)
@@ -366,6 +376,13 @@ private fun RoomListContent(
         }
     }
     
+    if (showPublicChats) {
+        PublicChatsDialog(
+            onDismiss = { showPublicChats = false },
+            onOpenRoom = { room -> onRoomSelected(room) }
+        )
+    }
+
     // Create chat dialog
     if (showCreateChatDialog) {
         CreateChatDialog(

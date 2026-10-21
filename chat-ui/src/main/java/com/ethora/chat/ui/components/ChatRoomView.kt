@@ -28,6 +28,8 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
@@ -53,7 +55,6 @@ import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.xmpp.XMPPClient
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.text.style.TextOverflow
 import com.ethora.chat.core.config.isMessageSearchEnabled
 import com.ethora.chat.core.store.JumpRequestStore
 import com.ethora.chat.core.store.PendingJumpPreview
@@ -129,7 +130,6 @@ fun ChatRoomView(
     var highlightedId by remember(room.jid) { mutableStateOf<String?>(null) }
     // Set when "jump to latest" leaves a window: the list then goes to the live tail.
     var scrollToLiveTail by remember(room.jid) { mutableStateOf(false) }
-    val searchEnabled = isMessageSearchEnabled(config) && config?.chatHeaderSettings?.hideSearch != true
     
     // Update lastViewedTimestamp when room is opened; send presence to receive real-time messages
     LaunchedEffect(room.jid, xmppClient) {
@@ -244,6 +244,31 @@ fun ChatRoomView(
             }
     }
     
+    // ---- Read marker out (web MessageList flushMarkRead) ----
+    // While the user is actively viewing the room, publish the newest message as
+    // displayed, but only when someone else sent it. Debounced 1 s like web.
+    val latestFromOtherId = messages.lastOrNull()
+        ?.takeIf { !isMessageFromCurrentUser(it, viewModel.currentUserXmppUsername, viewModel.currentUserId) }
+        ?.id
+    val lastSentDisplayedMarker = remember(room.jid) { mutableStateOf<String?>(null) }
+    LaunchedEffect(room.jid, isActivelyViewed, latestFromOtherId) {
+        val markerId = latestFromOtherId ?: return@LaunchedEffect
+        if (!isActivelyViewed || lastSentDisplayedMarker.value == markerId) return@LaunchedEffect
+        kotlinx.coroutines.delay(1_000)
+        lastSentDisplayedMarker.value = markerId
+        xmppClient?.sendDisplayedMarkerStanza(markerId, room.jid)
+    }
+
+    // ---- Read receipts in (web Message tickInfo) ----
+    // Watermarks come from RoomStore: the `room` argument can be a stale snapshot.
+    val storeRooms by com.ethora.chat.core.store.RoomStore.rooms.collectAsState()
+    val lastDisplayedByUser = storeRooms.firstOrNull { it.jid == room.jid }?.lastDisplayedByUser
+    val messageIndexById = remember(messages) {
+        HashMap<String, Int>(messages.size * 2).also { index ->
+            messages.forEachIndexed { i, m -> index[m.id] = i }
+        }
+    }
+
     // Coroutine scope for scroll animations
     val coroutineScope = rememberCoroutineScope()
     
@@ -664,6 +689,7 @@ fun ChatRoomView(
 
     // Get chat config
     val config by com.ethora.chat.core.store.ChatStore.config.collectAsState()
+    val searchEnabled = isMessageSearchEnabled(config) && config?.chatHeaderSettings?.hideSearch != true
     // Reactions, replies and interactions (web config keys; see ReactionsConfig)
     val disableInteractions = config?.disableInteractions == true
     val reactionsEnabled = config?.disableReactions != true && config?.reactions?.enabled != false
@@ -712,7 +738,8 @@ fun ChatRoomView(
         if (showChatInfo) {
             ChatInfoScreen(
                 room = room,
-                onBack = { showChatInfo = false }
+                onBack = { showChatInfo = false },
+                xmppClient = xmppClient
             )
         } else {
             // Header (only if not disabled)
@@ -730,6 +757,7 @@ fun ChatRoomView(
                 }
                 ChatRoomHeader(
                     title = customTitle ?: room.title,
+                    subtitle = typingSubtitle(composingUsers),
                     onBack = {
                         // Save scroll position before navigating back
                         val currentIndex = listState.firstVisibleItemIndex
@@ -1071,6 +1099,17 @@ fun ChatRoomView(
                                             showTimestamp = isLastInGroup,
                                             pendingMediaStatus = pendingMediaStatus,
                                             sendFailed = sendFailed,
+                                            receiptInfo = if (isUser && message.pending != true) {
+                                                com.ethora.chat.core.store.ReadReceipts.compute(
+                                                    messageId = message.id,
+                                                    receivedBy = message.receivedBy,
+                                                    messageIndexById = messageIndexById,
+                                                    lastDisplayedByUser = lastDisplayedByUser,
+                                                    currentXmppUsername = viewModel.currentUserXmppUsername
+                                                )
+                                            } else {
+                                                null
+                                            },
                                             onMediaClick = { msg -> previewMessage = msg; previewAlbumUrls = null },
                                             onAttachmentClick = { source, index ->
                                                 val attachments = com.ethora.chat.core.models.MessageAttachments.forMessage(source)
@@ -1544,10 +1583,18 @@ fun ChatRoomView(
     }
 }
 
+private fun typingSubtitle(users: List<String>): String? = when {
+    users.isEmpty() -> null
+    users.size == 1 -> "${users[0]} is typing"
+    users.size == 2 -> "${users[0]} and ${users[1]} are typing"
+    else -> "${users.size} people are typing"
+}
+
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun ChatRoomHeader(
     title: String,
+    subtitle: String? = null,
     onBack: () -> Unit,
     onInfoClick: () -> Unit,
     showInfoButton: Boolean,
@@ -1582,14 +1629,26 @@ private fun ChatRoomHeader(
                 Spacer(modifier = Modifier.width(8.dp))
             }
 
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+            Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 8.dp),
-                maxLines = 1
-            )
+                    .padding(horizontal = 8.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    maxLines = 1
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall.copy(fontStyle = FontStyle.Italic),
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
 
             if (onSearchClick != null) {
                 IconButton(onClick = onSearchClick, modifier = Modifier.size(40.dp)) {

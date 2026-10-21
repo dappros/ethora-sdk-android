@@ -20,6 +20,12 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.RoomMember
+import com.ethora.chat.core.store.RoomManagementLogic
+import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.core.store.UserStore
+import com.ethora.chat.core.xmpp.XMPPClient
+import com.ethora.chat.ui.i18n.rememberChatTranslator
+import kotlinx.coroutines.launch
 import com.ethora.chat.ui.styling.LocalChatThemeOverrides
 import java.text.SimpleDateFormat
 import java.util.*
@@ -32,8 +38,21 @@ import java.util.*
 fun ChatInfoScreen(
     room: Room,
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    xmppClient: XMPPClient? = null
 ) {
+    val t = rememberChatTranslator()
+    val liveRoom by RoomStore.rooms.collectAsState()
+    // The stored copy follows member changes (add, remove, presence) while this screen is open.
+    val shown = liveRoom.firstOrNull { it.jid == room.jid } ?: room
+    val canManage = RoomManagementLogic.canManageMembers(shown)
+    val myXmpp = UserStore.currentUser.value?.xmppUsername?.substringBefore("@")
+    var showReport by remember { mutableStateOf(false) }
+    var showAddMember by remember { mutableStateOf(false) }
+    var memberToRemove by remember { mutableStateOf<RoomMember?>(null) }
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    fun toast(message: String) { scope.launch { snackbar.showSnackbar(message) } }
     val overrides = LocalChatThemeOverrides.current
     val screenBg = overrides.chatBackground ?: MaterialTheme.colorScheme.background
     val headerBg = overrides.headerBackground ?: MaterialTheme.colorScheme.surface
@@ -46,6 +65,7 @@ fun ChatInfoScreen(
 
     Scaffold(
         containerColor = screenBg,
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = {
@@ -145,8 +165,23 @@ fun ChatInfoScreen(
                 }
             }
             
+            // Report the chat (any member)
+            item {
+                OutlinedButton(
+                    onClick = { showReport = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(t("modal.report.chatTitle")) }
+            }
+
             // Members list
-            val roomMembers = room.members
+            val roomMembers = shown.members
+            if (canManage) {
+                item {
+                    Button(onClick = { showAddMember = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text(t("action.addMembers"))
+                    }
+                }
+            }
             if (roomMembers != null && roomMembers.isNotEmpty()) {
                 item {
                     Text(
@@ -160,10 +195,45 @@ fun ChatInfoScreen(
                 }
                 
                 items(roomMembers) { member ->
-                    MemberItem(member = member, cardColor = cardBg, textColor = cardText)
+                    val isSelf = member.xmppUsername?.substringBefore("@") == myXmpp
+                    MemberItem(
+                        member = member,
+                        cardColor = cardBg,
+                        textColor = cardText,
+                        onRemove = if (canManage && !isSelf && !member.xmppUsername.isNullOrBlank()) {
+                            { memberToRemove = member }
+                        } else null
+                    )
                 }
             }
         }
+    }
+
+    if (showReport) {
+        ReportRoomDialog(
+            room = shown,
+            onDismiss = { showReport = false },
+            onResult = { ok -> toast(if (ok) t("toast.success") else t("toast.error")) }
+        )
+    }
+    if (showAddMember) {
+        AddMemberDialog(
+            room = shown,
+            xmppClient = xmppClient,
+            onDismiss = { showAddMember = false },
+            onResult = { message, _ -> toast(message) }
+        )
+    }
+    memberToRemove?.let { member ->
+        val name = member.name
+            ?: "${member.firstName ?: ""} ${member.lastName ?: ""}".trim().ifBlank { member.xmppUsername.orEmpty() }
+        RemoveMemberDialog(
+            room = shown,
+            xmppUsername = member.xmppUsername.orEmpty(),
+            displayName = name,
+            onDismiss = { memberToRemove = null },
+            onResult = { message, _ -> toast(message) }
+        )
     }
 }
 
@@ -209,7 +279,8 @@ private fun MemberItem(
     member: RoomMember,
     cardColor: Color,
     textColor: Color,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onRemove: (() -> Unit)? = null
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -276,6 +347,16 @@ private fun MemberItem(
                             color = textColor.copy(alpha = 0.7f)
                         )
                     }
+                }
+            }
+
+            if (onRemove != null) {
+                IconButton(onClick = onRemove) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Remove",
+                        tint = textColor.copy(alpha = 0.7f)
+                    )
                 }
             }
 

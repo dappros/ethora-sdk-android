@@ -40,6 +40,9 @@ import com.ethora.chat.core.xmpp.loadJumpWindow
 import com.ethora.chat.core.xmpp.loadNewerWindowPage
 import com.ethora.chat.core.xmpp.loadOlderWindowPage
 import com.ethora.chat.core.xmpp.oldestArchiveCursor
+import com.ethora.chat.core.e2ee.E2eeRuntime
+import com.ethora.chat.core.e2ee.SealedUpload
+import com.ethora.chat.core.xmpp.mergeWindowMessages
 import com.ethora.chat.core.xmpp.replyParentIdOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.*
@@ -262,25 +265,24 @@ class ChatRoomViewModel(
     /**
      * Send typing indicator (start composing)
      */
-    fun sendStartTyping() {
-        viewModelScope.launch {
-            val currentUser = UserStore.currentUser.value
-            val fullName = "${currentUser?.firstName ?: ""} ${currentUser?.lastName ?: ""}".trim()
-            if (fullName.isNotBlank()) {
-                xmppClient?.sendTypingRequest(room.jid, fullName, true)
-            }
-        }
-    }
-    
+    fun sendStartTyping() = sendTypingState(composing = true)
+
     /**
      * Send typing indicator (stop composing)
      */
-    fun sendStopTyping() {
+    fun sendStopTyping() = sendTypingState(composing = false)
+
+    /**
+     * Shared send path. Gated by config.disableTypingIndicator (web useComposing):
+     * only our own outgoing notifications are suppressed, incoming ones still render.
+     */
+    private fun sendTypingState(composing: Boolean) {
+        if (ChatStore.getConfig()?.disableTypingIndicator == true) return
         viewModelScope.launch {
             val currentUser = UserStore.currentUser.value
             val fullName = "${currentUser?.firstName ?: ""} ${currentUser?.lastName ?: ""}".trim()
             if (fullName.isNotBlank()) {
-                xmppClient?.sendTypingRequest(room.jid, fullName, false)
+                xmppClient?.sendTypingIndicator(room.jid, fullName, composing)
             }
         }
     }
@@ -1017,14 +1019,45 @@ class ChatRoomViewModel(
                         return@forEach
                     }
 
+                    // In an encrypted room each file is sealed before it leaves the device: the
+                    // server gets opaque bytes under a random name, the key goes in the stanza body.
+                    val sealRoom = E2eeRuntime.isE2eeRoom(working.roomJid)
+                    var sealedKey: String? = null
                     val uploadResult = withContext(Dispatchers.IO) {
-                        AuthAPIHelper.uploadFile(
-                            file = file,
-                            mimeType = files[index].mimeType,
-                            token = token,
-                            baseUrl = ChatStore.getEffectiveBaseUrl(),
-                            chatName = working.roomJid.substringBefore('@')
-                        )
+                        if (sealRoom) {
+                            val sealed = try {
+                                SealedUpload.seal(
+                                    source = file,
+                                    mimetype = files[index].mimeType,
+                                    originalName = files[index].fileName,
+                                    outDir = File(appCacheDir(), "sealed")
+                                )
+                            } catch (e: Exception) {
+                                android.util.Log.e("ChatRoomViewModel", "Sealing the attachment failed", e)
+                                return@withContext null
+                            }
+                            try {
+                                sealedKey = sealed.keyMaterial
+                                AuthAPIHelper.uploadFile(
+                                    file = sealed.file,
+                                    mimeType = SealedUpload.SEALED_MIMETYPE,
+                                    token = token,
+                                    baseUrl = ChatStore.getEffectiveBaseUrl(),
+                                    chatName = working.roomJid.substringBefore('@'),
+                                    clientEncrypted = true
+                                )
+                            } finally {
+                                sealed.file.delete()
+                            }
+                        } else {
+                            AuthAPIHelper.uploadFile(
+                                file = file,
+                                mimeType = files[index].mimeType,
+                                token = token,
+                                baseUrl = ChatStore.getEffectiveBaseUrl(),
+                                chatName = working.roomJid.substringBefore('@')
+                            )
+                        }
                     }
                     if (uploadResult == null) {
                         markPendingMediaFailed(working, IllegalStateException("Upload failed"))
@@ -1048,7 +1081,10 @@ class ChatRoomViewModel(
                             success = true
                         )
                     )
-                    files[index] = files[index].copy(uploaded = PendingMediaUploadPayload.from(uploadResult))
+                    files[index] = files[index].copy(
+                        uploaded = PendingMediaUploadPayload.from(uploadResult),
+                        sealedKey = sealedKey
+                    )
                     working = PendingMediaSendQueue.update(working.id) {
                         it.withFiles(files.toList()).copy(nextRetryAt = 0L)
                     } ?: return@forEach
@@ -1069,7 +1105,15 @@ class ChatRoomViewModel(
                 // Entries queued before the caption moved onto the media message still send it
                 // as a follow-up text (captionMessageId is set only for those).
                 val mediaCaption = if (working.captionMessageId == null) working.caption else null
+                val sealedKeys = files.mapNotNull { it.sealedKey }
+                val sealed = E2eeRuntime.isE2eeRoom(working.roomJid)
+                if (sealed && sealedKeys.size != files.size) {
+                    // A clear file in an encrypted room would leak it: never send.
+                    markPendingMediaFailed(working, IllegalStateException("Attachment is not sealed"))
+                    return@forEach
+                }
                 val mediaData = buildMediaData(uploadResults, currentUser, mediaCaption, working.replyToMessageId)
+                    .let { data -> if (sealed) data + ("e2eeKeys" to sealedKeys) else data }
                 val sent = try {
                     client.sendMediaMessage(working.roomJid, mediaData, working.messageId)
                 } catch (e: Exception) {
@@ -1143,6 +1187,9 @@ class ChatRoomViewModel(
         }
     }
 
+    /** On Android `java.io.tmpdir` is the app's cache directory. */
+    private fun appCacheDir(): File = File(System.getProperty("java.io.tmpdir") ?: ".")
+
     private fun markPendingMediaFailed(item: PendingMediaSend, error: Throwable) {
         // Honor RetryConfig: when autoRetry is false (default) the item goes
         // straight to PERMANENTLY_FAILED and we never schedule a delayed retry.
@@ -1183,6 +1230,8 @@ class ChatRoomViewModel(
     ) {
         val existing = MessageStore.getMessagesForRoom(item.roomJid)
             .firstOrNull { it.id == item.messageId }
+        // A sealed upload is ciphertext: the bubble keeps the local picture until the echo.
+        if (E2eeRuntime.isE2eeRoom(item.roomJid)) return
         val first = uploadResults.first()
         val updated = existing?.copy(
             location = first.location,

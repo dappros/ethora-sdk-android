@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Schedule
@@ -90,6 +91,8 @@ fun MessageBubble(
     onOpenThread: (() -> Unit)? = null,
     /** Replies that belong to this message's thread, shown as a pill under a root. */
     threadReplyCount: Int = 0,
+    /** Delivery/read state for own messages (web tickInfo). Null renders plain "sent". */
+    receiptInfo: com.ethora.chat.core.store.ReceiptInfo? = null,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -446,10 +449,25 @@ fun MessageBubble(
                             )
                         }
                         if (showSentIcon) {
+                            // Web parity: single grey tick = sent, double grey = delivered,
+                            // double brand blue = read.
+                            val receiptState = receiptInfo?.state ?: com.ethora.chat.core.store.ReceiptState.SENT
                             Icon(
-                                imageVector = Icons.Default.DoneAll,
-                                contentDescription = "Sent",
-                                tint = Color(0xFF4CAF50),
+                                imageVector = if (receiptState == com.ethora.chat.core.store.ReceiptState.SENT) {
+                                    Icons.Default.Done
+                                } else {
+                                    Icons.Default.DoneAll
+                                },
+                                contentDescription = when (receiptState) {
+                                    com.ethora.chat.core.store.ReceiptState.SENT -> "Sent"
+                                    com.ethora.chat.core.store.ReceiptState.DELIVERED -> "Delivered"
+                                    com.ethora.chat.core.store.ReceiptState.SEEN -> "Read"
+                                },
+                                tint = if (receiptState == com.ethora.chat.core.store.ReceiptState.SEEN) {
+                                    Color(0xFF0052CD)
+                                } else {
+                                    Color(0xFF8C8C8C)
+                                },
                                 modifier = Modifier
                                     .size(14.dp)
                                     .testTag(MessageBubbleTestTags.STATUS_SENT)
