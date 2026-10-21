@@ -137,7 +137,13 @@ data class ChatConfig(
     /** Hides the mute action (web disableRoomMute). */
     val disableRoomMute: Boolean? = null,
     /** Hides the public chats directory entry. */
-    val disablePublicChatsDirectory: Boolean? = null
+    val disablePublicChatsDirectory: Boolean? = null,
+    // Reactions and replies (web/RN key names). disableReactions hard-disables
+    // reactions; reactions.enabled=false does the same. disableReplies hides only
+    // the "Reply" menu item, threads still open from the quote or the reply count.
+    val disableReactions: Boolean? = null,
+    val reactions: ReactionsConfig? = null,
+    val disableReplies: Boolean? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -212,6 +218,9 @@ data class ChatConfig(
         fun disableRoomSwipeActions(value: Boolean) = apply { this.disableRoomSwipeActions = value }
         fun disableRoomMute(value: Boolean) = apply { this.disableRoomMute = value }
         fun disablePublicChatsDirectory(value: Boolean) = apply { this.disablePublicChatsDirectory = value }
+        private var disableReactions: Boolean? = null
+        private var reactions: ReactionsConfig? = null
+        private var disableReplies: Boolean? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -275,6 +284,9 @@ data class ChatConfig(
         fun onChatEvent(value: (ChatEvent) -> Unit) = apply { this.onChatEvent = value }
         fun colorScheme(value: ChatColorScheme?) = apply { this.colorScheme = value }
         fun twoPaneLayout(value: Boolean?) = apply { this.twoPaneLayout = value }
+        fun disableReactions(value: Boolean) = apply { this.disableReactions = value }
+        fun reactions(value: ReactionsConfig) = apply { this.reactions = value }
+        fun disableReplies(value: Boolean) = apply { this.disableReplies = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -341,7 +353,10 @@ data class ChatConfig(
             twoPaneLayout = twoPaneLayout,
             disableRoomSwipeActions = disableRoomSwipeActions,
             disableRoomMute = disableRoomMute,
-            disablePublicChatsDirectory = disablePublicChatsDirectory
+            disablePublicChatsDirectory = disablePublicChatsDirectory,
+            disableReactions = disableReactions,
+            reactions = reactions,
+            disableReplies = disableReplies
         )
     }
 

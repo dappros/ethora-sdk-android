@@ -22,6 +22,7 @@ import com.ethora.chat.core.store.PendingMediaSendStatus
 import com.ethora.chat.core.store.PendingMediaUploadPayload
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
+import com.ethora.chat.core.threads.ThreadSupport
 import com.ethora.chat.core.xmpp.XMPPClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.*
@@ -238,9 +239,27 @@ class ChatRoomViewModel(
     }
 
     /**
+     * The `mainMessage` JSON a reply carries (web createMainMessageForThread), built
+     * from the parent when it is loaded, else from its id alone. Null when not a reply.
+     */
+    private fun replyMainMessage(parentId: String?): String? {
+        if (parentId == null) return null
+        val parent = MessageStore.getMessagesForRoom(room.jid)
+            .firstOrNull { ThreadSupport.threadKey(it) == parentId || it.id == parentId }
+            ?: Message(
+                id = parentId,
+                user = com.ethora.chat.core.models.User(id = ""),
+                date = java.util.Date(),
+                body = "",
+                roomJid = room.jid
+            )
+        return ThreadSupport.createMainMessageForThread(parent)
+    }
+
+    /**
      * Send message
      */
-    fun sendMessage(text: String, parentMessageId: String? = null) {
+    fun sendMessage(text: String, parentMessageId: String? = null, alsoSendToRoom: Boolean = false) {
         viewModelScope.launch {
             val currentUser = UserStore.currentUser.value
             if (currentUser == null) {
@@ -289,6 +308,10 @@ class ChatRoomViewModel(
             val messageId = "send-text-message:${UUID.randomUUID()}"
             val lastKnownTs = MessageStore.lastKnownTimestamp(room.jid)
             val optimisticTs = maxOf(System.currentTimeMillis(), lastKnownTs + 1)
+            // Web `sendMs(text, room, isReply, showInChannel, mainMessage)`: a reply
+            // carries the parent as JSON (createMainMessageForThread), keyed by the
+            // parent's archive id so web and Android read the same reference.
+            val mainMessage = replyMainMessage(finalParentMessageId)
             val optimisticMessage = Message(
                 id = messageId,
                 body = finalText,
@@ -300,7 +323,8 @@ class ChatRoomViewModel(
                 xmppId = messageId,
                 xmppFrom = "${room.jid}/${currentUser.id}",
                 isReply = finalParentMessageId != null,
-                mainMessage = finalParentMessageId
+                mainMessage = mainMessage,
+                showInChannel = if (finalParentMessageId != null) alsoSendToRoom.toString() else null
             )
             MessageStore.addMessage(room.jid, optimisticMessage)
             android.util.Log.d("ChatRoomViewModel", "Created optimistic message before send, ID: $messageId")
@@ -313,7 +337,8 @@ class ChatRoomViewModel(
                 photo = currentUser.profileImage,
                 walletAddress = currentUser.walletAddress,
                 isReply = finalParentMessageId != null,
-                mainMessage = finalParentMessageId,
+                showInChannel = alsoSendToRoom && finalParentMessageId != null,
+                mainMessage = mainMessage,
                 customId = messageId
             )
 
@@ -762,7 +787,7 @@ class ChatRoomViewModel(
                         xmppId = captionId,
                         xmppFrom = "${room.jid}/${currentUser.id}",
                         isReply = replyToMessageId != null,
-                        mainMessage = replyToMessageId
+                        mainMessage = replyMainMessage(replyToMessageId)
                     )
                     MessageStore.addMessage(room.jid, captionMessage)
                     schedulePendingFallback(captionId)
@@ -909,7 +934,7 @@ class ChatRoomViewModel(
                                     photo = currentUser.profileImage,
                                     walletAddress = currentUser.walletAddress,
                                     isReply = pendingReply != null,
-                                    mainMessage = pendingReply,
+                                    mainMessage = replyMainMessage(pendingReply),
                                     customId = pendingCaptionId
                                 )
                             } catch (e: Exception) {
@@ -1414,41 +1439,82 @@ class ChatRoomViewModel(
     }
     
     /**
-     * Send reaction
+     * Send reaction for a message by id. Kept for existing callers; the UI uses
+     * [toggleReaction], which takes the message itself.
      */
     fun sendReaction(messageId: String, emoji: String) {
+        val message = _messages.value.firstOrNull { it.id == messageId } ?: return
+        toggleReaction(message, emoji)
+    }
+
+    /**
+     * Toggles my [emoji] on [message] and sends my full new set, as web does
+     * (`handleReactionMessage` in Message.tsx): remove it when present, else add.
+     * The target is the archive id, which is what web and the server key on.
+     * Nothing is applied locally: the groupchat reflection updates every occupant,
+     * the sender included.
+     */
+    fun toggleReaction(message: Message, emoji: String) {
+        if (message.pending == true || message.isDeleted == true) return
+        val currentUser = UserStore.currentUser.value
+        if (currentUser == null) {
+            android.util.Log.e("ChatRoomViewModel", "Cannot send reaction: user is null")
+            return
+        }
         viewModelScope.launch {
             try {
-                val currentUser = UserStore.currentUser.value
-                if (currentUser == null) {
-                    android.util.Log.e("ChatRoomViewModel", "Cannot send reaction: user is null")
-                    return@launch
-                }
-                
-                // Get current reactions for this message
-                val currentMessages = _messages.value
-                val message = currentMessages.firstOrNull { it.id == messageId }
-                val currentReactions = message?.reaction?.get(currentUser.xmppUsername?.split("@")?.firstOrNull() ?: currentUser.id)?.emoji ?: emptyList()
-                
-                // Toggle reaction: if already present, remove it; otherwise add it
-                val newReactions = if (currentReactions.contains(emoji)) {
-                    currentReactions.filter { it != emoji }
-                } else {
-                    currentReactions + emoji
-                }
-                
-                xmppClient?.sendMessageReaction(room.jid, messageId, newReactions)
+                val myLocalPart = currentUser.xmppUsername?.substringBefore("@")?.takeIf { it.isNotBlank() }
+                    ?: currentUser.id
+                val mine = message.reaction?.get(myLocalPart)?.emoji.orEmpty()
+                val next = if (mine.contains(emoji)) mine.filter { it != emoji } else mine + emoji
+                xmppClient?.sendMessageReaction(room.jid, ThreadSupport.threadKey(message), next)
                 ChatEventDispatcher.emit(
                     ChatEvent.ReactionSent(
                         roomJid = room.jid,
-                        messageId = messageId,
+                        messageId = message.id,
                         emoji = emoji
                     )
                 )
-                // MessageStore will be updated via delegate callback
             } catch (e: Exception) {
                 android.util.Log.e("ChatRoomViewModel", "Error sending reaction", e)
             }
+        }
+    }
+
+    private val _threadLoading = MutableStateFlow(false)
+    /** True while older thread replies are being fetched from the archive. */
+    val threadLoading: StateFlow<Boolean> = _threadLoading.asStateFlow()
+
+    /**
+     * Pages the archive backwards until the thread's parent is reached, so every
+     * reply of [parentKey] is in the store. Web `ThreadWrapper.loadMoreMessages`:
+     * page size 100 (web THREAD_HISTORY_PAGE_SIZE), one request in flight, and stop
+     * once the cursor is at or before the parent (every reply is newer than it).
+     */
+    suspend fun loadThreadHistory(parentKey: String, pageSize: Int = 100, maxPages: Int = 50) {
+        val parentNumeric = parentKey.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }?.toLongOrNull() ?: return
+        val client = xmppClient ?: return
+        _threadLoading.value = true
+        try {
+            var previousCursor = Long.MAX_VALUE
+            repeat(maxPages) {
+                val cursor = MessageStore.getMessagesForRoom(room.jid)
+                    .mapNotNull { ThreadSupport.numericKey(it) }
+                    .minOrNull() ?: return
+                if (cursor <= parentNumeric || cursor >= previousCursor) return
+                previousCursor = cursor
+                if (!client.isFullyConnected() && !client.ensureConnected(5_000)) return
+                client.promoteRoomHistory(room.jid)
+                val page = client.getHistory(room.jid, max = pageSize, beforeMessageId = cursor.toString())
+                if (page.isEmpty()) return
+                MessageStore.addMessages(room.jid, page)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("ChatRoomViewModel", "loadThreadHistory failed for ${room.jid}", e)
+        } finally {
+            _threadLoading.value = false
         }
     }
 }

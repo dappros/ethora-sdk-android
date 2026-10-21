@@ -104,10 +104,13 @@ object MessageStore {
 
     /** Apply delimiter normalisation to a freshly-sorted list. */
     private fun withDelimiter(roomJid: String, sorted: List<Message>): List<Message> {
-        val room = RoomStore.getRoomByJid(roomJid) ?: return sorted
+        // Every write path funnels through here, so stored reactions (including
+        // ones that arrived before their target message) land on every copy.
+        val stamped = applyStoredReactions(roomJid, sorted)
+        val room = RoomStore.getRoomByJid(roomJid) ?: return stamped
         val lastViewed = room.lastViewedTimestamp ?: 0L
         return normalizeDelimiterPosition(
-            messages = sorted,
+            messages = stamped,
             lastViewed = lastViewed,
             skipDelimiter = skipDelimiterFor(roomJid),
             roomJid = roomJid
@@ -845,6 +848,7 @@ object MessageStore {
      * Clear messages for room
      */
     fun clearMessagesForRoom(roomJid: String) {
+        reactionStamps.remove(roomJid)
         val currentMessages = _messages.value.toMutableMap()
         currentMessages.remove(roomJid)
         _messages.value = currentMessages
@@ -860,6 +864,7 @@ object MessageStore {
      * Clear all messages
      */
     fun clear() {
+        reactionStamps.clear()
         _messages.value = emptyMap()
         // Reset the pending-timeout dedup set so a fresh login can re-arm
         // timers cleanly even if the previous session left stale entries.
@@ -900,7 +905,7 @@ object MessageStore {
         val index = roomMessages.indexOfFirst { it.id == messageId }
         if (index >= 0) {
             val originalMessage = roomMessages[index]
-            val updatedMessage = originalMessage.copy(body = newText)
+            val updatedMessage = originalMessage.copy(body = newText, isEdited = true)
             roomMessages[index] = updatedMessage
             val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
             currentMessages[roomJid] = sorted
@@ -917,46 +922,106 @@ object MessageStore {
     }
     
     /**
-     * Add or update reaction to message
-     * Matches web: setReactions action
+     * One reactor's latest reaction on one target message. An empty [emoji] list
+     * is a removal marker: it is kept so an older reaction replayed later cannot
+     * bring the removed emoji back.
+     */
+    private data class ReactionStamp(
+        val emoji: List<String>,
+        val data: Map<String, String>,
+        val ts: Long
+    )
+
+    /**
+     * room -> target message id (archive id) -> reactor localpart -> stamp.
+     * Lives beside the message rows, so a reaction whose target is not loaded
+     * yet waits here and is applied when the target arrives (web parity for MAM
+     * pages, where a reaction can land before the message it reacts to).
+     */
+    private val reactionStamps = HashMap<String, HashMap<String, HashMap<String, ReactionStamp>>>()
+
+    /**
+     * Applies one reactor's reaction set to a target message.
+     * Newest stamp wins: an older replay never overwrites a newer reaction from
+     * the same reactor. Matches web `setReactions` / `reactionsMiddleware`, with
+     * the timestamp check web does not do on its own.
+     *
+     * [timestamp] is the server `<stanza-id>` value (archive microseconds). Use 0
+     * when unknown.
+     */
+    fun setReaction(
+        roomJid: String,
+        targetId: String,
+        reactorId: String,
+        emoji: List<String>,
+        data: Map<String, String>,
+        timestamp: Long = 0L
+    ) {
+        if (roomJid.isBlank() || targetId.isBlank() || reactorId.isBlank()) return
+        val byTarget = reactionStamps.getOrPut(roomJid) { HashMap() }
+        val byReactor = byTarget.getOrPut(targetId) { HashMap() }
+        val existing = byReactor[reactorId]
+        if (existing != null && existing.ts > timestamp) {
+            android.util.Log.d("MessageStore", "Ignoring older reaction from $reactorId on $targetId")
+            return
+        }
+        byReactor[reactorId] = ReactionStamp(emoji = emoji, data = data, ts = timestamp)
+
+        val currentMessages = _messages.value.toMutableMap()
+        val roomMessages = currentMessages[roomJid] ?: return
+        if (applyStoredReactions(roomJid, roomMessages) == roomMessages) return
+        val updated = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
+        currentMessages[roomJid] = updated
+        _messages.value = currentMessages
+        persistMessages(roomJid, updated)
+        android.util.Log.d("MessageStore", "Updated reaction from $reactorId on $targetId in $roomJid: $emoji")
+    }
+
+    /**
+     * Legacy entry point, kept for existing callers. Same as [setReaction] with
+     * an unknown timestamp.
      */
     fun updateReaction(roomJid: String, messageId: String, from: String, reactions: List<String>, data: Map<String, String>) {
-        val currentMessages = _messages.value.toMutableMap()
-        val roomMessages = currentMessages[roomJid]?.toMutableList() ?: mutableListOf()
-        val index = roomMessages.indexOfFirst { it.id == messageId }
-        if (index >= 0) {
-            val originalMessage = roomMessages[index]
-            val fromId = from.split("@").firstOrNull() ?: from
-            
-            // Get existing reactions or create new map
-            val existingReactions = originalMessage.reaction?.toMutableMap() ?: mutableMapOf()
-            
-            if (reactions.isEmpty()) {
-                // Remove reaction if empty list
-                existingReactions.remove(fromId)
-            } else {
-                // Add or update reaction
-                val reactionData = com.ethora.chat.core.models.ReactionMessage(
-                    emoji = reactions,
-                    data = data
-                )
-                existingReactions[fromId] = reactionData
-            }
-            
-            val updatedMessage = originalMessage.copy(reaction = existingReactions)
-            roomMessages[index] = updatedMessage
-            val sorted = withDelimiter(roomJid, roomMessages.filterNot { it.id == "delimiter-new" }.sortedForUi())
-            currentMessages[roomJid] = sorted
-            _messages.value = currentMessages
-            android.util.Log.d("MessageStore", "😀 Updated reaction for message $messageId in $roomJid: from=$fromId, reactions=$reactions")
-            
-            // Persist to Room Database (background)
-            persistMessage(roomJid, updatedMessage)
-        } else {
-            android.util.Log.w("MessageStore", "⚠️ Message $messageId not found in $roomJid to add reaction")
+        setReaction(
+            roomJid = roomJid,
+            targetId = messageId,
+            reactorId = from.substringBefore('@'),
+            emoji = reactions,
+            data = data,
+            timestamp = 0L
+        )
+    }
+
+    /** Stored reactions applied to the rows of one room (no-op when the room has none). */
+    private fun applyStoredReactions(roomJid: String, messages: List<Message>): List<Message> {
+        val byTarget = reactionStamps[roomJid]
+        if (byTarget.isNullOrEmpty()) return messages
+        return messages.map { message ->
+            if (message.isDeleted == true) return@map message
+            val stamps = message.archiveId?.let { byTarget[it] } ?: byTarget[message.id] ?: return@map message
+            val merged = mergeStamps(message.reaction, stamps)
+            if (merged == message.reaction) message else message.copy(reaction = merged)
         }
     }
-    
+
+    private fun mergeStamps(
+        current: Map<String, com.ethora.chat.core.models.ReactionMessage>?,
+        stamps: Map<String, ReactionStamp>
+    ): Map<String, com.ethora.chat.core.models.ReactionMessage>? {
+        val result = LinkedHashMap<String, com.ethora.chat.core.models.ReactionMessage>(current ?: emptyMap())
+        for ((reactor, stamp) in stamps) {
+            if (stamp.emoji.isEmpty()) {
+                result.remove(reactor)
+            } else {
+                result[reactor] = com.ethora.chat.core.models.ReactionMessage(
+                    emoji = stamp.emoji,
+                    data = stamp.data
+                )
+            }
+        }
+        return result.ifEmpty { null }
+    }
+
     /**
      * Mark message as deleted
      * Matches web: deleteRoomMessage action (but we keep the message with isDeleted flag)
@@ -979,6 +1044,7 @@ object MessageStore {
                 reaction = null, // Clear reactions
                 reply = null // Clear replies
             )
+            reactionStamps[roomJid]?.remove(messageId)
             roomMessages[index] = updatedMessage
             currentMessages[roomJid] = roomMessages
             _messages.value = currentMessages

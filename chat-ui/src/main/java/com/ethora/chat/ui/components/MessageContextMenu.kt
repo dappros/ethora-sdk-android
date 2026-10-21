@@ -23,12 +23,18 @@ import com.ethora.chat.core.models.Message
 
 /**
  * Message context menu component - shows on long press.
- * Copy for all messages; Edit and Delete only for own messages.
- * Reactions and Reply are not shown.
+ *
+ * Order follows web MessageInteractions: a reaction bar on top (when
+ * [onReaction] is given), then Reply (when [onReply] is given), Copy for all
+ * messages, Retry/Edit/Delete for own messages. Edit is not offered for media.
  * Uses overlay in same container (no Popup) so position matches message bounds.
  *
  * @param containerWidthPx  width of the container (messages area); if > 0, bounds are relative to container
  * @param containerHeightPx height of the container; if > 0, used for placement logic
+ * @param quickReactions    shortcodes for the reaction bar (null or empty hides it)
+ * @param myReactions       my shortcodes on this message, highlighted in the bar
+ * @param onReaction        called with the shortcode a tap picked (toggle is done by the caller)
+ * @param onReply           shows the Reply item when non-null (opens the thread)
  */
 @Composable
 fun MessageContextMenu(
@@ -48,9 +54,16 @@ fun MessageContextMenu(
     onResend: (() -> Unit)? = null,
     containerWidthPx: Float = 0f,
     containerHeightPx: Float = 0f,
+    quickReactions: List<String>? = null,
+    myReactions: Set<String> = emptySet(),
+    pickerEnabled: Boolean = true,
+    onReaction: ((String) -> Unit)? = null,
+    onReply: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    var pickerOpen by remember { mutableStateOf(false) }
     if (!visible || message.isDeleted == true) return
+    val reactionsShown = onReaction != null && !quickReactions.isNullOrEmpty()
 
     // Resend is offered for any own message that hasn't been confirmed sent —
     // either still in the optimistic `pending` window OR explicitly flagged as
@@ -91,12 +104,17 @@ fun MessageContextMenu(
     // + 8 dp bottom padding.
     val showEdit = isUser && !canResend && canEdit
     val showRetry = isUser && canResend
-    val ownItemCount = 1 + (if (showRetry) 1 else 0) + (if (showEdit) 1 else 0) // +Delete
-    val visibleItemCount = if (isUser) ownItemCount else 1
+    val visibleItemCount = 1 + // Copy
+        (if (onReply != null) 1 else 0) +
+        (if (isUser) 1 else 0) + // Delete
+        (if (showRetry) 1 else 0) +
+        (if (showEdit) 1 else 0)
     val itemHeightDp = 40
     val dividerHeightDp = 8
     val menuChromeDp = 16 // 8 dp top + 8 dp bottom padding
-    val menuHeightDp = menuChromeDp +
+    val reactionBarDp = if (reactionsShown) 52 else 0
+    val pickerDp = if (reactionsShown && pickerEnabled && pickerOpen) 228 else 0
+    val menuHeightDp = menuChromeDp + reactionBarDp + pickerDp +
         (itemHeightDp * visibleItemCount) +
         (dividerHeightDp * (visibleItemCount - 1).coerceAtLeast(0))
     val menuHeightPx = with(density) { menuHeightDp.dp.toPx() }
@@ -153,6 +171,49 @@ fun MessageContextMenu(
                     )
                     .padding(8.dp)
             ) {
+                if (reactionsShown && onReaction != null) {
+                    QuickReactionBar(
+                        quickReactions = quickReactions.orEmpty(),
+                        mine = myReactions,
+                        showPickerButton = pickerEnabled,
+                        pickerOpen = pickerOpen,
+                        onTogglePicker = { pickerOpen = !pickerOpen },
+                        onReact = { shortcode ->
+                            onReaction(shortcode)
+                            onDismiss()
+                        },
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                    if (pickerEnabled && pickerOpen) {
+                        EmojiPickerGrid(
+                            mine = myReactions,
+                            onPick = { shortcode ->
+                                onReaction(shortcode)
+                                onDismiss()
+                            }
+                        )
+                    }
+                    Divider(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                    )
+                }
+
+                if (onReply != null) {
+                    ContextMenuItem(
+                        text = "Reply",
+                        icon = Icons.Default.Reply,
+                        onClick = {
+                            onReply()
+                            onDismiss()
+                        }
+                    )
+                    Divider(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                    )
+                }
+
                 // Copy (for all messages)
                 ContextMenuItem(
                     text = "Copy",
