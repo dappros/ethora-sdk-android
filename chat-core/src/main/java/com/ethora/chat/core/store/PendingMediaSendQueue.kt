@@ -84,7 +84,9 @@ data class PendingMediaFile(
     val localFilePath: String,
     val fileName: String,
     val mimeType: String,
-    val uploaded: PendingMediaUploadPayload? = null
+    val uploaded: PendingMediaUploadPayload? = null,
+    /** Key material of the sealed upload (encrypted rooms); it rides in the OMEMO body, never in `<data>`. */
+    val sealedKey: String? = null
 )
 
 data class PendingMediaSend(
