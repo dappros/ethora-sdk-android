@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.withAttachment
+import com.ethora.chat.ui.call.CallHeaderButtons
 import com.ethora.chat.core.models.MessageActionsProps
 import com.ethora.chat.core.models.MessageProps
 import com.ethora.chat.core.models.SendInputProps
@@ -740,7 +741,14 @@ fun ChatRoomView(
                     showInfoButton = !hideChatInfoButton,
                     showBackButton = showBackButton,
                     onSearchClick = if (searchEnabled) ({ showSearch = true }) else null,
-                    showLanguageButton = com.ethora.chat.core.i18n.shouldShowLanguageSelector(config?.translates)
+                    showLanguageButton = com.ethora.chat.core.i18n.shouldShowLanguageSelector(config?.translates),
+                    trailingActions = {
+                        CallHeaderButtons(
+                            room = room,
+                            xmppClient = xmppClient,
+                            videoCalls = config?.videoCalls
+                        )
+                    }
                 )
             }
         
@@ -1545,7 +1553,8 @@ private fun ChatRoomHeader(
     showInfoButton: Boolean,
     showBackButton: Boolean,
     onSearchClick: (() -> Unit)? = null,
-    showLanguageButton: Boolean
+    showLanguageButton: Boolean,
+    trailingActions: @Composable () -> Unit = {}
 ) {
     val t = com.ethora.chat.ui.i18n.rememberChatTranslator()
     val headerColor = com.ethora.chat.ui.styling.LocalChatThemeOverrides.current.headerBackground
@@ -1594,6 +1603,7 @@ private fun ChatRoomHeader(
             if (showLanguageButton) {
                 LanguageSelectorButton()
             }
+            trailingActions()
 
             if (showInfoButton) {
                 IconButton(onClick = onInfoClick, modifier = Modifier.size(40.dp)) {

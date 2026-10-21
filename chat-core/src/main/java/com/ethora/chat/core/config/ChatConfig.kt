@@ -156,7 +156,9 @@ data class ChatConfig(
     val settings: SettingsConfig? = null,
 
     // Logout action in the account settings screen
-    val logout: LogoutConfig? = null
+    val logout: LogoutConfig? = null,
+    // 1:1 audio and video calls (LiveKit). Off unless enabled.
+    val videoCalls: VideoCallsConfig? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -240,6 +242,7 @@ data class ChatConfig(
         private var i18n: I18nConfig? = null
         private var settings: SettingsConfig? = null
         private var logout: LogoutConfig? = null
+        private var videoCalls: VideoCallsConfig? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -312,6 +315,7 @@ data class ChatConfig(
         fun i18n(value: I18nConfig) = apply { this.i18n = value }
         fun settings(value: SettingsConfig) = apply { this.settings = value }
         fun logout(value: LogoutConfig) = apply { this.logout = value }
+        fun videoCalls(value: VideoCallsConfig) = apply { this.videoCalls = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -387,7 +391,8 @@ data class ChatConfig(
             attachments = attachments,
             i18n = i18n,
             settings = settings,
-            logout = logout
+            logout = logout,
+            videoCalls = videoCalls
         )
     }
 
