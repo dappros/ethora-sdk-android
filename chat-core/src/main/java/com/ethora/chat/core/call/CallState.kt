@@ -1,5 +1,6 @@
 package com.ethora.chat.core.call
 
+import com.ethora.chat.core.call.p2p.P2PRuntime
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,11 +48,21 @@ data class CallState(
     /** Peer's XMPP localpart (no `@host`). */
     val peerXmppUsername: String? = null,
     val token: String? = null,
+    /** LiveKit URL the server sent with the call-token; null means use the configured one. */
+    val livekitUrl: String? = null,
+    /** Group room call (LiveKit). */
+    val isGroup: Boolean = false,
+    /** How the server carries the call: `livekit` (default) or `p2p` (our own WebRTC, no LiveKit token). */
+    val mode: String = CallStanzas.MODE_LIVEKIT,
+    /** STUN/TURN servers of a p2p call; empty means the session fetches them. */
+    val iceServers: List<IceServerConfig> = emptyList(),
     val error: String? = null,
     val startedAt: Long? = null,
     /** Set once the call connects; used for the local "call ended" log duration. */
     val connectedAt: Long? = null
-)
+) {
+    val isP2p: Boolean get() = mode == CallStanzas.MODE_P2P
+}
 
 /**
  * Single source of truth for the active call. Each function is the Kotlin
@@ -63,6 +74,28 @@ object CallStore {
     val state: StateFlow<CallState> = _state.asStateFlow()
 
     fun snapshot(): CallState = _state.value
+
+    private val releaseHooks = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    /**
+     * Registers [hook] to run whenever a call is over (hang up, decline, error): the media
+     * session, the audio route and the ongoing-call notification are released from here, so they
+     * never outlive the call even when no call screen is on display.
+     */
+    fun addReleaseHook(hook: () -> Unit) {
+        if (hook !in releaseHooks) releaseHooks.add(hook)
+    }
+
+    private fun releaseSessions() {
+        P2PRuntime.disposeActive()
+        for (hook in releaseHooks) {
+            try {
+                hook()
+            } catch (_: Exception) {
+                // One failing release must not stop the others.
+            }
+        }
+    }
 
     fun startOutgoingCall(
         roomJid: String,
@@ -92,7 +125,11 @@ object CallStore {
         kind: CallKind,
         callId: String?,
         peerXmppUsername: String?,
-        now: Long = System.currentTimeMillis()
+        now: Long = System.currentTimeMillis(),
+        livekitUrl: String? = null,
+        isGroup: Boolean = false,
+        mode: String = CallStanzas.MODE_LIVEKIT,
+        iceServers: List<IceServerConfig> = emptyList()
     ) {
         _state.value = CallState(
             phase = CallPhase.RINGING_INCOMING,
@@ -103,9 +140,44 @@ object CallStore {
             roomBareName = roomBareName?.takeIf { it.isNotBlank() } ?: roomJid.substringBefore("@"),
             callId = callId?.takeIf { it.isNotBlank() },
             peerXmppUsername = peerXmppUsername?.takeIf { it.isNotBlank() },
-            token = token,
+            // A p2p call has no LiveKit token.
+            token = token.takeIf { it.isNotBlank() },
+            livekitUrl = livekitUrl?.takeIf { it.isNotBlank() },
+            isGroup = isGroup,
+            mode = mode,
+            iceServers = iceServers,
             startedAt = now
         )
+    }
+
+    /**
+     * Caller side: the create response says how the server carries the call. [startedAt] is the
+     * dial it answers; returns false (and changes nothing) when that dial is no longer the
+     * current call (cancelled or replaced while the request was in flight).
+     */
+    fun setOutgoingRoute(
+        startedAt: Long?,
+        callId: String?,
+        mode: String,
+        group: Boolean,
+        livekitUrl: String?,
+        iceServers: List<IceServerConfig>
+    ): Boolean {
+        val current = _state.value
+        if (current.phase == CallPhase.IDLE ||
+            current.direction != CallDirection.OUTGOING ||
+            current.startedAt != startedAt
+        ) {
+            return false
+        }
+        _state.value = current.copy(
+            callId = callId?.takeIf { it.isNotBlank() } ?: current.callId,
+            mode = mode,
+            isGroup = group,
+            livekitUrl = livekitUrl?.takeIf { it.isNotBlank() } ?: current.livekitUrl,
+            iceServers = iceServers
+        )
+        return true
     }
 
     /**
@@ -116,7 +188,8 @@ object CallStore {
         roomJid: String,
         token: String,
         callId: String?,
-        now: Long = System.currentTimeMillis()
+        now: Long = System.currentTimeMillis(),
+        livekitUrl: String? = null
     ): Boolean {
         val current = _state.value
         if (current.direction != CallDirection.OUTGOING) return false
@@ -126,6 +199,7 @@ object CallStore {
             phase = CallPhase.CONNECTING,
             roomJid = roomJid,
             token = token,
+            livekitUrl = livekitUrl?.takeIf { it.isNotBlank() } ?: current.livekitUrl,
             callId = callId?.takeIf { it.isNotBlank() } ?: current.callId,
             error = null,
             startedAt = current.startedAt ?: now
@@ -150,6 +224,8 @@ object CallStore {
     }
 
     fun setCallError(message: String, now: Long = System.currentTimeMillis()) {
+        // The media session of a failed call is released with it.
+        releaseSessions()
         val current = _state.value
         _state.value = current.copy(
             phase = CallPhase.ERROR,
@@ -173,6 +249,7 @@ object CallStore {
 
     /** Ends, declines, dismisses or cancels: back to the idle state. */
     fun reset() {
+        releaseSessions()
         _state.value = CallState()
     }
 }

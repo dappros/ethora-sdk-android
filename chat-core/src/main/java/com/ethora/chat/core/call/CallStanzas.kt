@@ -1,5 +1,7 @@
 package com.ethora.chat.core.call
 
+import com.ethora.chat.core.call.p2p.P2PSignal
+import com.ethora.chat.core.call.p2p.P2PSignalStanza
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -60,8 +62,25 @@ internal object CallStanzas {
             val token: String,
             val room: String,
             val kind: String?,
-            val callId: String?
-        ) : Signal
+            val callId: String?,
+            /** `livekit` (also for servers that send no `mode`) or `p2p`. */
+            val mode: String = MODE_LIVEKIT,
+            /** Group room call. Always false for p2p, which is 1:1 by construction. */
+            val group: Boolean = false,
+            /** Public LiveKit URL for `mode=livekit`; null when absent or not a ws(s)/http(s) URL. */
+            val livekitUrl: String? = null,
+            /** Plain-text caller name; empty when absent or a raw chat name. */
+            val callerName: String = "",
+            /** Caller's xmppUsername when well formed. */
+            val caller: String? = null,
+            /** ICE servers of the callee for `mode=p2p` (JSON `ice` attribute); empty when absent. */
+            val iceServers: List<IceServerConfig> = emptyList()
+        ) : Signal {
+            val isP2p: Boolean get() = mode == MODE_P2P
+        }
+
+        /** Peer to peer WebRTC signalling (`call-p2p`: offer, answer, candidate, end). */
+        data class P2p(val signal: P2PSignal) : Signal
 
         data class Invite(
             val kind: CallKind,
@@ -77,7 +96,9 @@ internal object CallStanzas {
             val durationMs: Long?,
             val kind: String?,
             /** True for the server call log (it carries a caller and/or a duration). */
-            val hasLogData: Boolean
+            val hasLogData: Boolean,
+            /** Group call flag: one member declining must not end the call for everybody. */
+            val group: Boolean = false
         ) : Signal
 
         /** Unknown `call-*` type: swallowed so it never reaches chat. */
@@ -94,28 +115,42 @@ internal object CallStanzas {
         if (!type.startsWith("call-")) return null
         val callId = attrs["callId"]?.takeIf { it.isNotBlank() } ?: attrs["callid"]?.takeIf { it.isNotBlank() }
         return when (type) {
-            "call-token" -> Signal.Token(
-                token = attrs["token"].orEmpty().trim(),
-                room = attrs["room"].orEmpty().trim(),
-                kind = attrs["kind"],
-                callId = callId
-            )
+            "call-token" -> {
+                // Old servers send neither `mode` nor `group`: that is a plain LiveKit 1:1 call.
+                val mode = if (attrs["mode"].orEmpty().trim().equals(MODE_P2P, ignoreCase = true)) MODE_P2P else MODE_LIVEKIT
+                Signal.Token(
+                    token = attrs["token"].orEmpty().trim(),
+                    room = attrs["room"].orEmpty().trim(),
+                    kind = attrs["kind"],
+                    callId = callId,
+                    mode = mode,
+                    group = mode == MODE_LIVEKIT && isTrueish(attrs["group"]),
+                    livekitUrl = if (mode == MODE_LIVEKIT) normalizeLivekitUrl(attrs["livekitUrl"]) else null,
+                    callerName = sanitizeCallName(attrs["callerName"]),
+                    caller = sanitizeXmppUsername(attrs["caller"]),
+                    iceServers = if (mode == MODE_P2P) normalizeIceServers(attrs["ice"]) else emptyList()
+                )
+            }
+            P2PSignalStanza.TYPE -> P2PSignalStanza.parse(innerMessageXml)?.let { Signal.P2p(it) } ?: Signal.Other(type)
             "call-invite" -> Signal.Invite(
                 kind = CallKind.fromWire(attrs["kind"]),
                 room = attrs["room"]?.trim()?.takeIf { it.isNotEmpty() },
                 callId = callId
             )
-            "call-state" -> {
+            // Server relay of a callee's decline: a terminal `declined` for 1:1, ignored in a group.
+            "call-state", "call-state-declined" -> {
+                val declinedRelay = type == "call-state-declined"
                 val caller = attrs["callerXmppUsername"]?.trim()?.takeIf { it.isNotEmpty() }
                 val durationRaw = attrs["durationMs"]?.takeIf { it.isNotEmpty() }
                 Signal.State(
-                    state = (attrs["state"] ?: attrs["event"]).orEmpty().trim().lowercase(),
+                    state = if (declinedRelay) "declined" else (attrs["state"] ?: attrs["event"]).orEmpty().trim().lowercase(),
                     room = attrs["room"]?.trim()?.takeIf { it.isNotEmpty() },
                     callId = callId,
                     callerXmppUsername = caller,
                     durationMs = durationRaw?.toDoubleOrNull()?.toLong(),
                     kind = attrs["kind"],
-                    hasLogData = caller != null || durationRaw != null
+                    hasLogData = caller != null || durationRaw != null,
+                    group = isTrueish(attrs["group"])
                 )
             }
             else -> Signal.Other(type)
@@ -152,6 +187,58 @@ internal object CallStanzas {
         }
         val match = Regex("\\d{13,}").find(source)?.value ?: return null
         return match.take(13).toLongOrNull()
+    }
+
+    // ---- Call-token attribute hygiene (web calls/callMode.ts, callDisplay.ts, senderTrust.ts) ----
+
+    const val MODE_LIVEKIT = "livekit"
+    const val MODE_P2P = "p2p"
+
+    private val LIVEKIT_URL = Regex("^(wss?|https?)://\\S+$", RegexOption.IGNORE_CASE)
+    private val SYSTEM_ACCOUNT_LOCAL = Regex("^([0-9a-fA-F]{24})_\\1$")
+    private val XMPP_USERNAME = Regex("^[A-Za-z0-9_-]{1,128}(?:@[A-Za-z0-9.-]+)?$")
+    private val UNWANTED_CHARS = Regex("[\\u0000-\\u001F\\u007F-\\u009F\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u2069\\uFEFF]")
+    private const val MAX_CALL_NAME_LENGTH = 80
+
+    internal fun isTrueish(value: String?): Boolean =
+        value?.trim()?.lowercase().let { it == "true" || it == "1" }
+
+    /**
+     * A LiveKit server URL as the backend publishes it. Only ws(s) and http(s)
+     * URLs are accepted: the value becomes the connect target of the media
+     * session, so anything else is treated as unset.
+     */
+    internal fun normalizeLivekitUrl(raw: String?): String? =
+        raw?.trim()?.takeIf { LIVEKIT_URL.matches(it) }
+
+    /** Display-safe caller name: control characters stripped, capped, raw ids refused ("" when unusable). */
+    internal fun sanitizeCallName(raw: String?): String {
+        if (raw == null) return ""
+        val cleaned = raw.replace(UNWANTED_CHARS, " ").replace(Regex("\\s+"), " ").trim()
+        if (cleaned.isEmpty()) return ""
+        val capped = cleaned.codePoints().limit(MAX_CALL_NAME_LENGTH.toLong()).toArray()
+            .let { String(it, 0, it.size) }.trim()
+        return if (RAW_ID.matches(capped)) "" else capped
+    }
+
+    internal fun sanitizeXmppUsername(raw: String?): String? {
+        val local = raw?.trim()?.substringBefore("/").orEmpty()
+        return local.takeIf { XMPP_USERNAME.matches(it) }
+    }
+
+    /**
+     * True when [fromJid] is the app's system account (`<appId>_<appId>`, the
+     * resource is ignored). Only that account may steer where a call's media
+     * goes, because the server stamps the real JID on every client message.
+     */
+    internal fun isSystemAccountSender(fromJid: String?, expectedDomain: String?): Boolean {
+        val bare = fromJid?.trim()?.substringBefore("/").orEmpty()
+        val at = bare.indexOf('@')
+        if (at <= 0 || bare.indexOf('@', at + 1) != -1) return false
+        val domain = bare.substring(at + 1).lowercase()
+        if (domain.isEmpty() || !SYSTEM_ACCOUNT_LOCAL.matches(bare.substring(0, at))) return false
+        val expected = expectedDomain?.trim()?.lowercase().orEmpty()
+        return expected.isEmpty() || domain == expected
     }
 
     // ---- JWT (claims only, no signature check: the SFU validates the token) ----

@@ -29,14 +29,20 @@ object CallService {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /**
-     * Whether a call can start in [room] (web `canCall` and `isRoomAllowed`):
-     * calls enabled, a LiveKit URL configured, and a room type that is allowed.
+     * Whether a call can start in [room] (web `canCall` and `isRoomAllowed`): calls enabled,
+     * a LiveKit URL configured and a room type that is allowed. The URL stays required for now
+     * (same rule as the web and React Native SDKs) because group calls run on LiveKit, even
+     * though a peer to peer 1:1 call itself does not use it. Public rooms never call.
      */
     fun canCall(room: Room?, config: VideoCallsConfig?): Boolean {
-        if (room == null || config == null) return false
-        if (!config.enabled || config.livekitUrl.isBlank()) return false
-        return room.type == RoomType.PRIVATE &&
-            config.allowedRoomTypes.any { it.equals("private", ignoreCase = true) }
+        if (room == null || config == null || !config.enabled) return false
+        if (config.livekitUrl.isBlank()) return false
+        val allowed = config.allowedRoomTypes.map { it.lowercase() }
+        return when (room.type) {
+            RoomType.PRIVATE -> "private" in allowed
+            RoomType.GROUP -> "group" in allowed
+            else -> false
+        }
     }
 
     /** Audio calls are a separate opt-in on top of [canCall]. */
@@ -59,7 +65,8 @@ object CallService {
         if (chatName.isBlank()) return false
 
         val selfLocal = selfXmppUsername().substringBefore("@")
-        val peer = room.members.orEmpty().firstOrNull { member ->
+        val isGroupRoom = room.type != RoomType.PRIVATE
+        val peer = if (isGroupRoom) null else room.members.orEmpty().firstOrNull { member ->
             val local = member.xmppUsername.orEmpty().substringBefore("@")
             local.isNotEmpty() && local != selfLocal
         }
@@ -100,9 +107,11 @@ object CallService {
         }
 
         // Own scope: the request must finish even if the caller's UI goes away.
+        val startedAt = CallStore.snapshot().startedAt
         scope.launch {
             try {
-                CallsAPIHelper.createChatCall(chatName, kind)
+                val result = CallsAPIHelper.createChatCall(chatName, kind)
+                applyCreateResult(startedAt, result, chatName, peerXmpp, client)
             } catch (e: Exception) {
                 CallStore.setCallError(e.message ?: "Failed to create call")
             }
@@ -110,14 +119,50 @@ object CallService {
         return true
     }
 
-    /** Callee accepts the ringing call. The UI then connects with the token. */
+    /**
+     * Records how the server decided to carry the call. A p2p answer that lands after the user
+     * already cancelled is cleaned up here: the server has already rung the callee and nothing
+     * else knows its callId.
+     */
+    private fun applyCreateResult(
+        startedAt: Long?,
+        result: CallCreateResult,
+        chatName: String,
+        peerXmpp: String?,
+        client: XMPPClient?
+    ) {
+        val stillCurrent = CallStore.setOutgoingRoute(
+            startedAt = startedAt,
+            callId = result.callId,
+            mode = result.mode,
+            group = result.group ?: false,
+            livekitUrl = result.livekitUrl,
+            iceServers = result.iceServers
+        )
+        if (!stillCurrent && result.isP2p) {
+            reportEnded(result.callId)
+            if (peerXmpp != null && client != null) {
+                sendDirect(
+                    client = client,
+                    peer = peerXmpp,
+                    idPrefix = "call-state",
+                    dataXml = CallStanzas.stateData("cancelled", result.callId, chatName)
+                )
+            }
+        }
+    }
+
+    /** Callee accepts the ringing call. The UI then connects with the token (LiveKit) or runs the p2p session. */
     fun acceptIncoming() {
         CallStore.acceptIncomingCall()
     }
 
     /** Callee declines: the caller is told, and the local ring is dismissed. */
     fun declineIncoming(client: XMPPClient?) {
-        sendStateSignal(client, "declined", CallStore.snapshot())
+        val snap = CallStore.snapshot()
+        sendStateSignal(client, "declined", snap)
+        // A p2p call has no LiveKit webhook: the server learns about the decline from us.
+        if (snap.isP2p) CallsAPIHelper.reportCallState(CallsAPIHelper.CallStateReport.DECLINE, snap.callId)
         CallStore.reset()
     }
 
@@ -132,16 +177,22 @@ object CallService {
         val state = if (snap.phase == CallPhase.REQUESTING) "cancelled" else "ended"
         writeLocalLog(snap, selfUsername)
         sendStateSignal(client, state, snap)
+        if (snap.isP2p) reportEnded(snap.callId)
         CallStore.reset()
     }
 
-    /** The call connected to LiveKit. */
+    /** The call connected (LiveKit joined, or the p2p media is flowing). */
     fun markConnected() {
+        val snap = CallStore.snapshot()
         CallStore.markInCall()
+        // A p2p call has no LiveKit webhook: the clients start the server-side call timer.
+        if (snap.isP2p) CallsAPIHelper.reportCallState(CallsAPIHelper.CallStateReport.CONNECTED, snap.callId)
     }
 
-    /** Joining the LiveKit room failed (or a fatal session error). */
+    /** Joining the call failed (or a fatal session error). */
     fun reportError(message: String) {
+        val snap = CallStore.snapshot()
+        if (snap.isP2p) reportEnded(snap.callId)
         CallStore.setCallError(message)
     }
 
@@ -152,12 +203,17 @@ object CallService {
 
     // ---- Helpers -------------------------------------------------------------
 
+    /** The server-side end of a p2p call (idempotent there, so both sides may send it). */
+    private fun reportEnded(callId: String?) {
+        CallsAPIHelper.reportCallState(CallsAPIHelper.CallStateReport.END, callId)
+    }
+
     private fun scheduleNoAnswerTimeout(startedAt: Long?) {
         scope.launch {
             delay(OUTGOING_CALL_TIMEOUT_MS)
             val snap = CallStore.snapshot()
             if (snap.phase == CallPhase.REQUESTING && snap.startedAt == startedAt) {
-                CallStore.setCallError(NO_ANSWER_MESSAGE)
+                reportError(NO_ANSWER_MESSAGE)
             }
         }
     }

@@ -66,6 +66,94 @@ class CallStanzasTest {
     }
 
     @Test
+    fun `call-token without mode or group is a plain livekit 1to1 call`() {
+        val stanza = """<message><data type="call-token" token="t" room="r" callId="c"/></message>"""
+        val signal = CallStanzas.parseSignal(stanza) as CallStanzas.Signal.Token
+        assertEquals(CallStanzas.MODE_LIVEKIT, signal.mode)
+        assertFalse(signal.isP2p)
+        assertFalse(signal.group)
+        assertNull(signal.livekitUrl)
+        assertEquals("", signal.callerName)
+        assertNull(signal.caller)
+    }
+
+    @Test
+    fun `call-token reads p2p mode, group, livekitUrl, caller name and caller`() {
+        val p2p = CallStanzas.parseSignal(
+            """<message><data type="call-token" token="" room="r" callId="c" mode="P2P" group="true" livekitUrl="wss://lk.example"/></message>"""
+        ) as CallStanzas.Signal.Token
+        assertTrue(p2p.isP2p)
+        assertEquals("p2p is 1:1 by construction", false, p2p.group)
+        assertNull("p2p never carries a livekit url", p2p.livekitUrl)
+
+        val lk = CallStanzas.parseSignal(
+            """<message><data type="call-token" token="t" room="r" mode="livekit" group="1" livekitUrl=" wss://lk.example " callerName="Ann  Lee" caller="u_1"/></message>"""
+        ) as CallStanzas.Signal.Token
+        assertTrue(lk.group)
+        assertEquals("wss://lk.example", lk.livekitUrl)
+        assertEquals("Ann Lee", lk.callerName)
+        assertEquals("u_1", lk.caller)
+    }
+
+    @Test
+    fun `livekitUrl, caller name and caller are sanitised`() {
+        assertNull(CallStanzas.normalizeLivekitUrl("javascript:alert(1)"))
+        assertNull(CallStanzas.normalizeLivekitUrl("wss://has space"))
+        assertEquals("https://lk.example/x", CallStanzas.normalizeLivekitUrl("https://lk.example/x"))
+        assertEquals("", CallStanzas.sanitizeCallName("0123456789abcdef0123456789abcdef"))
+        assertEquals("", CallStanzas.sanitizeCallName(null))
+        assertNull(CallStanzas.sanitizeXmppUsername("bad name!"))
+        assertEquals("abc_1", CallStanzas.sanitizeXmppUsername("abc_1/res"))
+    }
+
+    @Test
+    fun `only the app system account counts as a trusted call-token sender`() {
+        val app = "0123456789abcdef01234567"
+        assertTrue(CallStanzas.isSystemAccountSender("${app}_$app@xmpp.example/r", "xmpp.example"))
+        assertFalse(CallStanzas.isSystemAccountSender("${app}_$app@other.example", "xmpp.example"))
+        assertFalse(CallStanzas.isSystemAccountSender("${app}_aaaaaaaaaaaaaaaaaaaaaaaa@xmpp.example", "xmpp.example"))
+        assertFalse(CallStanzas.isSystemAccountSender(null, "xmpp.example"))
+    }
+
+    @Test
+    fun `p2p call-token carries the callee ice servers and no livekit fields`() {
+        val ice = "[{&quot;urls&quot;:[&quot;turn:t.example:3478&quot;],&quot;username&quot;:&quot;u&quot;,&quot;credential&quot;:&quot;p&quot;}]"
+        val signal = CallStanzas.parseSignal(
+            """<message><data type="call-token" token="" room="r" callId="c" mode="p2p" kind="video" ice="$ice" livekitUrl="wss://x"/></message>"""
+        ) as CallStanzas.Signal.Token
+        assertTrue(signal.isP2p)
+        assertEquals(1, signal.iceServers.size)
+        assertEquals(listOf("turn:t.example:3478"), signal.iceServers[0].urls)
+        assertNull(signal.livekitUrl)
+
+        val livekit = CallStanzas.parseSignal(
+            """<message><data type="call-token" token="t" room="r" ice="$ice"/></message>"""
+        ) as CallStanzas.Signal.Token
+        assertTrue("ice is read for p2p only", livekit.iceServers.isEmpty())
+    }
+
+    @Test
+    fun `call-p2p message parses as a p2p signal`() {
+        val xml = com.ethora.chat.core.call.p2p.P2PSignalStanza.build(
+            "me@host", "c9", com.ethora.chat.core.call.p2p.P2PSignalName.END,
+            com.ethora.chat.core.call.p2p.P2PPayload.End("hangup")
+        ).replaceFirst("<message ", "<message from=\"bob@host/r\" ")
+        val signal = CallStanzas.parseSignal(xml) as CallStanzas.Signal.P2p
+        assertEquals("c9", signal.signal.callId)
+        assertEquals("bob", signal.signal.fromLocal)
+        assertTrue(CallStanzas.isCallSignal(xml))
+    }
+
+    @Test
+    fun `call-state-declined relay is a declined state`() {
+        val signal = CallStanzas.parseSignal(
+            """<message><data type="call-state-declined" room="r" callId="c" group="true"/></message>"""
+        ) as CallStanzas.Signal.State
+        assertEquals("declined", signal.state)
+        assertTrue(signal.group)
+    }
+
+    @Test
     fun `unknown call type parses as Other and a plain message is not a signal`() {
         assertTrue(CallStanzas.parseSignal("""<message><data type="call-weird"/></message>""") is CallStanzas.Signal.Other)
         assertNull(CallStanzas.parseSignal("""<message><body>hello</body><data type="chat-text"/></message>"""))

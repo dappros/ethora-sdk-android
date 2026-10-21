@@ -68,6 +68,7 @@ class XMPPClient(
     private var delegate: XMPPClientDelegate? = null
     private var connection: XMPPTCPConnection? = null
     private var webSocketConnection: XMPPWebSocketConnection? = null
+    private val historyReceiptAckedKeys = java.util.LinkedHashSet<String>()
     private var chatManager: ChatManager? = null
     private var mucManager: MultiUserChatManager? = null
 
@@ -803,7 +804,7 @@ class XMPPClient(
                         val duration = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
                         LogStore.success(
                             "Perf",
-                            "history_request_ms=$duration room=${request.roomJid} result_count=${result.size}"
+                            "history_request_ms=$duration room=${request.roomJid} result_count=${result.messages.size}"
                         )
                         request.deferred.complete(result)
                     } catch (e: Exception) {
@@ -868,6 +869,15 @@ class XMPPClient(
                 synchronized(collectedLock) { collected.addAll(parsed) }
                 // Incremental write-through so the UI updates as results arrive.
                 com.ethora.chat.core.store.MessageStore.addMessages(roomJID, parsed)
+                // XEP-0184 for catch-up messages from other users (web onMessageHistory).
+                val me = com.ethora.chat.core.store.UserStore.currentUser.value?.xmppUsername
+                parsed.forEach { msg ->
+                    val fromOther = ReceiptStanzas.normalizeLocal(msg.user.xmppUsername ?: msg.user.id) !=
+                        ReceiptStanzas.normalizeLocal(me)
+                    if (fromOther && msg.isSystemMessage != "true") {
+                        sendHistoryReceivedReceiptStanza(roomJID, msg.id)
+                    }
+                }
             }
         }
         var queryComplete = false
@@ -1580,6 +1590,38 @@ class XMPPClient(
     }
 
     /**
+     * XEP-0184 delivery receipt for a live message. Matches web sendReceivedReceiptStanza.
+     */
+    fun sendReceivedReceiptStanza(messageId: String, roomJid: String) {
+        if (!useWebSocket) return
+        webSocketConnection?.sendReceivedReceiptStanza(messageId, roomJid)
+    }
+
+    /**
+     * Receipt for a catch-up (MAM) message, sent at most once per room and message.
+     * Matches web sendHistoryReceivedReceiptStanza, including its 2000-entry cap.
+     */
+    fun sendHistoryReceivedReceiptStanza(roomJid: String, messageId: String) {
+        val key = "$roomJid:$messageId"
+        val isNew = synchronized(historyReceiptAckedKeys) {
+            if (!historyReceiptAckedKeys.add(key)) return@synchronized false
+            if (historyReceiptAckedKeys.size > MAX_HISTORY_RECEIPT_KEYS) {
+                historyReceiptAckedKeys.remove(historyReceiptAckedKeys.first())
+            }
+            true
+        }
+        if (isNew) sendReceivedReceiptStanza(messageId, roomJid)
+    }
+
+    /**
+     * XEP-0333 read marker. Matches web sendDisplayedMarkerStanza.
+     */
+    fun sendDisplayedMarkerStanza(messageId: String, roomJid: String) {
+        if (!useWebSocket) return
+        webSocketConnection?.sendDisplayedMarkerStanza(messageId, roomJid)
+    }
+
+    /**
      * Send typing indicator (composing/paused)
      * Matches web: useComposing hook
      */
@@ -1866,3 +1908,5 @@ class XMPPClient(
         scope.cancel()
     }
 }
+
+private const val MAX_HISTORY_RECEIPT_KEYS = 2000

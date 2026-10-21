@@ -62,6 +62,41 @@ class CallSignalingTest {
     }
 
     @Test
+    fun `incoming p2p call-token rings without a livekit token and keeps its ice servers only from the system account`() {
+        val room = "unitroomp2p-in@conf.test"
+        val ice = """[{&quot;urls&quot;:[&quot;turn:t.example:3478&quot;],&quot;username&quot;:&quot;u&quot;,&quot;credential&quot;:&quot;p&quot;}]"""
+        val p2p = """<message type="chat" from="someone@host/r"><stanza-id xmlns="urn:xmpp:sid:0" id="$now" by="x"/><data type="call-token" token="" room="$room" mode="p2p" callId="p2p-1" kind="audio" ice="$ice"/></message>"""
+
+        assertTrue(CallSignaling.handleInbound(p2p, now, enabled))
+        val s = CallStore.snapshot()
+        assertEquals(CallPhase.RINGING_INCOMING, s.phase)
+        assertTrue(s.isP2p)
+        assertEquals("p2p-1", s.callId)
+        assertNull("no livekit token is ever set for p2p", s.token)
+        assertEquals("ice from an untrusted sender is dropped", 0, s.iceServers.size)
+    }
+
+    @Test
+    fun `p2p call-token while another call is active is declined instead of replacing it`() {
+        CallStore.startOutgoingCall("otherroom@conf.test", "Bob", "otherroom", CallKind.VIDEO, "bob", now)
+        val p2p = """<message type="chat"><stanza-id xmlns="urn:xmpp:sid:0" id="$now" by="x"/><data type="call-token" token="" room="unitroombusy-a@conf.test" mode="p2p" callId="p2p-2"/></message>"""
+        assertTrue(CallSignaling.handleInbound(p2p, now, enabled))
+        assertEquals("the active call stays", "otherroom", CallStore.snapshot().roomBareName)
+        assertEquals(CallDirection.OUTGOING, CallStore.snapshot().direction)
+    }
+
+    @Test
+    fun `livekitUrl from the call-token is ignored unless the system account sent it`() {
+        val room = "unitroomlk@conf.test"
+        val token = jwt("""{"sub":"Roman Test"}""")
+        fun stanza(from: String) =
+            """<message type="chat" from="$from"><stanza-id xmlns="urn:xmpp:sid:0" id="$now" by="x"/><data type="call-token" token="$token" room="$room" livekitUrl="wss://lk.evil"/></message>"""
+
+        assertTrue(CallSignaling.handleInbound(stanza("someone@host/r"), now, enabled))
+        assertNull(CallStore.snapshot().livekitUrl)
+    }
+
+    @Test
     fun `invite for the active call switches its kind`() {
         CallStore.startOutgoingCall("unitroomkind@conf.test", "Bob", "unitroomkind", CallKind.VIDEO, "bob", now)
         val invite = CallStanzas.directMessage(

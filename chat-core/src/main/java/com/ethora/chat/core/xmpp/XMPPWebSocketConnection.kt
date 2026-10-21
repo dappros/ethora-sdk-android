@@ -736,7 +736,7 @@ class XMPPWebSocketConnection(
             // 0. Call signalling (web: onCallTokenMessage runs before the chat handlers).
             //    call-token / call-invite / call-state never reach the chat pipeline.
             //    Archived rows are handled in XMPPClient.parseMAMResult instead.
-            if (!xml.contains("urn:xmpp:mam:2") && com.ethora.chat.core.call.CallSignaling.handleInbound(xml)) {
+            if (!xml.contains("urn:xmpp:mam:2") && com.ethora.chat.core.call.CallSignaling.handleInbound(xml, transport = com.ethora.chat.core.call.CallTransport(host) { sendRaw(it) })) {
                 return
             }
 
@@ -744,6 +744,20 @@ class XMPPWebSocketConnection(
             if (stanzaType == "error") {
                 parseAndHandleMessageError(xml)
                 return
+            }
+
+            // 1b. Delivery receipts (XEP-0184) and read markers (XEP-0333), element-based.
+            // Unwrap MUC-SUB first: the MUC may deliver the reflected stanza inside a pubsub event.
+            if (xml.contains("<received") || xml.contains("<displayed")) {
+                val inner = unwrapMucSubInnerMessage(xml)
+                ReceiptStanzas.parseReceived(inner)?.let { receipt ->
+                    handleReceivedReceipt(receipt)
+                    return
+                }
+                ReceiptStanzas.parseDisplayed(inner)?.let { marker ->
+                    handleDisplayedMarker(marker)
+                    return
+                }
             }
 
             // 2. Chat invite
@@ -1128,6 +1142,12 @@ class XMPPWebSocketConnection(
                 Log.d(TAG, "✅ Matched pending message via ID matching")
             }
             
+            // XEP-0184: acknowledge live messages from other users so their tick flips to
+            // delivered (web onRealtimeMessage). Own echoes and system broadcasts are not acked.
+            if (isSystemMessage != "true" && !isOwnSender(username, senderJID)) {
+                sendReceivedReceiptStanza(effectiveMessageId, roomJid)
+            }
+
             Log.d(TAG, "📨 Parsed real-time message: ID=$effectiveMessageId, stanzaId=$messageId, archiveId=$archiveId, From=$from, Body=${body.take(50)}, isMedia=$hasMedia, wasPending=$wasPending")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing real-time message", e)
@@ -1340,16 +1360,63 @@ class XMPPWebSocketConnection(
         
         val id = if (isTyping) "typing-${System.currentTimeMillis()}" else "stop-typing-${System.currentTimeMillis()}"
         val composingElement = if (isTyping) "composing" else "paused"
-        val escapedFullName = fullName
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\"", "&quot;")
-            .replace("'", "&apos;")
-        
-        val message = """<message type="groupchat" id="$id" to="$fixedRoomJid"><$composingElement xmlns="http://jabber.org/protocol/chatstates" /><data fullName="$escapedFullName" /></message>"""
-        sendRaw(message)
+        sendRaw(ReceiptStanzas.typingStanza(id, fixedRoomJid, fullName, isTyping))
         Log.d(TAG, "📝 Sent typing indicator to $fixedRoomJid: $composingElement (user: $fullName)")
+    }
+
+    /**
+     * XEP-0184 delivery receipt for a live message from another user.
+     * Matches web sendReceivedReceipt.xmpp.ts (broadcast to the room).
+     */
+    fun sendReceivedReceiptStanza(messageId: String, roomJid: String): Boolean {
+        val from = selfBareJid() ?: return false
+        if (!isAuthenticated || messageId.isBlank() || roomJid.isBlank()) return false
+        val id = "${ReceiptStanzas.RECEIVED_ID_PREFIX}${System.currentTimeMillis()}"
+        return sendRaw(ReceiptStanzas.receivedStanza(id, from, fixRoomJid(roomJid), messageId))
+    }
+
+    /**
+     * XEP-0333 read marker: [messageId] is the newest message this user has displayed.
+     * Matches web sendDisplayedMarker.xmpp.ts (broadcast to the room).
+     */
+    fun sendDisplayedMarkerStanza(messageId: String, roomJid: String): Boolean {
+        val from = selfBareJid() ?: return false
+        if (!isAuthenticated || messageId.isBlank() || roomJid.isBlank()) return false
+        val id = "${ReceiptStanzas.DISPLAYED_ID_PREFIX}${System.currentTimeMillis()}"
+        return sendRaw(ReceiptStanzas.displayedStanza(id, from, fixRoomJid(roomJid), messageId))
+    }
+
+    private fun fixRoomJid(roomJid: String): String =
+        if (roomJid.contains("@")) roomJid else "$roomJid@$conference"
+
+    private fun selfBareJid(): String? =
+        resolveBareJid(com.ethora.chat.core.store.UserStore.currentUser.value?.xmppUsername)
+            ?: resolveBareJid(username)
+
+    private fun isOwnSender(nickname: String, senderJid: String?): Boolean {
+        val me = ReceiptStanzas.normalizeLocal(
+            com.ethora.chat.core.store.UserStore.currentUser.value?.xmppUsername ?: username
+        )
+        if (me.isBlank()) return false
+        return ReceiptStanzas.normalizeLocal(nickname) == me ||
+            ReceiptStanzas.normalizeLocal(senderJid) == me
+    }
+
+    private fun handleReceivedReceipt(receipt: ReceiptStanzas.Receipt) {
+        com.ethora.chat.core.store.MessageStore.applyReceivedReceipt(
+            receipt.roomJid,
+            receipt.messageId,
+            receipt.fromXmppUsername,
+            System.currentTimeMillis()
+        )
+    }
+
+    private fun handleDisplayedMarker(marker: ReceiptStanzas.Receipt) {
+        com.ethora.chat.core.store.RoomStore.applyDisplayedMarker(
+            marker.roomJid,
+            marker.fromXmppUsername,
+            marker.messageId
+        )
     }
     
     /**
@@ -1566,8 +1633,13 @@ class XMPPWebSocketConnection(
             Log.e(TAG, "Refusing to send unsealed media to end-to-end encrypted room $fixedRoomJid")
             return false
         }
-        val dataMap = if (sealedKeys != null) mediaData.filterKeys { it != "e2eeKeys" } + ("clientEncrypted" to "true")
-            else mediaData
+        // The caption of a sealed message travels inside the encrypted body, not in `<data>`.
+        val sealedCaption = if (sealedKeys != null) (mediaData["caption"] as? String)?.takeIf { it.isNotBlank() } else null
+        val dataMap = if (sealedKeys != null) {
+            mediaData.filterKeys { it != "e2eeKeys" && it != "caption" } + ("clientEncrypted" to "true")
+        } else {
+            mediaData
+        }
 
         // Escape messageId for XML id attribute
         val safeId = messageId
@@ -1585,7 +1657,7 @@ class XMPPWebSocketConnection(
                 fixedRoomJid,
                 host,
                 messageId,
-                listOf(XmlElement("body").add(com.ethora.chat.core.e2ee.OmemoFileEnvelope.sealedMediaBody(sealedKeys))),
+                listOf(XmlElement("body").add(com.ethora.chat.core.e2ee.OmemoFileEnvelope.sealedMediaBody(sealedKeys, sealedCaption))),
                 cleartext.filterIsInstance<XmlElement>()
             )
             message = when (outcome) {
