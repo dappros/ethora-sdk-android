@@ -1,7 +1,7 @@
 package com.ethora.chat.ui.styling
 
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 
 /**
  * Dark-scheme neutrals, copied from the web SDK's `DARK_DEFAULTS` in
@@ -26,10 +26,17 @@ internal object ChatDarkPalette {
 }
 
 /** Mix [color] toward white by [amount] (0-1). Same as web `tintColor`. */
-internal fun tintTowardWhite(color: Color, amount: Float): Color = lerp(color, Color.White, amount)
+internal fun tintTowardWhite(color: Color, amount: Float): Color = mixColors(color, Color.White, amount)
 
 /** Mix [from] toward [to] by [amount] (0-1). Same as web `mixColor`. */
-internal fun mixColors(from: Color, to: Color, amount: Float): Color = lerp(from, to, amount)
+internal fun mixColors(from: Color, to: Color, amount: Float): Color =
+    // Per-channel in sRGB, like web: Compose's own lerp interpolates in Oklab and gives other colours.
+    Color(
+        red = from.red + (to.red - from.red) * amount,
+        green = from.green + (to.green - from.green) * amount,
+        blue = from.blue + (to.blue - from.blue) * amount,
+        alpha = from.alpha + (to.alpha - from.alpha) * amount
+    )
 
 /** True when the scheme's surface is dark. Used where a literal colour would otherwise be light-only. */
 internal fun isDarkSurface(surface: Color): Boolean = surface.luminance() < 0.5f
