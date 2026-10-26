@@ -1,6 +1,7 @@
 package com.ethora.chat.ui.components
 
 import androidx.compose.animation.*
+import com.ethora.chat.core.threads.ThreadSupport
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.animateScrollBy
@@ -27,6 +28,8 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
@@ -39,6 +42,8 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import com.ethora.chat.core.models.Room
+import com.ethora.chat.core.models.withAttachment
+import com.ethora.chat.ui.call.CallHeaderButtons
 import com.ethora.chat.core.models.MessageActionsProps
 import com.ethora.chat.core.models.MessageProps
 import com.ethora.chat.core.models.SendInputProps
@@ -48,6 +53,13 @@ import com.ethora.chat.core.store.PendingMediaSendQueue
 import com.ethora.chat.core.store.ScrollPositionStore
 import com.ethora.chat.core.store.UserStore
 import com.ethora.chat.core.xmpp.XMPPClient
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.shape.RoundedCornerShape
+import com.ethora.chat.core.config.isMessageSearchEnabled
+import com.ethora.chat.core.store.JumpRequestStore
+import com.ethora.chat.core.store.PendingJumpPreview
+import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.core.xmpp.replyParentIdOf
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 
@@ -92,11 +104,15 @@ fun ChatRoomView(
     room: Room,
     xmppClient: XMPPClient?,
     onBack: () -> Unit,
+    /** Opens another chat (a search hit in a different room). Without it, only this chat's hits open. */
+    onOpenRoom: ((Room) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val viewModel = remember(room.jid, xmppClient) { ChatRoomViewModel(room, xmppClient) }
     val lifecycleOwner = LocalLifecycleOwner.current
-    val messages by viewModel.messages.collectAsState()
+    val allRoomMessages by viewModel.messages.collectAsState()
+    // Main list: thread-only replies are shown in their thread instead (web MessageList filter).
+    val messages = remember(allRoomMessages) { allRoomMessages.filter(ThreadSupport::isMainListMessage) }
     val isLoading by viewModel.isLoading.collectAsState()
     val currentUser by UserStore.currentUser.collectAsState()
     val isLoadingMore by viewModel.isLoadingMore.collectAsState()
@@ -104,6 +120,16 @@ fun ChatRoomView(
     val scrollRestoreAnchor by viewModel.scrollRestoreAnchor.collectAsState()
     val connectionState by ConnectionStore.state.collectAsState()
     val pendingMediaItems by PendingMediaSendQueue.items.collectAsState()
+
+    // ---- Jump to message and message search (web useJumpToMessage / MessageSearchModal) ----
+    val jumpTarget by viewModel.jumpTarget.collectAsState()
+    val jumpWindow by viewModel.jumpWindow.collectAsState()
+    val jumpNotice by viewModel.jumpNotice.collectAsState()
+    val allRooms by RoomStore.rooms.collectAsState()
+    var showSearch by remember(room.jid) { mutableStateOf(false) }
+    var highlightedId by remember(room.jid) { mutableStateOf<String?>(null) }
+    // Set when "jump to latest" leaves a window: the list then goes to the live tail.
+    var scrollToLiveTail by remember(room.jid) { mutableStateOf(false) }
     
     // Update lastViewedTimestamp when room is opened; send presence to receive real-time messages
     LaunchedEffect(room.jid, xmppClient) {
@@ -218,6 +244,31 @@ fun ChatRoomView(
             }
     }
     
+    // ---- Read marker out (web MessageList flushMarkRead) ----
+    // While the user is actively viewing the room, publish the newest message as
+    // displayed, but only when someone else sent it. Debounced 1 s like web.
+    val latestFromOtherId = messages.lastOrNull()
+        ?.takeIf { !isMessageFromCurrentUser(it, viewModel.currentUserXmppUsername, viewModel.currentUserId) }
+        ?.id
+    val lastSentDisplayedMarker = remember(room.jid) { mutableStateOf<String?>(null) }
+    LaunchedEffect(room.jid, isActivelyViewed, latestFromOtherId) {
+        val markerId = latestFromOtherId ?: return@LaunchedEffect
+        if (!isActivelyViewed || lastSentDisplayedMarker.value == markerId) return@LaunchedEffect
+        kotlinx.coroutines.delay(1_000)
+        lastSentDisplayedMarker.value = markerId
+        xmppClient?.sendDisplayedMarkerStanza(markerId, room.jid)
+    }
+
+    // ---- Read receipts in (web Message tickInfo) ----
+    // Watermarks come from RoomStore: the `room` argument can be a stale snapshot.
+    val storeRooms by com.ethora.chat.core.store.RoomStore.rooms.collectAsState()
+    val lastDisplayedByUser = storeRooms.firstOrNull { it.jid == room.jid }?.lastDisplayedByUser
+    val messageIndexById = remember(messages) {
+        HashMap<String, Int>(messages.size * 2).also { index ->
+            messages.forEachIndexed { i, m -> index[m.id] = i }
+        }
+    }
+
     // Coroutine scope for scroll animations
     val coroutineScope = rememberCoroutineScope()
     
@@ -226,6 +277,9 @@ fun ChatRoomView(
     
     // State for file preview dialog
     var previewMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
+    // Album viewer: the image attachments of the tapped message and the starting one.
+    var previewAlbumUrls by remember { mutableStateOf<List<String>?>(null) }
+    var previewAlbumIndex by remember { mutableStateOf(0) }
     
     // State for context menu (tap position + message bounds in root coords for placement)
     var contextMenuMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
@@ -244,6 +298,9 @@ fun ChatRoomView(
     
     // State for replying
     var replyingToMessage by remember { mutableStateOf<com.ethora.chat.core.models.Message?>(null) }
+
+    // Open thread (web ThreadWrapper). Set by Reply, the quote, or the reply count pill.
+    var openThread by remember(room.jid) { mutableStateOf<ThreadTarget?>(null) }
 
     // State for delete confirmation (like web: modal before delete)
     var deleteConfirmMessageId by remember { mutableStateOf<String?>(null) }
@@ -356,8 +413,46 @@ fun ChatRoomView(
     // check always runs AFTER the previous auto-scroll has settled — if we
     // were pinned, canScrollForward is still false and we re-pin.
     var initialAutoScrollDone by remember(room.jid) { mutableStateOf(false) }
+
+    // ---- Jump to message: scroll to the target, flash it, page the window at its edges ----
+    LaunchedEffect(jumpTarget, messages) {
+        val target = jumpTarget ?: return@LaunchedEffect
+        val index = messages.indexOfFirst { it.id == target.messageId }
+        if (index < 0) return@LaunchedEffect
+        // A jump places the list: the bottom pin below must not undo it.
+        initialAutoScrollDone = true
+        listState.scrollToItem(index, -(listState.layoutInfo.viewportSize.height / 3))
+        highlightedId = messages[index].id
+        viewModel.consumeJumpTarget(target.at)
+    }
+    LaunchedEffect(highlightedId) {
+        if (highlightedId == null) return@LaunchedEffect
+        kotlinx.coroutines.delay(1000)
+        highlightedId = null
+    }
+    LaunchedEffect(room.jid) {
+        snapshotFlow { listState.firstVisibleItemIndex to (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) }
+            .collect { (first, last) ->
+                if (viewModel.jumpWindow.value == null) return@collect
+                if (first <= 3) viewModel.loadOlderInWindow()
+                val count = viewModel.messages.value.size
+                if (count > 0 && last >= count - 4) viewModel.loadNewerInWindow()
+            }
+    }
+    LaunchedEffect(jumpWindow, messages.size) {
+        if (jumpWindow == null && scrollToLiveTail && messages.isNotEmpty()) {
+            scrollToLiveTail = false
+            scrollToTrueBottom(animate = false)
+        }
+    }
     LaunchedEffect(room.jid, messages.size) {
         if (messages.isEmpty()) return@LaunchedEffect
+        // A jump window is not the live tail: nothing to pin, nothing unread to count.
+        if (jumpWindow != null) {
+            lastMessageCount = messages.size
+            lastTailId = messages.lastOrNull()?.id
+            return@LaunchedEffect
+        }
 
         // Let the new items measure before we inspect listState.
         kotlinx.coroutines.delay(60)
@@ -594,6 +689,19 @@ fun ChatRoomView(
 
     // Get chat config
     val config by com.ethora.chat.core.store.ChatStore.config.collectAsState()
+    val searchEnabled = isMessageSearchEnabled(config) && config?.chatHeaderSettings?.hideSearch != true
+    // Reactions, replies and interactions (web config keys; see ReactionsConfig)
+    val disableInteractions = config?.disableInteractions == true
+    val reactionsEnabled = config?.disableReactions != true && config?.reactions?.enabled != false
+    val reactionPickerEnabled = config?.reactions?.picker != false
+    val quickReactionList = config?.reactions?.quickReactions
+        ?.filter { it.isNotBlank() }
+        ?.take(8)
+        ?.takeIf { it.isNotEmpty() }
+        ?: com.ethora.chat.core.reactions.ReactionEmojis.DEFAULT_QUICK_REACTIONS
+    val repliesEnabled = config?.disableReplies != true
+    val currentUserLocalPart = currentUser?.xmppUsername?.substringBefore("@")?.takeIf { it.isNotBlank() }
+        ?: currentUser?.id
     val themeOverrides = com.ethora.chat.ui.styling.LocalChatThemeOverrides.current
     val chatBackgroundColor = themeOverrides.chatBackground ?: MaterialTheme.colorScheme.background
 
@@ -630,7 +738,8 @@ fun ChatRoomView(
         if (showChatInfo) {
             ChatInfoScreen(
                 room = room,
-                onBack = { showChatInfo = false }
+                onBack = { showChatInfo = false },
+                xmppClient = xmppClient
             )
         } else {
             // Header (only if not disabled)
@@ -648,6 +757,7 @@ fun ChatRoomView(
                 }
                 ChatRoomHeader(
                     title = customTitle ?: room.title,
+                    subtitle = typingSubtitle(composingUsers),
                     onBack = {
                         // Save scroll position before navigating back
                         val currentIndex = listState.firstVisibleItemIndex
@@ -657,10 +767,50 @@ fun ChatRoomView(
                     },
                     onInfoClick = { showChatInfo = true },
                     showInfoButton = !hideChatInfoButton,
-                    showBackButton = showBackButton
+                    showBackButton = showBackButton,
+                    onSearchClick = if (searchEnabled) ({ showSearch = true }) else null,
+                    showLanguageButton = com.ethora.chat.core.i18n.shouldShowLanguageSelector(config?.translates),
+                    trailingActions = {
+                        CallHeaderButtons(
+                            room = room,
+                            xmppClient = xmppClient,
+                            videoCalls = config?.videoCalls
+                        )
+                    }
                 )
             }
         
+        // Message search (header button): full-screen over the room.
+        if (showSearch) {
+            MessageSearchDialog(
+                currentRoom = room,
+                rooms = allRooms,
+                myXmppUsername = currentUser?.xmppUsername,
+                canOpenOtherRooms = onOpenRoom != null,
+                onDismiss = { showSearch = false },
+                onOpenHit = { hit, target ->
+                    showSearch = false
+                    val senderName = target.members.orEmpty().firstOrNull { it.id == hit.fromUserId }
+                        ?.let { member ->
+                            "${member.firstName.orEmpty()} ${member.lastName.orEmpty()}".trim()
+                                .ifEmpty { member.name.orEmpty() }
+                        }
+                        .orEmpty()
+                    JumpRequestStore.request(
+                        roomJid = target.jid,
+                        ids = listOf(hit.stanzaId, hit.messageId),
+                        createdAt = hit.createdAt,
+                        body = hit.body,
+                        preview = PendingJumpPreview(target.jid, senderName, hit.body, hit.createdAt)
+                    )
+                    if (target.jid != room.jid) {
+                        RoomStore.setCurrentRoom(target)
+                        onOpenRoom?.invoke(target)
+                    }
+                }
+            )
+        }
+
         // Messages list
         Box(
             modifier = Modifier
@@ -851,10 +1001,25 @@ fun ChatRoomView(
                                     }
                                 }
                                 
-                                // Find parent message for replies
-                                val parentMessage = if (message.isReply == true && message.mainMessage != null) {
-                                    messages.find { it.id == message.mainMessage }
-                                } else null
+                                // Quote for a reply shown in the main list (web `referencedMessage`):
+                                // the loaded parent, else a stub built from the reference JSON.
+                                val parentRef = ThreadSupport.parseMessageReference(message.mainMessage)
+                                val parentMessage = parentRef?.id?.let { parentId ->
+                                    allRoomMessages.firstOrNull {
+                                        ThreadSupport.threadKey(it) == parentId || it.id == parentId
+                                    } ?: com.ethora.chat.core.models.Message(
+                                        id = parentId,
+                                        user = com.ethora.chat.core.models.User(
+                                            id = parentId,
+                                            name = parentRef.userName
+                                        ),
+                                        date = java.util.Date(),
+                                        body = parentRef.text ?: "",
+                                        roomJid = room.jid
+                                    )
+                                }
+                                // Thread this message opens: its parent for a reply, else itself.
+                                val threadKeyForMessage = ThreadSupport.threadParentFor(message)
                                 
                                 // Add spacing between different users (add extra top padding if first in group and different user)
                                 val topPadding = if (isFirstInGroup && prevChronological != null && prevChronological.user.id != message.user.id) {
@@ -863,7 +1028,17 @@ fun ChatRoomView(
                                     0.dp
                                 }
                                 
-                                Box(modifier = Modifier.padding(top = topPadding)) {
+                                Box(
+                                    modifier = Modifier
+                                        .padding(top = topPadding)
+                                        .background(
+                                            if (highlightedId == message.id) {
+                                                MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                            } else {
+                                                androidx.compose.ui.graphics.Color.Transparent
+                                            }
+                                        )
+                                ) {
                                     val customMessageComponent = config?.customComponents?.customMessageComponent
                                     if (customMessageComponent != null) {
                                         customMessageComponent(
@@ -896,10 +1071,24 @@ fun ChatRoomView(
                                             contextMenuTap = Pair(tapX, tapY)
                                             contextMenuBounds = Pair(left, top) to Pair(right, bottom)
                                         }
+                                        val openThreadFor: () -> Unit = {
+                                            openThread = threadTargetFor(message, allRoomMessages, threadKeyForMessage)
+                                        }
                                         MessageBubble(
                                             message = message,
                                             isUser = isUser,
                                             parentMessage = parentMessage,
+                                            showReactions = reactionsEnabled,
+                                            onReactionToggle = if (reactionsEnabled && !disableInteractions) ({ emoji: String ->
+                                                viewModel.toggleReaction(message, emoji)
+                                            }) else null,
+                                            currentUserLocalPart = currentUserLocalPart,
+                                            onOpenThread = openThreadFor,
+                                            threadReplyCount = if (threadKeyForMessage == null) {
+                                                allRoomMessages.count { reply ->
+                                                    ThreadSupport.isThreadReplyOf(reply, ThreadSupport.threadKey(message))
+                                                }
+                                            } else 0,
                                             showAvatar = isFirstInGroup, // Show avatar on first message in group
                                             showUsername = isFirstInGroup, // Only show username on first message
                                             // Web parity: timestamp only on the LAST message of a
@@ -910,13 +1099,35 @@ fun ChatRoomView(
                                             showTimestamp = isLastInGroup,
                                             pendingMediaStatus = pendingMediaStatus,
                                             sendFailed = sendFailed,
-                                            onMediaClick = { msg -> previewMessage = msg },
+                                            receiptInfo = if (isUser && message.pending != true) {
+                                                com.ethora.chat.core.store.ReadReceipts.compute(
+                                                    messageId = message.id,
+                                                    receivedBy = message.receivedBy,
+                                                    messageIndexById = messageIndexById,
+                                                    lastDisplayedByUser = lastDisplayedByUser,
+                                                    currentXmppUsername = viewModel.currentUserXmppUsername
+                                                )
+                                            } else {
+                                                null
+                                            },
+                                            onMediaClick = { msg -> previewMessage = msg; previewAlbumUrls = null },
+                                            onAttachmentClick = { source, index ->
+                                                val attachments = com.ethora.chat.core.models.MessageAttachments.forMessage(source)
+                                                val picked = attachments.getOrNull(index)
+                                                if (picked != null) {
+                                                    val images = attachments.filter { it.isImage }.map { it.location }
+                                                    previewAlbumUrls = images.takeIf { it.size > 1 }
+                                                    previewAlbumIndex = images.indexOf(picked.location).coerceAtLeast(0)
+                                                    previewMessage = source.withAttachment(picked)
+                                                }
+                                            },
                                             onFailedClick = openFailedActions,
-                                            onLongPress = { tapX, tapY, left, top, right, bottom ->
+                                            onLongPress = if (disableInteractions) null else ({ tapX: Float, tapY: Float, left: Float, top: Float, right: Float, bottom: Float ->
                                                 contextMenuMessage = message
                                                 contextMenuTap = Pair(tapX, tapY)
                                                 contextMenuBounds = Pair(left, top) to Pair(right, bottom)
-                                            },
+                                            }),
+                                            onQuoteClick = { parent -> viewModel.jumpToQuotedMessage(parent) },
                                             onAvatarClick = { user ->
                                                 val disableProfiles = config?.disableProfilesInteractions == true
                                                 if (!disableProfiles && user.name != "Deleted User") {
@@ -980,6 +1191,34 @@ fun ChatRoomView(
                         }
                     }
                     
+                    // Jump window: the list shows archive messages around a target.
+                    if (jumpWindow != null) {
+                        Surface(
+                            modifier = Modifier
+                                .align(androidx.compose.ui.Alignment.BottomCenter)
+                                .padding(bottom = 16.dp),
+                            shape = MaterialTheme.shapes.extraLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            shadowElevation = 4.dp
+                        ) {
+                            TextButton(onClick = {
+                                scrollToLiveTail = true
+                                viewModel.jumpToLatest()
+                            }) {
+                                Text("Jump to latest messages", color = MaterialTheme.colorScheme.onPrimary)
+                            }
+                        }
+                    }
+                    jumpNotice?.let { notice ->
+                        JumpNoticeCard(
+                            notice = notice,
+                            onDismiss = { viewModel.dismissJumpNotice() },
+                            modifier = Modifier
+                                .align(androidx.compose.ui.Alignment.TopCenter)
+                                .padding(12.dp)
+                        )
+                    }
+
                     // Scroll to bottom button (floating action button) with animation
                     Box(
                         modifier = Modifier
@@ -1002,8 +1241,12 @@ fun ChatRoomView(
                             Box {
                                 FloatingActionButton(
                                     onClick = {
+                                        if (jumpWindow != null) {
+                                            scrollToLiveTail = true
+                                            viewModel.jumpToLatest()
+                                        }
                                         coroutineScope.launch {
-                                            scrollToTrueBottom(animate = true)
+                                            if (jumpWindow == null) scrollToTrueBottom(animate = true)
                                             unreadCount = 0
                                         }
                                     },
@@ -1141,7 +1384,18 @@ fun ChatRoomView(
                         onResend = {
                             viewModel.resendMessage(msg.id)
                             dismissMenu()
-                        }
+                        },
+                        quickReactions = if (reactionsEnabled) quickReactionList else null,
+                        myReactions = msg.reaction?.get(currentUserLocalPart)?.emoji?.toSet().orEmpty(),
+                        pickerEnabled = reactionPickerEnabled,
+                        onReaction = if (reactionsEnabled) ({ emoji: String ->
+                            viewModel.toggleReaction(msg, emoji)
+                            dismissMenu()
+                        }) else null,
+                        onReply = if (repliesEnabled) ({
+                            openThread = threadTargetFor(msg, allRoomMessages, ThreadSupport.threadParentFor(msg))
+                            dismissMenu()
+                        }) else null
                     )
                 }
             }
@@ -1209,6 +1463,19 @@ fun ChatRoomView(
                 )
             )
         } else {
+            val handleSendMediaBatch: ((List<Pair<java.io.File, String>>, String?, String?) -> Unit)? =
+                if (disableMedia) null else batchHandler@{ files, caption, replyId ->
+                    viewModel.sendMediaBatch(files, caption, replyId)
+                    pendingOwnMessageAutoScroll = true
+                    coroutineScope.launch {
+                        kotlinx.coroutines.delay(60)
+                        scrollToTrueBottom(animate = true)
+                    }
+                    if (replyingToMessage != null) {
+                        replyingToMessage = null
+                    }
+                    viewModel.sendStopTyping()
+                }
             val handleSendMediaWithCaption: ((java.io.File, String, String, String?) -> Unit)? =
                 if (disableMedia) null else comboHandler@{ file, mimeType, caption, replyId ->
                     viewModel.sendMediaWithCaption(file, mimeType, caption, replyId)
@@ -1226,6 +1493,7 @@ fun ChatRoomView(
                 onSendMessage = handleSendMessage,
                 onSendMedia = handleSendMedia,
                 onSendMediaWithCaption = handleSendMediaWithCaption,
+                onSendMediaBatch = handleSendMediaBatch,
                 onStartTyping = {
                     viewModel.sendStartTyping()
                 },
@@ -1245,6 +1513,29 @@ fun ChatRoomView(
             )
         }
         
+        // Thread panel (full screen)
+        openThread?.let { target ->
+            ThreadDialog(
+                room = room,
+                target = target,
+                viewModel = viewModel,
+                allMessages = allRoomMessages,
+                isMine = { msg ->
+                    isMessageFromCurrentUser(
+                        message = msg,
+                        currentUserXmppUsername = viewModel.currentUserXmppUsername,
+                        currentUserId = viewModel.currentUserId
+                    )
+                },
+                localPartOfCurrentUser = currentUserLocalPart,
+                reactionsEnabled = reactionsEnabled,
+                quickReactions = quickReactionList,
+                pickerEnabled = reactionPickerEnabled,
+                interactionsEnabled = !disableInteractions,
+                onClose = { openThread = null }
+            )
+        }
+
         // File preview dialog
         val roomImageUrls = remember(messages) {
             messages
@@ -1257,9 +1548,12 @@ fun ChatRoomView(
         }
         FilePreviewDialog(
             message = previewMessage,
-            galleryImageUrls = roomImageUrls,
-            galleryInitialIndex = initialImageIndex,
-            onDismiss = { previewMessage = null }
+            galleryImageUrls = previewAlbumUrls ?: roomImageUrls,
+            galleryInitialIndex = if (previewAlbumUrls != null) previewAlbumIndex else initialImageIndex,
+            onDismiss = {
+                previewMessage = null
+                previewAlbumUrls = null
+            }
         )
         
         // Delete confirmation dialog (like web ChatWrapper delete modal)
@@ -1289,15 +1583,27 @@ fun ChatRoomView(
     }
 }
 
+private fun typingSubtitle(users: List<String>): String? = when {
+    users.isEmpty() -> null
+    users.size == 1 -> "${users[0]} is typing"
+    users.size == 2 -> "${users[0]} and ${users[1]} are typing"
+    else -> "${users.size} people are typing"
+}
+
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun ChatRoomHeader(
     title: String,
+    subtitle: String? = null,
     onBack: () -> Unit,
     onInfoClick: () -> Unit,
     showInfoButton: Boolean,
-    showBackButton: Boolean
+    showBackButton: Boolean,
+    onSearchClick: (() -> Unit)? = null,
+    showLanguageButton: Boolean,
+    trailingActions: @Composable () -> Unit = {}
 ) {
+    val t = com.ethora.chat.ui.i18n.rememberChatTranslator()
     val headerColor = com.ethora.chat.ui.styling.LocalChatThemeOverrides.current.headerBackground
         ?: MaterialTheme.colorScheme.surface
     Surface(
@@ -1316,29 +1622,102 @@ private fun ChatRoomHeader(
                 IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
                     Icon(
                         imageVector = Icons.Default.ArrowBack,
-                        contentDescription = "Back"
+                        contentDescription = t("header.action.back")
                     )
                 }
             } else {
                 Spacer(modifier = Modifier.width(8.dp))
             }
 
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+            Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 8.dp),
-                maxLines = 1
-            )
+                    .padding(horizontal = 8.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    maxLines = 1
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall.copy(fontStyle = FontStyle.Italic),
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            if (onSearchClick != null) {
+                IconButton(onClick = onSearchClick, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "Search messages"
+                    )
+                }
+            }
+
+            if (showLanguageButton) {
+                LanguageSelectorButton()
+            }
+            trailingActions()
 
             if (showInfoButton) {
                 IconButton(onClick = onInfoClick, modifier = Modifier.size(40.dp)) {
                     Icon(
                         imageVector = Icons.Default.MoreVert,
-                        contentDescription = "Chat info"
+                        contentDescription = t("header.chatMenu")
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun JumpNoticeCard(
+    notice: JumpNotice,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 3.dp,
+        color = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            when (notice) {
+                is JumpNotice.Archived -> {
+                    Text(
+                        text = "Older message",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = notice.preview.body,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "This message is older than the history available in this chat, so it cannot be shown in place.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                is JumpNotice.NotFound -> Text(
+                    text = "That message is too far back to load.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+                Text("Dismiss")
             }
         }
     }

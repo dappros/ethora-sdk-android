@@ -107,6 +107,9 @@ data class ChatConfig(
     // Notifications
     val messageNotifications: MessageNotificationConfig? = null,
 
+    // Device push registration (off unless enabled)
+    val pushNotifications: PushNotificationsConfig? = null,
+
     // Retry behaviour for failed text/media sends. Defaults to autoRetry = false.
     val retryConfig: RetryConfig = RetryConfig(),
 
@@ -120,7 +123,44 @@ data class ChatConfig(
     val onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null,
 
     // Structured event stream
-    val onChatEvent: ((ChatEvent) -> Unit)? = null
+    val onChatEvent: ((ChatEvent) -> Unit)? = null,
+
+    // Light / dark / system, mirrors web `colorScheme`. Takes precedence over forceDarkTheme.
+    val colorScheme: ChatColorScheme? = null,
+
+    // Side-by-side room list and chat on wide screens. null = auto (on at >= 600dp),
+    // false = always single pane, true = always two pane.
+    val twoPaneLayout: Boolean? = null,
+    // Room management (web parity)
+    /** Hides the per-room mute, report and leave actions on the room list rows. */
+    val disableRoomSwipeActions: Boolean? = null,
+    /** Hides the mute action (web disableRoomMute). */
+    val disableRoomMute: Boolean? = null,
+    /** Hides the public chats directory entry. */
+    val disablePublicChatsDirectory: Boolean? = null,
+    // Reactions and replies (web/RN key names). disableReactions hard-disables
+    // reactions; reactions.enabled=false does the same. disableReplies hides only
+    // the "Reply" menu item, threads still open from the quote or the reply count.
+    val disableReactions: Boolean? = null,
+    val reactions: ReactionsConfig? = null,
+    val disableReplies: Boolean? = null,
+    // Message search (web enableMessageSearch / disableMessageSearch). Needs appId too.
+    val enableMessageSearch: Boolean? = null,
+    val disableMessageSearch: Boolean? = null,
+    // Composer limits for multi-file media messages (web `attachments`)
+    val attachments: AttachmentsConfig = AttachmentsConfig(),
+    // Static UI captions (locale + string overrides)
+    val i18n: I18nConfig? = null,
+
+    // Account settings screen (language card, change password)
+    val settings: SettingsConfig? = null,
+
+    // Logout action in the account settings screen
+    val logout: LogoutConfig? = null,
+    // 1:1 audio and video calls (LiveKit). Off unless enabled.
+    val videoCalls: VideoCallsConfig? = null,
+    // End-to-end encryption (OMEMO 2). Off by default.
+    val e2ee: E2eeConfig? = null
 ) {
     /**
      * Builder class for creating ChatConfig instances
@@ -128,6 +168,7 @@ data class ChatConfig(
     class Builder {
         private var disableHeader: Boolean? = null
         private var disableMedia: Boolean? = null
+        private var attachments: AttachmentsConfig = AttachmentsConfig()
         private var colors: ChatColors? = null
         private var typography: ChatTypographyConfig? = null
         private var forceDarkTheme: Boolean? = null
@@ -181,10 +222,30 @@ data class ChatConfig(
         private var chatHeaderSettings: ChatHeaderSettingsConfig? = null
         private var useStoreConsoleEnabled: Boolean? = null
         private var messageNotifications: MessageNotificationConfig? = null
+        private var pushNotifications: PushNotificationsConfig? = null
         private var eventHandlers: ChatEventHandlers? = null
         private var customComponents: CustomComponents? = null
         private var onBeforeSend: ((OutgoingSendInput) -> SendDecision)? = null
         private var onChatEvent: ((ChatEvent) -> Unit)? = null
+        private var colorScheme: ChatColorScheme? = null
+        private var twoPaneLayout: Boolean? = null
+        private var disableRoomSwipeActions: Boolean? = null
+        private var disableRoomMute: Boolean? = null
+        private var disablePublicChatsDirectory: Boolean? = null
+
+        fun disableRoomSwipeActions(value: Boolean) = apply { this.disableRoomSwipeActions = value }
+        fun disableRoomMute(value: Boolean) = apply { this.disableRoomMute = value }
+        fun disablePublicChatsDirectory(value: Boolean) = apply { this.disablePublicChatsDirectory = value }
+        private var disableReactions: Boolean? = null
+        private var reactions: ReactionsConfig? = null
+        private var disableReplies: Boolean? = null
+        private var enableMessageSearch: Boolean? = null
+        private var disableMessageSearch: Boolean? = null
+        private var i18n: I18nConfig? = null
+        private var settings: SettingsConfig? = null
+        private var logout: LogoutConfig? = null
+        private var videoCalls: VideoCallsConfig? = null
+        private var e2ee: E2eeConfig? = null
 
         fun disableHeader(value: Boolean) = apply { this.disableHeader = value }
         fun disableMedia(value: Boolean) = apply { this.disableMedia = value }
@@ -241,10 +302,24 @@ data class ChatConfig(
         fun chatHeaderSettings(value: ChatHeaderSettingsConfig) = apply { this.chatHeaderSettings = value }
         fun useStoreConsoleEnabled(value: Boolean) = apply { this.useStoreConsoleEnabled = value }
         fun messageNotifications(value: MessageNotificationConfig) = apply { this.messageNotifications = value }
+        fun pushNotifications(value: PushNotificationsConfig) = apply { this.pushNotifications = value }
         fun eventHandlers(value: ChatEventHandlers) = apply { this.eventHandlers = value }
         fun customComponents(value: CustomComponents) = apply { this.customComponents = value }
         fun onBeforeSend(value: (OutgoingSendInput) -> SendDecision) = apply { this.onBeforeSend = value }
         fun onChatEvent(value: (ChatEvent) -> Unit) = apply { this.onChatEvent = value }
+        fun colorScheme(value: ChatColorScheme?) = apply { this.colorScheme = value }
+        fun twoPaneLayout(value: Boolean?) = apply { this.twoPaneLayout = value }
+        fun disableReactions(value: Boolean) = apply { this.disableReactions = value }
+        fun reactions(value: ReactionsConfig) = apply { this.reactions = value }
+        fun disableReplies(value: Boolean) = apply { this.disableReplies = value }
+        fun enableMessageSearch(value: Boolean) = apply { this.enableMessageSearch = value }
+        fun disableMessageSearch(value: Boolean) = apply { this.disableMessageSearch = value }
+        fun attachments(value: AttachmentsConfig) = apply { this.attachments = value }
+        fun i18n(value: I18nConfig) = apply { this.i18n = value }
+        fun settings(value: SettingsConfig) = apply { this.settings = value }
+        fun logout(value: LogoutConfig) = apply { this.logout = value }
+        fun videoCalls(value: VideoCallsConfig) = apply { this.videoCalls = value }
+        fun e2ee(value: E2eeConfig) = apply { this.e2ee = value }
 
         fun build() = ChatConfig(
             disableHeader = disableHeader,
@@ -302,10 +377,27 @@ data class ChatConfig(
             chatHeaderSettings = chatHeaderSettings,
             useStoreConsoleEnabled = useStoreConsoleEnabled,
             messageNotifications = messageNotifications,
+            pushNotifications = pushNotifications,
             eventHandlers = eventHandlers,
             customComponents = customComponents,
             onBeforeSend = onBeforeSend,
-            onChatEvent = onChatEvent
+            onChatEvent = onChatEvent,
+            colorScheme = colorScheme,
+            twoPaneLayout = twoPaneLayout,
+            disableRoomSwipeActions = disableRoomSwipeActions,
+            disableRoomMute = disableRoomMute,
+            disablePublicChatsDirectory = disablePublicChatsDirectory,
+            disableReactions = disableReactions,
+            reactions = reactions,
+            disableReplies = disableReplies,
+            enableMessageSearch = enableMessageSearch,
+            disableMessageSearch = disableMessageSearch,
+            attachments = attachments,
+            i18n = i18n,
+            settings = settings,
+            logout = logout,
+            videoCalls = videoCalls,
+            e2ee = e2ee
         )
     }
 

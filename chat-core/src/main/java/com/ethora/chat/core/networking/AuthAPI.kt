@@ -9,6 +9,7 @@ import com.google.gson.JsonObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Response
 import retrofit2.http.*
 
@@ -30,6 +31,16 @@ interface AuthAPI {
         @Body body: ClientTypeRequest
     ): Response<LoginResponse>
 
+    /**
+     * Refresh-token rotation, as in web `authRefresh.ts` and RN: the presented
+     * refresh token travels in the Authorization header, the body is empty.
+     */
+    @POST("users/login/refresh")
+    suspend fun loginRefresh(
+        @Header("Authorization") authorization: String
+    ): Response<RefreshTokenResponse>
+
+    /** Legacy endpoint, kept for source compatibility. Use [loginRefresh]. */
     @POST("users/refresh-token")
     suspend fun refreshToken(
         @Body body: RefreshTokenRequest
@@ -40,7 +51,23 @@ interface AuthAPI {
     suspend fun uploadFile(
         @Header("Authorization") token: String,
         @Header("Accept") accept: String = "*/*",
-        @Part file: MultipartBody.Part
+        @Part file: MultipartBody.Part,
+        @Part("clientEncrypted") clientEncrypted: RequestBody?
+    ): Response<JsonObject>
+
+    /**
+     * Secure upload (web `/v2/files/secure`). The absolute [url] is passed in
+     * because the v2 path does not live under the SDK's /v1 base URL.
+     */
+    @Multipart
+    @POST
+    suspend fun uploadFileSecure(
+        @Url url: String,
+        @Header("Authorization") token: String,
+        @Header("Accept") accept: String = "*/*",
+        @Part file: MultipartBody.Part,
+        @Part("chatName") chatName: RequestBody,
+        @Part("clientEncrypted") clientEncrypted: RequestBody?
     ): Response<JsonObject>
 }
 
@@ -69,7 +96,9 @@ data class LoginResponse(
     val refreshToken: String,
     val user: UserResponse,
     val app: AppResponse? = null,
-    val isAllowedNewAppCreate: Boolean? = null
+    val isAllowedNewAppCreate: Boolean? = null,
+    /** Per-viewer token for secure media URLs (web top-level `fileToken`). */
+    val fileToken: String? = null
 )
 
 /**
@@ -95,7 +124,9 @@ data class UserResponse(
     val updatedAt: String? = null,
     val authMethod: String? = null,
     val description: String? = null,
-    val defaultWallet: WalletResponse? = null
+    val defaultWallet: WalletResponse? = null,
+    val appLanguage: String? = null,
+    val chatLanguage: String? = null
 ) {
     fun toUser(): User {
         return User(
@@ -118,7 +149,9 @@ data class UserResponse(
             updatedAt = updatedAt,
             authMethod = authMethod,
             description = description,
-            walletAddress = defaultWallet?.walletAddress
+            walletAddress = defaultWallet?.walletAddress,
+            appLanguage = appLanguage,
+            chatLanguage = chatLanguage
         )
     }
 }
@@ -149,7 +182,9 @@ data class RefreshTokenRequest(
  */
 data class RefreshTokenResponse(
     val token: String,
-    val refreshToken: String? = null
+    val refreshToken: String? = null,
+    val fileToken: String? = null,
+    val xmppPassword: String? = null
 )
 
 /**
@@ -222,7 +257,7 @@ object AuthAPIHelper {
         baseUrl: String = ChatStore.getEffectiveBaseUrl()
     ): RefreshTokenResponse {
         val api = ApiClient.createService<AuthAPI>(baseUrl)
-        val response = api.refreshToken(RefreshTokenRequest(refreshToken))
+        val response = api.loginRefresh(refreshToken)
         if (response.isSuccessful) {
             return response.body()!!
         } else {
@@ -246,18 +281,76 @@ object AuthAPIHelper {
         }
     }
     
+    /** Set after the secure route rejects a request for a reason other than auth or size. */
+    @Volatile
+    private var secureUploadUnavailable = false
+
+    private sealed class UploadAttempt {
+        class Done(val result: FileUploadResult?) : UploadAttempt()
+        class Rejected(val code: Int) : UploadAttempt()
+        object Failed : UploadAttempt()
+    }
+
     /**
-     * Upload file
+     * Upload one file. With [chatName] set, tries the secure route
+     * (`/v2/files/secure`, web parity) and falls back to `files/` when that route
+     * is unavailable on the backend. 401 is retried once with a refreshed token,
+     * 413 is final, and a transport failure is not retried on the legacy route.
      */
     suspend fun uploadFile(
         file: java.io.File,
         mimeType: String,
         token: String,
-        baseUrl: String = ChatStore.getEffectiveBaseUrl()
+        baseUrl: String = ChatStore.getEffectiveBaseUrl(),
+        chatName: String? = null,
+        /** The file is ciphertext sealed by the caller (E2EE room): the backend stores it verbatim. */
+        clientEncrypted: Boolean = false
     ): FileUploadResult? {
+        val encryptedFlag: RequestBody? = if (clientEncrypted) "true".toRequestBody("text/plain".toMediaType()) else null
+        if (!chatName.isNullOrBlank() && !secureUploadUnavailable) {
+            val secureUrl = secureUploadUrl(baseUrl)
+            val chatNameBody = chatName.toRequestBody("text/plain".toMediaType())
+            when (val attempt = attemptUpload(file, mimeType, token, baseUrl) { api, authHeader, part ->
+                api.uploadFileSecure(secureUrl, authHeader, "*/*", part, chatNameBody, encryptedFlag)
+            }) {
+                is UploadAttempt.Done -> return attempt.result
+                is UploadAttempt.Failed -> return null
+                is UploadAttempt.Rejected -> {
+                    if (attempt.code == 401 || attempt.code == 413) return null
+                    secureUploadUnavailable = true
+                    android.util.Log.w(
+                        "AuthAPIHelper",
+                        "$SECURE_UPLOAD_PATH unavailable (${attempt.code}), using files/ for this session"
+                    )
+                }
+            }
+        }
+        return when (val attempt = attemptUpload(file, mimeType, token, baseUrl) { api, authHeader, part ->
+            api.uploadFile(authHeader, "*/*", part, encryptedFlag)
+        }) {
+            is UploadAttempt.Done -> attempt.result
+            else -> null
+        }
+    }
+
+    private const val SECURE_UPLOAD_PATH = "v2/files/secure"
+
+    /** Absolute secure-upload URL: the SDK base URL without its /v1 or /v2 suffix. */
+    internal fun secureUploadUrl(baseUrl: String): String {
+        val root = baseUrl.trimEnd('/').replace(Regex("/v[12]$", RegexOption.IGNORE_CASE), "")
+        return "$root/$SECURE_UPLOAD_PATH"
+    }
+
+    private suspend fun attemptUpload(
+        file: java.io.File,
+        mimeType: String,
+        token: String,
+        baseUrl: String,
+        send: suspend (AuthAPI, String, MultipartBody.Part) -> Response<JsonObject>
+    ): UploadAttempt {
         return try {
             val api = ApiClient.createService<AuthAPI>(baseUrl)
-            
+
             val requestFile = RequestBody.create(
                 mimeType.toMediaType(),
                 file
@@ -267,7 +360,7 @@ object AuthAPIHelper {
                 file.name,
                 requestFile
             )
-            
+
             fun buildAuthHeaders(rawToken: String): LinkedHashSet<String> {
                 return linkedSetOf<String>().apply {
                     add(rawToken)
@@ -279,20 +372,23 @@ object AuthAPIHelper {
 
             var currentToken = token
             var hasRefreshedToken = false
+            var lastCode = -1
             while (true) {
                 var shouldRetryWithRefreshedToken = false
                 for (authHeader in buildAuthHeaders(currentToken)) {
-                    val response = api.uploadFile(authHeader, "*/*", multipartBody)
-                    if (response.isSuccessful && response.body() != null) {
-                        val body = response.body()!!
+                    val response = send(api, authHeader, multipartBody)
+                    if (response.isSuccessful) {
+                        val body = response.body()
+                        if (body == null) return UploadAttempt.Done(null)
                         val result = parseUploadResult(body)
                         if (result == null) {
                             android.util.Log.e("AuthAPIHelper", "File upload succeeded but no parsable result. body=$body")
                         }
-                        return result
+                        return UploadAttempt.Done(result)
                     }
 
                     val code = response.code()
+                    lastCode = code
                     val errorBody = response.errorBody()?.string()
                     android.util.Log.w(
                         "AuthAPIHelper",
@@ -303,8 +399,7 @@ object AuthAPIHelper {
                         val refreshTokenValue = UserStore.refreshToken.value
                         if (!refreshTokenValue.isNullOrBlank()) {
                             try {
-                                val refreshed = refreshToken(refreshTokenValue, baseUrl)
-                                UserStore.updateTokens(refreshed.token, refreshed.refreshToken)
+                                val refreshed = AuthRefresh.refreshAuthTokens()
                                 currentToken = refreshed.token
                                 hasRefreshedToken = true
                                 shouldRetryWithRefreshedToken = true
@@ -324,10 +419,10 @@ object AuthAPIHelper {
             }
 
             android.util.Log.e("AuthAPIHelper", "File upload failed for all authorization header variants (baseUrl=$baseUrl)")
-            null
+            UploadAttempt.Rejected(lastCode)
         } catch (e: Exception) {
             android.util.Log.e("AuthAPIHelper", "File upload exception", e)
-            null
+            UploadAttempt.Failed
         }
     }
 

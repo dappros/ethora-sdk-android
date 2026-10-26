@@ -79,11 +79,13 @@ fun FullScreenImageViewer(
                 // on some devices, leaving the viewer black. Convert local paths to
                 // a File so the fetcher picks the right loader. Http(s) URLs go
                 // through as String unchanged.
+                // Secure-files URLs get the viewer's ft token before loading.
+                val secureUrl = rememberSecureFileUrl(url) ?: url
                 val model: Any = when {
-                    url.isBlank() -> url
-                    url.startsWith("file://") -> java.io.File(url.removePrefix("file://"))
-                    url.startsWith("/") -> java.io.File(url)
-                    else -> url
+                    secureUrl.isBlank() -> secureUrl
+                    secureUrl.startsWith("file://") -> java.io.File(secureUrl.removePrefix("file://"))
+                    secureUrl.startsWith("/") -> java.io.File(secureUrl)
+                    else -> secureUrl
                 }
                 var loadFailed by remember(url) { mutableStateOf(false) }
                 Box(modifier = Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
@@ -218,7 +220,7 @@ fun FullScreenImageViewer(
 private suspend fun downloadImage(context: android.content.Context, imageUrl: String, fileName: String) {
     withContext(Dispatchers.IO) {
         try {
-            val url = URL(imageUrl)
+            val url = URL(com.ethora.chat.core.networking.SecureFileUrl.withFileToken(imageUrl))
             val connection = url.openConnection()
             connection.connect()
             

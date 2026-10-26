@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.ethora.chat.core.config.ChatConfig
 import com.ethora.chat.core.config.ChatEvent
+import com.ethora.chat.core.config.resolveDarkTheme
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.User
 import com.ethora.chat.core.networking.ApiClient
@@ -50,10 +51,13 @@ import com.ethora.chat.core.push.PushNotificationManager
 import com.ethora.chat.core.xmpp.XMPPClientDelegate
 import com.ethora.chat.core.xmpp.ConnectionStatus
 import com.ethora.chat.internal.ChatXMPPClientOwnership
+import com.ethora.chat.ui.call.CallOverlayHost
 import com.ethora.chat.ui.components.ChatRoomView
 import com.ethora.chat.ui.components.ConfigErrorScreen
 import com.ethora.chat.ui.components.RoomListView
+import com.ethora.chat.ui.components.TwoPaneRoomLayout
 import com.ethora.chat.ui.styling.ChatTheme
+import com.ethora.chat.ui.styling.shouldUseTwoPane
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CancellationException
@@ -84,6 +88,9 @@ fun Chat(
     val localStorage = remember { LocalStorage(context) }
 
     ChatStore.setConfig(config)
+    com.ethora.chat.core.e2ee.E2eeRuntime.setStoreFactory { jid ->
+        com.ethora.chat.core.e2ee.OmemoPrefsStore.forAccount(context, jid)
+    }
     val configError = ChatStore.validateServerConfig(config)
     if (configError != null) {
         android.util.Log.w("EthoraChat", "ChatConfig invalid → $configError")
@@ -284,7 +291,8 @@ fun Chat(
     }
     
     ChatTheme(
-        darkTheme = config.forceDarkTheme ?: androidx.compose.foundation.isSystemInDarkTheme(),
+        darkTheme = resolveDarkTheme(config.colorScheme, config.forceDarkTheme)
+            ?: androidx.compose.foundation.isSystemInDarkTheme(),
         colors = config.colors,
         bubble = config.bubleMessage,
         background = config.backgroundChat,
@@ -783,10 +791,10 @@ fun Chat(
             }
         }
         
-        // Push subscribe paths gated behind SDK_PUSH_SUBSCRIBE_ENABLED
-        // (see const at end of file). FCM token + pending-JID deep-link stay live.
+        // Push subscribe paths run only when config.pushNotifications.enabled is true.
+        // The pending-JID deep-link below is always live.
         val fcmToken by PushNotificationManager.fcmToken.collectAsState()
-        if (SDK_PUSH_SUBSCRIBE_ENABLED) {
+        if (config.pushNotifications?.enabled == true) {
             LaunchedEffect(fcmToken, currentUser?.walletAddress) {
                 val token = fcmToken
                 if (token != null && currentUser != null) {
@@ -909,17 +917,29 @@ fun Chat(
                 }
             }
         } else {
-            if (selectedRoom != null) {
+            val closeSelectedRoom = {
+                selectedRoom?.let { room ->
+                    com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, System.currentTimeMillis())
+                }
+                com.ethora.chat.core.store.RoomStore.setCurrentRoom(null)
+                selectedRoom = null
+            }
+            val screenWidthDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
+            if (shouldUseTwoPane(screenWidthDp, config.twoPaneLayout)) {
+                TwoPaneRoomLayout(
+                    selectedRoom = selectedRoom,
+                    xmppClient = xmppClient,
+                    onRoomSelected = { room -> selectedRoom = room },
+                    onRoomClosed = closeSelectedRoom,
+                    modifier = modifier
+                )
+            } else if (selectedRoom != null) {
                 ChatRoomView(
                     room = selectedRoom!!,
                     xmppClient = xmppClient,
-                    onBack = { 
-                        selectedRoom?.let { room ->
-                            com.ethora.chat.core.store.RoomStore.setLastViewedTimestamp(room.jid, System.currentTimeMillis())
-                        }
-                        com.ethora.chat.core.store.RoomStore.setCurrentRoom(null)
-                        selectedRoom = null 
-                    },
+                    onBack = closeSelectedRoom,
+                    // A search hit in another chat opens that chat (message search).
+                    onOpenRoom = { room -> selectedRoom = room },
                     modifier = modifier
                 )
             } else {
@@ -929,6 +949,10 @@ fun Chat(
                 )
             }
         }
+
+        // Call UI (incoming ring, outgoing ring, active session). Hosted here so a
+        // call rings on any screen. Renders nothing while idle or when calls are off.
+        CallOverlayHost(videoCalls = config.videoCalls, xmppClient = xmppClient)
     }
 }
 
@@ -940,10 +964,6 @@ private enum class RoomConnectionPhase {
     READY,
     FAILED
 }
-
-// Push subscription (backend POST + MUC-SUB per room) is off for now.
-// Flip to true to re-enable.
-private const val SDK_PUSH_SUBSCRIBE_ENABLED: Boolean = false
 
 private fun resolveRoomTitle(
     normalizedRoomJid: String,

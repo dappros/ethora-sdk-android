@@ -8,8 +8,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Explore
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -26,19 +30,50 @@ import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.models.RoomListItemProps
 import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.MessageStore
+import com.ethora.chat.core.store.JumpRequestStore
+import com.ethora.chat.core.store.PendingJumpPreview
 import com.ethora.chat.core.store.RoomStore
+import com.ethora.chat.core.store.UserStore
+import com.ethora.chat.core.config.isMessageSearchEnabled
+import com.ethora.chat.core.search.MESSAGE_SEARCH_MIN_QUERY_LENGTH
+import androidx.compose.runtime.rememberCoroutineScope
+import com.ethora.chat.ui.i18n.rememberChatTranslator
 import java.text.SimpleDateFormat
 import java.util.*
 
 /**
  * Room list view with search and create chat functionality
  */
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Room list with the account settings screen as an in-place page. The header's settings action
+ * opens it, unless the host took over the menu with `ChatConfig.headerMenu`.
+ */
 @Composable
 fun RoomListView(
     onRoomSelected: (Room) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showAccountSettings by remember { mutableStateOf(false) }
+    if (showAccountSettings) {
+        BackHandler { showAccountSettings = false }
+        AccountSettingsScreen(onBack = { showAccountSettings = false }, modifier = modifier)
+    } else {
+        RoomListContent(
+            onRoomSelected = onRoomSelected,
+            onOpenAccountSettings = { showAccountSettings = true },
+            modifier = modifier
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RoomListContent(
+    onRoomSelected: (Room) -> Unit,
+    onOpenAccountSettings: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val t = rememberChatTranslator()
     val viewModel = remember { RoomListViewModel() }
     val rooms by viewModel.rooms.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
@@ -48,7 +83,25 @@ fun RoomListView(
     val messagesByRoom by MessageStore.messages.collectAsState()
     
     var searchText by remember { mutableStateOf(TextFieldValue("")) }
+
+    // Message hits under the chat matches (web: chat-list search). Opt-in via enableMessageSearch + appId.
+    val messageSearchEnabled = isMessageSearchEnabled(config)
+    val messageSearchScope = rememberCoroutineScope()
+    val messageSearch = remember { MessageSearchController(messageSearchScope) }
+    val messageState by messageSearch.state.collectAsState()
+    val messageSenderNames = rememberSenderNames(rooms)
+    val showMessageHits = messageSearchEnabled && searchText.text.trim().length >= MESSAGE_SEARCH_MIN_QUERY_LENGTH
+    LaunchedEffect(searchText.text, messageSearchEnabled) {
+        messageSearch.update(
+            query = if (messageSearchEnabled) searchText.text else "",
+            chatId = null,
+            fromUserId = null,
+            since = null,
+            until = null
+        )
+    }
     var showCreateChatDialog by remember { mutableStateOf(false) }
+    var showPublicChats by remember { mutableStateOf(false) }
     
     // Track selected room for active state
     val selectedRoom by RoomStore.currentRoom.collectAsState()
@@ -165,21 +218,38 @@ fun RoomListView(
             TopAppBar(
                 title = { 
                     Text(
-                        "Chats",
+                        t("tabs.chats"),
                         style = MaterialTheme.typography.titleLarge.copy(
                             fontWeight = FontWeight.Bold
                         )
                     ) 
                 },
                 actions = {
+                    if (config?.disablePublicChatsDirectory != true) {
+                        IconButton(onClick = { showPublicChats = true }) {
+                            Icon(
+                                imageVector = Icons.Default.Explore,
+                                contentDescription = t("publicChats.title")
+                            )
+                        }
+                    }
                     IconButton(
                         onClick = { showCreateChatDialog = true },
                         modifier = Modifier.testTag(RoomListViewTestTags.CREATE_ROOM_BUTTON)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Add,
-                            contentDescription = "Create new chat"
+                            contentDescription = t("action.newChat")
                         )
+                    }
+                    // Host-owned menu (ChatConfig.headerMenu) replaces the built-in settings entry.
+                    val headerMenu = config?.headerMenu
+                    IconButton(onClick = { if (headerMenu != null) headerMenu() else onOpenAccountSettings() }) {
+                        if (headerMenu != null) {
+                            Icon(imageVector = Icons.Default.MoreVert, contentDescription = t("header.menu"))
+                        } else {
+                            Icon(imageVector = Icons.Default.Settings, contentDescription = t("settings.menu.title"))
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -216,7 +286,7 @@ fun RoomListView(
                 ) {
                     CircularProgressIndicator()
                 }
-            } else if (filteredRooms.isEmpty()) {
+            } else if (filteredRooms.isEmpty() && !(showMessageHits && messageState.status != MessageSearchController.Status.IDLE)) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = androidx.compose.ui.Alignment.Center
@@ -226,13 +296,13 @@ fun RoomListView(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = if (searchText.text.isNotBlank()) "No chats found" else "No chats yet",
+                            text = if (searchText.text.isNotBlank()) t("rooms.noResults") else t("rooms.empty"),
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         if (searchText.text.isNotBlank()) {
                             TextButton(onClick = { searchText = TextFieldValue("") }) {
-                                Text("Clear search")
+                                Text(t("search.clear"))
                             }
                         }
                     }
@@ -245,6 +315,40 @@ fun RoomListView(
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    if (showMessageHits) {
+                        item(key = "message-hits-header") {
+                            Text(
+                                text = "Messages",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 8.dp, top = 8.dp, bottom = 4.dp)
+                            )
+                        }
+                        searchHitItems(
+                            query = searchText.text.trim(),
+                            state = messageState,
+                            controller = messageSearch,
+                            rooms = rooms,
+                            names = messageSenderNames,
+                            myXmppUsername = UserStore.currentUser.value?.xmppUsername,
+                            showRoomHeadline = true,
+                            canOpen = { hit -> messageHitRoom(hit, rooms) != null },
+                            onOpen = { hit ->
+                                val target = messageHitRoom(hit, rooms)
+                                if (target != null) {
+                                    JumpRequestStore.request(
+                                        roomJid = target.jid,
+                                        ids = listOf(hit.stanzaId, hit.messageId),
+                                        createdAt = hit.createdAt,
+                                        body = hit.body,
+                                        preview = PendingJumpPreview(target.jid, "", hit.body, hit.createdAt)
+                                    )
+                                    RoomStore.setCurrentRoom(target)
+                                    onRoomSelected(target)
+                                }
+                            }
+                        )
+                    }
                     items(filteredRooms) { room ->
                         val onClick = {
                             RoomStore.setCurrentRoom(room)
@@ -272,6 +376,13 @@ fun RoomListView(
         }
     }
     
+    if (showPublicChats) {
+        PublicChatsDialog(
+            onDismiss = { showPublicChats = false },
+            onOpenRoom = { room -> onRoomSelected(room) }
+        )
+    }
+
     // Create chat dialog
     if (showCreateChatDialog) {
         CreateChatDialog(
@@ -294,6 +405,7 @@ private fun SearchBar(
     onSearchTextChange: (TextFieldValue) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val t = rememberChatTranslator()
     OutlinedTextField(
         value = searchText,
         onValueChange = onSearchTextChange,
@@ -301,13 +413,13 @@ private fun SearchBar(
         leadingIcon = {
             Icon(
                 imageVector = Icons.Default.Search,
-                contentDescription = "Search",
+                contentDescription = t("search.placeholder"),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
             )
         },
         placeholder = { 
             Text(
-                "Search chats...",
+                t("search.placeholder"),
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             ) 
         },

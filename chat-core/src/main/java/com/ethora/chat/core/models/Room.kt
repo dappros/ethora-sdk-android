@@ -78,6 +78,9 @@ data class Room(
     val composing: Boolean? = null,
     val composingList: List<String>? = null,
     val lastViewedTimestamp: Long? = null,
+    /** XEP-0333 read marker per user: local part -> id of the newest message they displayed.
+     *  Mirrors web IRoom.lastDisplayedByUser. Session-only. */
+    val lastDisplayedByUser: Map<String, String>? = null,
     /**
      * Web parity (`@ethora/chat-component@26.3.20`, room reducer):
      *   `unreadBaselineTimestamp: i?.lastViewedTimestamp ?? n.unreadBaselineTimestamp
@@ -101,7 +104,11 @@ data class Room(
     val historyComplete: Boolean? = null,
     val historyPreloadState: HistoryPreloadState = HistoryPreloadState.IDLE,
     val isPlaceholder: Boolean = false,
-    val presenceReady: Boolean = false
+    val presenceReady: Boolean = false,
+    /** Per-user mute (web `IRoom.muted`). Null when the backend has not reported it. */
+    val muted: Boolean? = null,
+    /** Backend marked this room end-to-end encrypted. Only acted on when E2EE is enabled. */
+    val e2ee: Boolean = false
 )
 
 /**
@@ -121,7 +128,13 @@ data class ApiRoom(
     val createdAt: String? = null,
     val updatedAt: String? = null,
     val __v: Int? = null,
-    val reported: Boolean? = null
+    val reported: Boolean? = null,
+    /** Per-user mute, reported by /chats/my only when the backend supports it. */
+    val muted: Boolean? = null,
+    /** True total; `members` is capped (30) for big public rooms. */
+    val usersCnt: Int? = null,
+    /** End-to-end encrypted (OMEMO) room, as the backend reports it on GET chats/my. */
+    val e2ee: Boolean? = null
 )
 
 /**
@@ -134,7 +147,10 @@ fun createRoomFromApi(apiRoom: ApiRoom, conferenceDomain: String, usersArrayLeng
         jid = jid,
         name = apiRoom.title ?: apiRoom.name,
         title = apiRoom.title ?: apiRoom.name,
-        usersCnt = apiRoom.members?.size ?: (usersArrayLength + 1),
+        usersCnt = apiRoom.members
+            ?.let { maxOf(apiRoom.usersCnt ?: 0, it.size) }
+            ?: apiRoom.usersCnt?.takeIf { it > 0 }
+            ?: (usersArrayLength + 1),
         messages = emptyList(),
         isLoading = false,
         roomBg = null,
@@ -153,6 +169,7 @@ fun createRoomFromApi(apiRoom: ApiRoom, conferenceDomain: String, usersArrayLeng
         composing = null,
         composingList = null,
         lastViewedTimestamp = 0,
+        e2ee = apiRoom.e2ee == true,
         unreadBaselineTimestamp = 0,
         unreadMessages = 0,
         pendingMessages = 0,
@@ -163,6 +180,7 @@ fun createRoomFromApi(apiRoom: ApiRoom, conferenceDomain: String, usersArrayLeng
         historyComplete = null,
         historyPreloadState = HistoryPreloadState.IDLE,
         isPlaceholder = false,
-        presenceReady = false
+        presenceReady = false,
+        muted = apiRoom.muted
     )
 }

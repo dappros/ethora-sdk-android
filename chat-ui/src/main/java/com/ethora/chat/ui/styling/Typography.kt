@@ -4,6 +4,8 @@ import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
 
 /**
@@ -11,12 +13,19 @@ import androidx.compose.ui.unit.sp
  * platform default font is used — identical to the previous hardcoded
  * behaviour, so existing integrations are unaffected.
  *
+ * [fontScale] multiplies every size and line height (`fontSize / 16`, see
+ * [com.ethora.chat.core.config.typographyFontScale]). 1 keeps the default scale.
+ *
  * Host-provided fonts flow in via [com.ethora.chat.core.config.ChatTypographyConfig]
  * → [rememberChatFontFamily] → here (see [ChatTheme]).
  */
-fun chatTypography(fontFamily: FontFamily? = null): Typography {
+fun chatTypography(fontFamily: FontFamily? = null, fontScale: Float = 1f): Typography {
     val family = fontFamily ?: FontFamily.Default
+    val familied = chatTypographyForFamily(fontFamily, family)
+    return if (fontScale == 1f) familied else familied.scaledBy(fontScale)
+}
 
+private fun chatTypographyForFamily(fontFamily: FontFamily?, family: FontFamily): Typography {
     // The chat's explicit type scale. Other Material tokens (display*,
     // headline*, label{Large,Medium}, etc.) keep Material's metrics.
     val base = Typography(
@@ -89,6 +98,32 @@ fun chatTypography(fontFamily: FontFamily? = null): Typography {
         labelSmall = base.labelSmall.copy(fontFamily = family),
     )
 }
+
+private fun Typography.scaledBy(scale: Float): Typography = Typography(
+    displayLarge = displayLarge.scaledBy(scale),
+    displayMedium = displayMedium.scaledBy(scale),
+    displaySmall = displaySmall.scaledBy(scale),
+    headlineLarge = headlineLarge.scaledBy(scale),
+    headlineMedium = headlineMedium.scaledBy(scale),
+    headlineSmall = headlineSmall.scaledBy(scale),
+    titleLarge = titleLarge.scaledBy(scale),
+    titleMedium = titleMedium.scaledBy(scale),
+    titleSmall = titleSmall.scaledBy(scale),
+    bodyLarge = bodyLarge.scaledBy(scale),
+    bodyMedium = bodyMedium.scaledBy(scale),
+    bodySmall = bodySmall.scaledBy(scale),
+    labelLarge = labelLarge.scaledBy(scale),
+    labelMedium = labelMedium.scaledBy(scale),
+    labelSmall = labelSmall.scaledBy(scale)
+)
+
+private fun TextStyle.scaledBy(scale: Float): TextStyle = copy(
+    fontSize = fontSize.scaledBy(scale),
+    lineHeight = lineHeight.scaledBy(scale)
+)
+
+private fun TextUnit.scaledBy(scale: Float): TextUnit =
+    if (isSpecified) (value * scale).sp else this
 
 /**
  * Default chat typography (system font). Kept for backwards compatibility and

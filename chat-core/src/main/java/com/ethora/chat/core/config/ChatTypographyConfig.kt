@@ -49,7 +49,26 @@ data class ChatTypographyConfig(
      * existing `ChatTypography` (normal body, semibold titles, etc.).
      */
     val weights: ChatFontWeights = ChatFontWeights(),
+
+    /**
+     * Base text size in sp, mirroring web `typography.fontSize` (px). The type
+     * scale is multiplied by `fontSize / 16`, so 18 makes the chat text 12.5%
+     * larger. Null keeps the default 16 sp scale.
+     */
+    val fontSize: Float? = null,
 )
+
+/** Base size the built-in type scale is designed around (web default 16px). */
+const val CHAT_BASE_FONT_SIZE_SP: Float = 16f
+
+/**
+ * Multiplier for the chat type scale: `fontSize / 16`. Returns 1 when [fontSize]
+ * is null or not a positive finite number, so the default scale is unchanged.
+ */
+fun typographyFontScale(fontSize: Float?): Float {
+    if (fontSize == null || !fontSize.isFinite() || fontSize <= 0f) return 1f
+    return fontSize / CHAT_BASE_FONT_SIZE_SP
+}
 
 /**
  * Numeric font weights used across the chat type scale. Lets a host nudge the

@@ -18,5 +18,15 @@ data class ChatColors(
     val inputBarColorDark: String? = null,
     /** Input text colour. When null, falls back to Material onSurface. */
     val inputTextColor: String? = null,
-    val inputTextColorDark: String? = null
+    val inputTextColorDark: String? = null,
+    /** Tint for the chat's icons (attach, file-type glyphs). Mirrors web `colors.icons`; null = primary. */
+    val icons: String? = null,
+    /** Own message bubble fill. Mirrors web `colors.ownMessageBackground`; bubble style wins when both are set. */
+    val ownMessageBackground: String? = null,
+    /** Other users' message bubble fill. Mirrors web `colors.otherMessageBackground`; bubble style wins when both are set. */
+    val otherMessageBackground: String? = null,
+    /** Input bar fill. Mirrors web `colors.inputBackground`; `inputBarColor` wins when both are set. */
+    val inputBackground: String? = null,
+    /** Input text colour. Mirrors web `colors.colorInput`; `inputTextColor` wins when both are set. */
+    val colorInput: String? = null
 )

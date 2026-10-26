@@ -7,7 +7,10 @@ import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,6 +20,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -24,6 +28,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import com.ethora.chat.core.config.AttachmentsConfig
+import com.ethora.chat.core.store.ChatStore
 import com.ethora.chat.core.store.PendingMediaSendQueue
 import com.ethora.chat.core.util.FileSizeFormatter
 import kotlinx.coroutines.Job
@@ -51,6 +57,11 @@ fun ChatInput(
      * `onSendMessage`) without any code change.
      */
     onSendMediaWithCaption: ((File, String, String, String?) -> Unit)? = null,
+    /**
+     * Multi-file send: every selected file in one message, with the caption and the reply
+     * target. Preferred over [onSendMedia] / [onSendMediaWithCaption] when wired.
+     */
+    onSendMediaBatch: ((List<Pair<File, String>>, String?, String?) -> Unit)? = null,
     onStartTyping: (() -> Unit)? = null,
     onStopTyping: (() -> Unit)? = null,
     editText: String? = null,
@@ -63,7 +74,9 @@ fun ChatInput(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var text by remember { mutableStateOf(editText ?: "") }
-    var selectedFile by remember { mutableStateOf<Pair<File, String>?>(null) }
+    var selectedFiles by remember { mutableStateOf<List<Pair<File, String>>>(emptyList()) }
+    // Composer limits (attachments.maxFiles / maxFileSizeMb), read once per composition.
+    val attachmentLimits = remember { ChatStore.getConfig()?.attachments ?: AttachmentsConfig() }
     var isFocused by remember { mutableStateOf(false) }
     var idleTypingJob by remember { mutableStateOf<Job?>(null) }
     // Tracks whether we've already sent a "composing" for the current focus session
@@ -109,6 +122,22 @@ fun ChatInput(
         }
     }
     
+    fun addSelectedFile(file: File, mimeType: String) {
+        if (selectedFiles.size >= attachmentLimits.effectiveMaxFiles) {
+            Toast.makeText(context, "You can attach up to ${attachmentLimits.effectiveMaxFiles} files", Toast.LENGTH_SHORT).show()
+            file.delete()
+            return
+        }
+        if (file.length() > attachmentLimits.effectiveMaxFileBytes) {
+            val limitMb = attachmentLimits.effectiveMaxFileBytes / (1024 * 1024)
+            android.util.Log.w("ChatInput", "File too large: ${file.length()} bytes (max: $limitMb MB)")
+            file.delete()
+            Toast.makeText(context, "File too large (max ${limitMb}MB)", Toast.LENGTH_SHORT).show()
+            return
+        }
+        selectedFiles = selectedFiles + (file to mimeType)
+    }
+
     fun setSelectedFromUri(uri: Uri, fallbackMime: String = "application/octet-stream") {
         try {
             val mimeType = context.contentResolver.getType(uri) ?: fallbackMime
@@ -122,15 +151,7 @@ fun ChatInput(
                     input.copyTo(output)
                 }
             } ?: throw IllegalStateException("Unable to open selected file")
-            val maxSizeBytes = 50 * 1024 * 1024L // 50MB
-            val fileSize = file.length()
-            if (fileSize > maxSizeBytes) {
-                android.util.Log.w("ChatInput", "File too large: ${fileSize} bytes (max: $maxSizeBytes)")
-                file.delete()
-                Toast.makeText(context, "File too large (max 50MB)", Toast.LENGTH_SHORT).show()
-                return
-            }
-            selectedFile = Pair(file, mimeType)
+            addSelectedFile(file, mimeType)
         } catch (e: Exception) {
             android.util.Log.e("ChatInput", "Error reading selected media", e)
             Toast.makeText(context, "Failed to open selected file", Toast.LENGTH_SHORT).show()
@@ -138,15 +159,15 @@ fun ChatInput(
     }
 
     val mediaPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let { setSelectedFromUri(it) }
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        uris.forEach { setSelectedFromUri(it) }
     }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let { setSelectedFromUri(it) }
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        uris.forEach { setSelectedFromUri(it) }
     }
 
     val cameraLauncher = rememberLauncherForActivityResult(
@@ -159,7 +180,7 @@ fun ChatInput(
                 FileOutputStream(photoFile).use { stream ->
                     it.compress(Bitmap.CompressFormat.JPEG, 90, stream)
                 }
-                selectedFile = Pair(photoFile, "image/jpeg")
+                addSelectedFile(photoFile, "image/jpeg")
             } catch (e: Exception) {
                 android.util.Log.e("ChatInput", "Error saving camera photo", e)
                 Toast.makeText(context, "Failed to capture photo", Toast.LENGTH_SHORT).show()
@@ -172,6 +193,7 @@ fun ChatInput(
         ?: MaterialTheme.colorScheme.surface
     val inputTextColor = themeOverrides.inputTextColor
         ?: MaterialTheme.colorScheme.onSurface
+    val iconTint = themeOverrides.iconTint ?: MaterialTheme.colorScheme.primary
     Surface(
         modifier = modifier.fillMaxWidth(),
         tonalElevation = 2.dp,
@@ -179,8 +201,8 @@ fun ChatInput(
         color = inputBarColor
     ) {
         Column {
-            // File preview
-            selectedFile?.let { (file, mimeType) ->
+            // Selected files: one message, up to attachments.maxFiles
+            if (selectedFiles.isNotEmpty()) {
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -192,68 +214,66 @@ fun ChatInput(
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     tonalElevation = 2.dp
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        when {
-                            mimeType.startsWith("image/") -> {
-                                AsyncImage(
-                                    model = file,
-                                    contentDescription = "Image preview",
-                                    modifier = Modifier.size(60.dp),
-                                    contentScale = ContentScale.Crop
-                                )
+                    Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                        Text(
+                            text = "${selectedFiles.size} of ${attachmentLimits.effectiveMaxFiles}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            itemsIndexed(selectedFiles) { index, selected ->
+                                val (file, mimeType) = selected
+                                Box(modifier = Modifier.size(64.dp)) {
+                                    if (mimeType.startsWith("image/")) {
+                                        AsyncImage(
+                                            model = file,
+                                            contentDescription = "Image preview",
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .clip(RoundedCornerShape(8.dp)),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    } else {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(MaterialTheme.colorScheme.surface),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = if (mimeType.startsWith("video/")) {
+                                                    Icons.Default.PlayArrow
+                                                } else {
+                                                    Icons.Default.InsertDriveFile
+                                                },
+                                                contentDescription = file.name,
+                                                modifier = Modifier.size(32.dp),
+                                                tint = iconTint
+                                            )
+                                        }
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            selectedFiles = selectedFiles.filterIndexed { position, _ -> position != index }
+                                        },
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Close,
+                                            contentDescription = "Remove",
+                                            tint = MaterialTheme.colorScheme.onSurface,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
                             }
-                            mimeType.startsWith("video/") -> {
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = "Video",
-                                    modifier = Modifier.size(48.dp),
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            else -> {
-                                Icon(
-                                    imageVector = Icons.Default.InsertDriveFile,
-                                    contentDescription = "File",
-                                    modifier = Modifier.size(48.dp),
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                        }
-                        
-                        Column(
-                            modifier = Modifier.weight(1f).padding(horizontal = 12.dp)
-                        ) {
-                            Text(
-                                text = file.name,
-                                style = MaterialTheme.typography.bodyMedium,
-                                maxLines = 1
-                            )
-                            Text(
-                                text = FileSizeFormatter.format(file.length()),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                            )
-                        }
-                        
-                        IconButton(
-                            onClick = { selectedFile = null }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Remove",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
                         }
                     }
                 }
             }
-            
             // Reply preview
             replyingToMessage?.let { msg ->
                 Surface(
@@ -329,7 +349,7 @@ fun ChatInput(
                         Icon(
                             imageVector = Icons.Default.AttachFile,
                             contentDescription = "Attach file",
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = iconTint
                         )
                     }
                 }
@@ -396,7 +416,7 @@ fun ChatInput(
                 )
                 
                 // Send button - visible when there's text or file (or in edit mode)
-                if (text.isNotBlank() || selectedFile != null || editText != null) {
+                if (text.isNotBlank() || selectedFiles.isNotEmpty() || editText != null) {
                     FloatingActionButton(
                         onClick = onClick@{
                             // canSendMessage gates the actual send. Previously this
@@ -418,7 +438,7 @@ fun ChatInput(
                             // dispatch BOTH as separate optimistic messages — media first,
                             // then text. Each confirms or fails independently.
                             // Edit mode is single-message-only and short-circuits below.
-                            val pendingFile = selectedFile
+                            val pendingFiles = selectedFiles
                             val pendingText = text.trim().takeIf { it.isNotBlank() }
                             val replyId = replyingToMessage?.id
                             if (editText != null) {
@@ -426,26 +446,22 @@ fun ChatInput(
                                     text = ""
                                     onSendMessage(pendingText, replyId)
                                 }
+                            } else if (pendingFiles.isNotEmpty() && onSendMediaBatch != null) {
+                                // One message: every file, the caption on the media, the reply target.
+                                selectedFiles = emptyList()
+                                if (pendingText != null) text = ""
+                                onSendMediaBatch(pendingFiles, pendingText, replyId)
                             } else {
-                                // Combo: media + caption + reply. Prefer the
-                                // serialized callback so the caption text rides
-                                // behind the media upload (web parity:
-                                // `[image][caption]` order). Falls back to the
-                                // legacy two-dispatch path when the host hasn't
-                                // wired `onSendMediaWithCaption`.
-                                if (pendingFile != null && pendingText != null && onSendMediaWithCaption != null) {
-                                    selectedFile = null
+                                // Legacy hosts: single-file callbacks, caption as before.
+                                val single = pendingFiles.firstOrNull()
+                                if (single != null && pendingText != null && onSendMediaWithCaption != null && pendingFiles.size == 1) {
+                                    selectedFiles = emptyList()
                                     text = ""
-                                    onSendMediaWithCaption(
-                                        pendingFile.first,
-                                        pendingFile.second,
-                                        pendingText,
-                                        replyId
-                                    )
+                                    onSendMediaWithCaption(single.first, single.second, pendingText, replyId)
                                 } else {
-                                    if (pendingFile != null && onSendMedia != null) {
-                                        selectedFile = null
-                                        onSendMedia(pendingFile.first, pendingFile.second)
+                                    if (pendingFiles.isNotEmpty() && onSendMedia != null) {
+                                        selectedFiles = emptyList()
+                                        pendingFiles.forEach { onSendMedia(it.first, it.second) }
                                     }
                                     if (pendingText != null) {
                                         text = ""

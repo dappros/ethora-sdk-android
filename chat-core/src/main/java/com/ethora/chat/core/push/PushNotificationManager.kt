@@ -5,7 +5,6 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.ethora.chat.core.config.AppConfig
 import com.ethora.chat.core.store.ChatStore
-import com.ethora.chat.core.networking.PushAPIHelper
 import com.ethora.chat.core.xmpp.XMPPClient
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -53,10 +52,39 @@ object PushNotificationManager {
         }
     }
 
-    fun setFcmToken(token: String) {
+    /** Token type sent to the backend with the current registration token (fcm, apns, ...). */
+    @Volatile
+    var fcmTokenType: String = PushRegistration.TOKEN_TYPE_FCM
+        private set
+
+    /**
+     * Store the device push token handed over by the host app. Host apps call
+     * this through `EthoraChatSdk.registerPushToken`.
+     */
+    fun setFcmToken(token: String, tokenType: String = PushRegistration.detectTokenType(token)) {
         _fcmToken.value = token
+        fcmTokenType = tokenType
         prefs?.edit()?.putString(KEY_FCM_TOKEN, token)?.apply()
-        Log.d(TAG, "🔔 FCM token stored (${token.take(10)}...)")
+        Log.d(TAG, "🔔 FCM token stored (${token.take(10)}...) type=$tokenType")
+    }
+
+    /**
+     * Pick the room JID from a push payload, using the same keys as the web
+     * and RN SDKs. Returns null when the payload names no room.
+     */
+    fun roomJidFromPayload(data: Map<String, String?>): String? =
+        listOf("jid", "chatJid", "roomJid", "roomJID")
+            .asSequence()
+            .mapNotNull { data[it]?.trim()?.takeIf { value -> value.isNotEmpty() } }
+            .firstOrNull()
+
+    /**
+     * Release the device registration on the server during logout. Runs with
+     * the auth token captured before the stores are cleared.
+     */
+    suspend fun releaseRegistration(authToken: String?, registrationToken: String?): Boolean {
+        if (authToken.isNullOrBlank() || registrationToken.isNullOrBlank()) return false
+        return PushRegistration.unregister(registrationToken, authToken)
     }
 
     /**
@@ -66,9 +94,15 @@ object PushNotificationManager {
     suspend fun subscribeToBackend(
         fcmToken: String,
         appId: String = ChatStore.getEffectiveAppId(),
-        baseUrl: String = ChatStore.getEffectiveBaseUrl()
+        baseUrl: String = ChatStore.getEffectiveBaseUrl(),
+        tokenType: String = fcmTokenType
     ): Boolean {
-        return PushAPIHelper.subscribeToPush(fcmToken, appId, baseUrl)
+        return PushRegistration.register(
+            registrationToken = fcmToken,
+            tokenType = tokenType,
+            appId = appId,
+            baseUrl = baseUrl
+        )
     }
 
     /**
@@ -159,6 +193,7 @@ object PushNotificationManager {
 
     fun reset() {
         subscribedRooms.clear()
+        fcmTokenType = PushRegistration.TOKEN_TYPE_FCM
         _fcmToken.value = null
         _pendingNotificationJid.value = null
         prefs?.edit()?.clear()?.apply()

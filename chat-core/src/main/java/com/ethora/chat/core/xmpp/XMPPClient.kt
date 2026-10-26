@@ -4,7 +4,9 @@ import kotlin.jvm.Volatile
 import android.util.Log
 import com.ethora.chat.core.config.XMPPSettings
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.models.MessageAttachments
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.networking.XmppCredentialRecovery
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.LogStore
 import kotlinx.coroutines.*
@@ -37,12 +39,12 @@ import kotlinx.coroutines.sync.withLock
  * XMPP Client implementation using Smack library
  */
 class XMPPClient(
-    private val username: String,
-    private val password: String,
+    private var username: String,
+    private var password: String,
     private val settings: XMPPSettings? = null,
     /** DNS fallback overrides (host -> IP). Pass from ChatConfig so XMPP uses same overrides without relying on ChatStore at build time. */
     private val dnsFallbackOverrides: Map<String, String>? = null
-) {
+) : HistoryWindowClient {
     private val resolvedSettings: XMPPSettings = settings
         ?: throw IllegalArgumentException("ChatConfig.xmppSettings is required")
 
@@ -58,7 +60,7 @@ class XMPPClient(
         val beforeMessageId: String?,
         val priority: HistoryPriority,
         val createdAt: Long,
-        val deferred: CompletableDeferred<List<Message>>
+        val deferred: CompletableDeferred<HistoryPage>
     )
 
     private val TAG = "XMPPClient"
@@ -66,6 +68,7 @@ class XMPPClient(
     private var delegate: XMPPClientDelegate? = null
     private var connection: XMPPTCPConnection? = null
     private var webSocketConnection: XMPPWebSocketConnection? = null
+    private val historyReceiptAckedKeys = java.util.LinkedHashSet<String>()
     private var chatManager: ChatManager? = null
     private var mucManager: MultiUserChatManager? = null
 
@@ -123,7 +126,7 @@ class XMPPClient(
     }
     private var historyProcessorJob: Job? = null
     private var historyInFlightCount: Int = 0
-    private val historyRequestInFlight = ConcurrentHashMap<String, Deferred<List<Message>>>()
+    private val historyRequestInFlight = ConcurrentHashMap<String, Deferred<HistoryPage>>()
     private val activeRoomBoostUntil = ConcurrentHashMap<String, Long>()
     private val sentMessageAtMs = ConcurrentHashMap<String, Long>()
     @Volatile
@@ -308,6 +311,25 @@ class XMPPClient(
     }
 
     /**
+     * Replace the credentials used by the next connect. Called after a SASL
+     * `not-authorized` recovery.
+     */
+    fun updateCredentials(newUsername: String, newPassword: String) {
+        username = newUsername
+        password = newPassword
+    }
+
+    /**
+     * Source of fresh credentials after a SASL failure. Defaults to
+     * [XmppCredentialRecovery.recover]. Pass null to disable recovery.
+     */
+    fun setCredentialsProvider(provider: (suspend () -> Pair<String, String>?)?) {
+        credentialsProvider = provider
+    }
+
+    private var credentialsProvider: (suspend () -> Pair<String, String>?)? = { XmppCredentialRecovery.recover() }
+
+    /**
      * Initialize and connect XMPP client
      * Note: This is a simplified implementation. For WebSocket support, 
      * you may need to use Smack's WebSocket extension or a different library.
@@ -346,6 +368,11 @@ class XMPPClient(
                     dnsFallbackOverrides = dnsFallbackOverrides
                 )
                 webSocketConnection?.setClientWrapper(this@XMPPClient)
+                webSocketConnection?.credentialsProvider = {
+                    val fresh = credentialsProvider?.invoke()
+                    if (fresh != null) updateCredentials(fresh.first, fresh.second)
+                    fresh
+                }
                 webSocketConnection?.setDelegate(object : XMPPClientDelegate {
                     override fun onXMPPClientConnected(client: XMPPClient) {
                         reconnectAttempts = 0
@@ -541,7 +568,8 @@ class XMPPClient(
         isReply: Boolean = false,
         showInChannel: Boolean = false,
         mainMessage: String? = null,
-        customId: String? = null
+        customId: String? = null,
+        translateSource: String? = null
     ): String? {
         return try {
             onCriticalSend()
@@ -570,7 +598,8 @@ class XMPPClient(
                         isReply,
                         showInChannel,
                         mainMessage,
-                        customId
+                        customId,
+                        translateSource
                     )
                     if (!sentId.isNullOrBlank()) {
                         sentMessageAtMs[sentId] = sendStartedAt
@@ -661,14 +690,22 @@ class XMPPClient(
      * - When beforeMessageId is provided: requests older messages before that ID
      * Note: Swift uses message ID (Int64) converted from message.id string using Number()
      */
-    suspend fun getHistory(roomJID: String, max: Int = 30, beforeMessageId: String? = null): List<Message> {
+    suspend fun getHistory(roomJID: String, max: Int = 30, beforeMessageId: String? = null): List<Message> =
+        getHistoryPage(roomJID, max, beforeMessageId).messages
+
+    /**
+     * One older (or the latest) page of live history, with the server's cursor
+     * and <fin complete>. Messages are stored as they arrive; the cursor is the
+     * server's RSM first, never a timestamp.
+     */
+    suspend fun getHistoryPage(roomJID: String, max: Int = 30, beforeMessageId: String? = null): HistoryPage {
         if (!isFullyConnected()) {
             Log.e(TAG, "Cannot get history: not fully connected")
-            return emptyList()
+            return HistoryPage.FAILED
         }
         if (!useWebSocket || webSocketConnection == null) {
             Log.e(TAG, "WebSocket connection not available for MAM query")
-            return emptyList()
+            return HistoryPage.FAILED
         }
 
         val requestKey = historyRequestKey(roomJID, max, beforeMessageId)
@@ -676,11 +713,11 @@ class XMPPClient(
             return try {
                 existing.await()
             } catch (_: Exception) {
-                emptyList()
+                HistoryPage.FAILED
             }
         }
 
-        val deferred = CompletableDeferred<List<Message>>()
+        val deferred = CompletableDeferred<HistoryPage>()
         historyRequestInFlight[requestKey] = deferred
         val request = HistoryRequest(
             roomJid = roomJID,
@@ -702,7 +739,7 @@ class XMPPClient(
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get history", e)
-            emptyList()
+            HistoryPage.FAILED
         } finally {
             historyRequestInFlight.remove(requestKey)
         }
@@ -767,11 +804,11 @@ class XMPPClient(
                         val duration = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
                         LogStore.success(
                             "Perf",
-                            "history_request_ms=$duration room=${request.roomJid} result_count=${result.size}"
+                            "history_request_ms=$duration room=${request.roomJid} result_count=${result.messages.size}"
                         )
                         request.deferred.complete(result)
                     } catch (e: Exception) {
-                        request.deferred.complete(emptyList())
+                        request.deferred.complete(HistoryPage.FAILED)
                         Log.e(TAG, "History request failed for ${request.roomJid}", e)
                         LogStore.error("Perf", "history_request_failed room=${request.roomJid} error=${e.message}")
                     } finally {
@@ -811,22 +848,36 @@ class XMPPClient(
         roomJID: String,
         max: Int,
         beforeMessageId: String?
-    ): List<Message> {
-        val ws = webSocketConnection ?: return emptyList()
+    ): HistoryPage {
+        val ws = webSocketConnection ?: return HistoryPage.FAILED
         val queryId = "get-history:${System.currentTimeMillis()}:${roomJID.hashCode()}"
         val collected = mutableListOf<Message>()
         val collectedLock = Any()
+        // The <fin> IQ of this query, when it arrives: complete flag and RSM first.
+        val finRef = java.util.concurrent.atomic.AtomicReference<HistoryWindowFin?>(null)
 
         // Process synchronously on the WS parser thread. The previous
         // scope.launch+withLock version raced the completion IQ and dropped
         // the last few messages of each MAM page.
         val collector: (XMPPStanza) -> Unit = { stanza ->
+            if (stanza.type == "result") {
+                stanza.xml?.let { xml -> parseMamFin(xml)?.let { finRef.set(it) } }
+            }
             val parsed = parseMAMResult(stanza, roomJID)
                 .filter { it.roomJid == roomJID }
             if (parsed.isNotEmpty()) {
                 synchronized(collectedLock) { collected.addAll(parsed) }
                 // Incremental write-through so the UI updates as results arrive.
                 com.ethora.chat.core.store.MessageStore.addMessages(roomJID, parsed)
+                // XEP-0184 for catch-up messages from other users (web onMessageHistory).
+                val me = com.ethora.chat.core.store.UserStore.currentUser.value?.xmppUsername
+                parsed.forEach { msg ->
+                    val fromOther = ReceiptStanzas.normalizeLocal(msg.user.xmppUsername ?: msg.user.id) !=
+                        ReceiptStanzas.normalizeLocal(me)
+                    if (fromOther && msg.isSystemMessage != "true") {
+                        sendHistoryReceivedReceiptStanza(roomJID, msg.id)
+                    }
+                }
             }
         }
         var queryComplete = false
@@ -836,7 +887,7 @@ class XMPPClient(
             val sent = ws.sendMAMQuery(roomJID, max, beforeMessageId, queryId)
             if (!sent) {
                 Log.e(TAG, "Failed to send MAM query")
-                return emptyList()
+                return HistoryPage.FAILED
             }
 
             val timeout = 15000L
@@ -853,12 +904,67 @@ class XMPPClient(
             // (MessageStore's sort) then orders ascending by timestamp. Ascending
             // = oldest first, so the caller can use .first() as the pagination
             // anchor for an older page.
-            return synchronized(collectedLock) {
+            val fin = finRef.get()
+            val messages = synchronized(collectedLock) {
                 collected.toList().sortedBy { it.timestamp ?: it.date.time }
             }
+            return HistoryPage(
+                ok = queryComplete || fin != null,
+                messages = messages,
+                complete = fin?.complete == true,
+                first = fin?.first
+            )
         } finally {
             ws.unregisterMAMCollector(queryId)
             ws.clearMAMQueryStatus(queryId)
+        }
+    }
+
+    /**
+     * One page of archive around a message, RETURNED and never stored: no
+     * message store writes, no room cursor or historyComplete update, so the
+     * live history is untouched. Pass [WindowCursor.before] for the page ending
+     * before an archive id, [WindowCursor.after] for the page after one, or
+     * start/end for a time range. Messages come back oldest first.
+     */
+    override suspend fun getHistoryWindow(
+        roomJid: String,
+        max: Int,
+        cursor: WindowCursor
+    ): HistoryWindowPage {
+        if (!isFullyConnected()) return HistoryWindowPage.FAILED
+        val ws = webSocketConnection ?: return HistoryWindowPage.FAILED
+        val queryId = "$MAM_WINDOW_QUERY_PREFIX${System.nanoTime()}:${roomJid.hashCode()}"
+        val collected = mutableListOf<Message>()
+        val collectedLock = Any()
+        val fin = CompletableDeferred<HistoryWindowFin>()
+
+        val collector: (XMPPStanza) -> Unit = { stanza ->
+            val xml = stanza.xml
+            if (stanza.type == "result" && xml != null && xml.contains("<fin")) {
+                parseMamFin(xml)?.let { fin.complete(it) }
+            } else {
+                val parsed = parseMAMResult(stanza, roomJid).filter { it.roomJid == roomJid }
+                if (parsed.isNotEmpty()) synchronized(collectedLock) { collected.addAll(parsed) }
+            }
+        }
+
+        ws.registerMAMCollector(queryId, collector)
+        try {
+            if (!ws.sendMamWindowQuery(roomJid, max, queryId, cursor)) return HistoryWindowPage.FAILED
+            val result = withTimeoutOrNull(8_000L) { fin.await() } ?: return HistoryWindowPage.FAILED
+            val messages = synchronized(collectedLock) {
+                collected.toList().sortedBy { it.timestamp ?: it.date.time }
+            }
+            return HistoryWindowPage(
+                ok = true,
+                messages = messages,
+                complete = result.complete,
+                first = result.first,
+                last = result.last
+            )
+        } finally {
+            ws.unregisterMAMCollector(queryId)
         }
     }
     
@@ -1069,6 +1175,11 @@ class XMPPClient(
             val locationPreview = extractAttribute(dataXml, "locationPreview")
             val mimetype = extractAttribute(dataXml, "mimetype")
             val isMediafile = extractAttribute(dataXml, "isMediafile")
+            // E2EE flags, see XMPPWebSocketConnection.parseAndHandleRealtimeMessage
+            val unencryptedFlag = (com.ethora.chat.core.e2ee.E2eeRuntime.isE2eeRoom(actualRoomJid) &&
+                extractAttribute(dataXml, "omemoEncrypted") != "true").takeIf { it }
+            val e2eeKeysAttr = extractAttribute(dataXml, "e2eeKeys")?.split(",")?.filter { it.isNotBlank() }
+            val clientEncryptedAttr = extractAttribute(dataXml, "clientEncrypted")
             val fileName = extractAttribute(dataXml, "fileName")
             val originalName = extractAttribute(dataXml, "originalName")
             val size = extractAttribute(dataXml, "size")
@@ -1076,6 +1187,10 @@ class XMPPClient(
             // Admin-broadcast / system flag (see realtime parser). Carried so
             // history-loaded banners render the same as live ones.
             val isSystemMessage = extractAttribute(dataXml, "isSystemMessage")
+            // Reply and thread fields (see replyFieldsFrom in XmppXmlUtils.kt).
+            val replyFields = replyFieldsFrom(dataXml)
+            val caption = extractAttribute(dataXml, "caption")?.takeIf { it.isNotBlank() }
+            val attachments = MessageAttachments.parse(extractAttribute(dataXml, "attachments")).takeIf { it.isNotEmpty() }
 
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
@@ -1121,9 +1236,19 @@ class XMPPClient(
             Log.d(TAG, "  User: ${user.fullName}, profileImage: ${user.profileImage?.take(50)}")
             
             // Check if message is deleted (has <deleted> element)
-            val isDeleted = messageXml.contains("<deleted") || messageXml.contains("<deleted>") || 
+            val isDeleted = messageXml.contains("<deleted") || messageXml.contains("<deleted>") ||
                            forwardedXml.contains("<deleted") || forwardedXml.contains("<deleted>")
-            
+
+            // Call signalling in the archive: a call-state log becomes a call-log
+            // row; any other call-* payload is never a chat message.
+            if (messageXml.contains("call-")) {
+                com.ethora.chat.core.call.CallSignaling.archivedCallLog(messageXml, actualRoomJid, timestamp)?.let { log ->
+                    messages.add(log)
+                    return messages
+                }
+                if (com.ethora.chat.core.call.CallStanzas.isCallSignal(messageXml)) return messages
+            }
+
             // Create Message object - use actual room JID from stanza
             val message = Message(
                 id = archiveMessageId,
@@ -1144,7 +1269,17 @@ class XMPPClient(
                 originalName = originalName,
                 size = size,
                 waveForm = waveForm,
-                archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId
+                caption = caption,
+                attachments = attachments,
+                archiveId = stanzaIdValue.takeIf { it.isNotBlank() } ?: archiveMessageId,
+                isReply = replyFields.isReply,
+                showInChannel = replyFields.showInChannel,
+                mainMessage = replyFields.mainMessage,
+                translations = MessageTranslationXml.parseTranslations(messageXml)?.takeIf { it.isNotEmpty() },
+                langSource = MessageTranslationXml.parseSource(messageXml),
+                unencrypted = unencryptedFlag,
+                e2eeKeys = e2eeKeysAttr,
+                clientEncrypted = clientEncryptedAttr
             )
             
             messages.add(message)
@@ -1177,6 +1312,9 @@ class XMPPClient(
      */
     suspend fun leaveRoom(roomJID: String): Boolean {
         return try {
+            if (useWebSocket) {
+                webSocketConnection?.sendLeavePresence(roomJID)
+            }
             val muc = activeMUCs[roomJID]
             muc?.leave()
             activeMUCs.remove(roomJID)
@@ -1185,6 +1323,15 @@ class XMPPClient(
             Log.e(TAG, "Failed to leave room", e)
             false
         }
+    }
+
+    /**
+     * Invite a user into a room (web inviteRoomRequest). Over the WebSocket
+     * transport only; `xmppUsername` is the `appId_userId` of the invitee.
+     */
+    fun inviteUser(xmppUsername: String, roomJID: String): Boolean {
+        if (!useWebSocket) return false
+        return webSocketConnection?.sendInvite(roomJID, xmppUsername) ?: false
     }
 
     /**
@@ -1427,6 +1574,53 @@ class XMPPClient(
         }
     }
     
+    /**
+     * XMPP host, used to address a peer as `localpart@host` for call signals.
+     */
+    fun xmppHost(): String = host
+
+    /**
+     * Sends one call-signalling stanza (see [com.ethora.chat.core.call.CallService]).
+     * Returns false when the WebSocket transport is not up. Call signalling is
+     * WebSocket only, like the rest of the live traffic on this path.
+     */
+    fun sendCallSignal(stanzaXml: String): Boolean {
+        if (!useWebSocket) return false
+        return webSocketConnection?.sendRaw(stanzaXml) == true
+    }
+
+    /**
+     * XEP-0184 delivery receipt for a live message. Matches web sendReceivedReceiptStanza.
+     */
+    fun sendReceivedReceiptStanza(messageId: String, roomJid: String) {
+        if (!useWebSocket) return
+        webSocketConnection?.sendReceivedReceiptStanza(messageId, roomJid)
+    }
+
+    /**
+     * Receipt for a catch-up (MAM) message, sent at most once per room and message.
+     * Matches web sendHistoryReceivedReceiptStanza, including its 2000-entry cap.
+     */
+    fun sendHistoryReceivedReceiptStanza(roomJid: String, messageId: String) {
+        val key = "$roomJid:$messageId"
+        val isNew = synchronized(historyReceiptAckedKeys) {
+            if (!historyReceiptAckedKeys.add(key)) return@synchronized false
+            if (historyReceiptAckedKeys.size > MAX_HISTORY_RECEIPT_KEYS) {
+                historyReceiptAckedKeys.remove(historyReceiptAckedKeys.first())
+            }
+            true
+        }
+        if (isNew) sendReceivedReceiptStanza(messageId, roomJid)
+    }
+
+    /**
+     * XEP-0333 read marker. Matches web sendDisplayedMarkerStanza.
+     */
+    fun sendDisplayedMarkerStanza(messageId: String, roomJid: String) {
+        if (!useWebSocket) return
+        webSocketConnection?.sendDisplayedMarkerStanza(messageId, roomJid)
+    }
+
     /**
      * Send typing indicator (composing/paused)
      * Matches web: useComposing hook
@@ -1714,3 +1908,5 @@ class XMPPClient(
         scope.cancel()
     }
 }
+
+private const val MAX_HISTORY_RECEIPT_KEYS = 2000

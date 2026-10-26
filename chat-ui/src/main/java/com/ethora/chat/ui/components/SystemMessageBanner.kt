@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -17,6 +18,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ethora.chat.core.config.ChatColors
+import com.ethora.chat.ui.styling.isDarkSurface
+import com.ethora.chat.ui.styling.mixColors
+import com.ethora.chat.ui.styling.tintTowardWhite
 
 /**
  * Centered banner for admin / system broadcasts (`<data isSystemMessage="true">`).
@@ -29,10 +33,16 @@ import com.ethora.chat.core.config.ChatColors
 @Composable
 fun SystemMessageBanner(messageText: String, colors: ChatColors?) {
     // Web defaults: text #0052cd on background #e7edf9.
-    val textColor = remember(colors?.primary) {
+    val dark = isDarkSurface(MaterialTheme.colorScheme.surface)
+    val primary = remember(colors?.primary) {
         parseHexColorOrNull(colors?.primary) ?: Color(0xFF0052CD)
     }
-    val background = remember(colors?.secondary) {
+    // Dark: the light chip would glare on a dark surface, so use the same
+    // soft tint web uses (primary mixed into the surface, text lifted toward white).
+    val textColor = if (dark) tintTowardWhite(primary, 0.45f) else primary
+    val background = if (dark) {
+        mixColors(primary, MaterialTheme.colorScheme.surface, 0.72f)
+    } else {
         parseHexColorOrNull(colors?.secondary) ?: Color(0xFFE7EDF9)
     }
 

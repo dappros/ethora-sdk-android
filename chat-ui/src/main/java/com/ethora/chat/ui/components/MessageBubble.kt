@@ -1,6 +1,9 @@
 package com.ethora.chat.ui.components
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.ClickableText
@@ -39,13 +42,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.ui.graphics.Color
 import coil3.compose.AsyncImage
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.models.MessageAttachments
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.models.withAttachment
 import com.ethora.chat.core.store.PendingMediaSendStatus
 import com.ethora.chat.ui.styling.LocalChatThemeOverrides
 import java.util.regex.Pattern
@@ -62,11 +68,31 @@ fun MessageBubble(
     showUsername: Boolean = true,
     showTimestamp: Boolean = true,
     onMediaClick: ((Message) -> Unit)? = null,
+    /**
+     * Tap on one file of a message: (message, index in message.attachments).
+     * Takes precedence over [onMediaClick] for multi-file messages, so the viewer can
+     * swipe across the album.
+     */
+    onAttachmentClick: ((Message, Int) -> Unit)? = null,
     onLongPress: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onFailedClick: ((tapX: Float, tapY: Float, boundsLeft: Float, boundsTop: Float, boundsRight: Float, boundsBottom: Float) -> Unit)? = null,
     onAvatarClick: ((User) -> Unit)? = null,
+    /** Tapping the quote of a reply: the parent message (web: jump to the replied message). */
+    onQuoteClick: ((Message) -> Unit)? = null,
     pendingMediaStatus: PendingMediaSendStatus? = null,
     sendFailed: Boolean = false,
+    /** Reaction chips under the bubble. False hides the row (web `disableReactions`). */
+    showReactions: Boolean = true,
+    /** Toggles my reaction from a chip. Null makes the chips read-only (web `disableInteractions`). */
+    onReactionToggle: ((String) -> Unit)? = null,
+    /** My xmpp localpart, used for the "mine" highlight on chips. */
+    currentUserLocalPart: String? = null,
+    /** Opens this message's thread: the quote tap and the reply count pill. */
+    onOpenThread: (() -> Unit)? = null,
+    /** Replies that belong to this message's thread, shown as a pill under a root. */
+    threadReplyCount: Int = 0,
+    /** Delivery/read state for own messages (web tickInfo). Null renders plain "sent". */
+    receiptInfo: com.ethora.chat.core.store.ReceiptInfo? = null,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -291,30 +317,75 @@ fun MessageBubble(
                                 QuotedMessage(
                                     message = parent,
                                     isUser = isUser,
+                                    // A quote jumps to the quoted message; without a jump handler it opens the thread.
+                                    onClick = onQuoteClick?.let { open -> { open(parent) } } ?: onOpenThread,
                                     modifier = Modifier.padding(start = 8.dp, end = 8.dp, top = 8.dp)
                                 )
                             }
 
                             if (message.isMediafile == "true") {
-                                // Show media component (only if not deleted)
-                                MediaMessage(
-                                    message = message,
-                                    isUser = isUser,
-                                    onMediaClick = { msg -> onMediaClick?.invoke(msg) },
+                                // Media: an album for two or more visual files, file rows for the rest,
+                                // then the caption typed with them (web MediaCaption).
+                                val attachments = remember(message) { MessageAttachments.forMessage(message) }
+                                val partition = remember(attachments) { MessageAttachments.partition(attachments) }
+                                Column(
                                     modifier = Modifier
                                         .padding(horizontal = 8.dp, vertical = 8.dp)
                                         .testTag(MessageBubbleTestTags.MEDIA_CONTENT)
-                                )
+                                ) {
+                                    if (partition.tiles.isNotEmpty()) {
+                                        AlbumGrid(
+                                            tiles = partition.tiles,
+                                            onTileClick = { index ->
+                                                if (onAttachmentClick != null) {
+                                                    onAttachmentClick.invoke(message, index)
+                                                } else {
+                                                    onMediaClick?.invoke(message.withAttachment(attachments[index]))
+                                                }
+                                            }
+                                        )
+                                        if (partition.rows.isNotEmpty()) Spacer(modifier = Modifier.height(4.dp))
+                                    }
+                                    partition.rows.forEachIndexed { rowPosition, row ->
+                                        if (rowPosition > 0) Spacer(modifier = Modifier.height(4.dp))
+                                        MediaMessage(
+                                            message = message.withAttachment(row.attachment),
+                                            isUser = isUser,
+                                            onMediaClick = { msg ->
+                                                if (onAttachmentClick != null) {
+                                                    onAttachmentClick.invoke(message, row.index)
+                                                } else {
+                                                    onMediaClick?.invoke(msg)
+                                                }
+                                            }
+                                        )
+                                    }
+                                    message.caption?.takeIf { it.isNotBlank() }?.let { caption ->
+                                        Text(
+                                            text = caption,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = if (isUser) outgoingTextColor else incomingTextColor,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                }
                             } else {
                                 // Show text message with formatting
-                                FormattedMessageText(
-                                    text = message.body,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                                    textColor = if (isUser) outgoingTextColor else incomingTextColor,
-                                    lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4,
-                                    onLongPress = { triggerLongPress(null) },
-                                    onPressChange = { isPressed = it }
-                                )
+                                MessageTranslationBlock(
+                                    message = message,
+                                    isUser = isUser,
+                                    accentColor = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                                ) { text ->
+                                    FormattedMessageText(
+                                        text = text,
+                                        modifier = Modifier,
+                                        textColor = if (isUser) outgoingTextColor else incomingTextColor,
+                                        lineHeight = MaterialTheme.typography.bodyMedium.lineHeight * 1.4,
+                                        onLongPress = { triggerLongPress(null) },
+                                        onPressChange = { isPressed = it }
+                                    )
+                                }
                                 val firstUrl = remember(message.body) { extractFirstUrl(message.body) }
                                 if (!firstUrl.isNullOrBlank()) {
                                     UrlPreviewCard(
@@ -337,6 +408,14 @@ fun MessageBubble(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        if (message.isEdited == true && message.isDeleted != true) {
+                            Text(
+                                text = "edited",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isUser) outgoingTextColor.copy(alpha = 0.7f) else incomingTextColor.copy(alpha = 0.6f),
+                                fontStyle = FontStyle.Italic
+                            )
+                        }
                         Text(
                             text = formatTime(message.date),
                             style = MaterialTheme.typography.labelSmall,
@@ -370,10 +449,25 @@ fun MessageBubble(
                             )
                         }
                         if (showSentIcon) {
+                            // Web parity: single grey tick = sent, double grey = delivered,
+                            // double brand blue = read.
+                            val receiptState = receiptInfo?.state ?: com.ethora.chat.core.store.ReceiptState.SENT
                             Icon(
-                                imageVector = Icons.Default.DoneAll,
-                                contentDescription = "Sent",
-                                tint = Color(0xFF4CAF50),
+                                imageVector = if (receiptState == com.ethora.chat.core.store.ReceiptState.SENT) {
+                                    Icons.Default.Done
+                                } else {
+                                    Icons.Default.DoneAll
+                                },
+                                contentDescription = when (receiptState) {
+                                    com.ethora.chat.core.store.ReceiptState.SENT -> "Sent"
+                                    com.ethora.chat.core.store.ReceiptState.DELIVERED -> "Delivered"
+                                    com.ethora.chat.core.store.ReceiptState.SEEN -> "Read"
+                                },
+                                tint = if (receiptState == com.ethora.chat.core.store.ReceiptState.SEEN) {
+                                    Color(0xFF0052CD)
+                                } else {
+                                    Color(0xFF8C8C8C)
+                                },
                                 modifier = Modifier
                                     .size(14.dp)
                                     .testTag(MessageBubbleTestTags.STATUS_SENT)
@@ -383,15 +477,33 @@ fun MessageBubble(
                 }
             }
     
-    // Reactions
-    message.reaction?.let { reactions ->
-        if (reactions.isNotEmpty()) {
-            ReactionsRow(
-                reactions = reactions,
-                isUser = isUser,
-                modifier = Modifier.padding(top = 4.dp, start = 8.dp, end = 8.dp)
-            )
+    // Reactions: chips under the bubble (web MessageReaction)
+    if (showReactions && message.isDeleted != true) {
+        message.reaction?.let { reactions ->
+            if (reactions.isNotEmpty()) {
+                ReactionsRow(
+                    reactions = reactions,
+                    isUser = isUser,
+                    currentUserLocalPart = currentUserLocalPart,
+                    onToggle = onReactionToggle,
+                    modifier = Modifier.padding(top = 4.dp, start = 8.dp, end = 8.dp)
+                )
+            }
         }
+    }
+
+    // Thread pill: replies to this message (web thread reply count on the root)
+    if (threadReplyCount > 0 && onOpenThread != null && message.isDeleted != true) {
+        Text(
+            text = if (threadReplyCount == 1) "1 reply" else "$threadReplyCount replies",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .padding(top = 4.dp, start = 12.dp, end = 12.dp)
+                .clickable(onClickLabel = "Open thread") { onOpenThread() }
+                .padding(horizontal = 4.dp, vertical = 2.dp)
+        )
     }
             
     // Sending/failed status text stays OUTSIDE the bubble so the longer
@@ -759,7 +871,12 @@ private fun UrlPreviewCard(
     // the primary colour of an own bubble made the card read as "dimmed /
     // disabled". Keep the preview visually prominent so the URL is actually
     // readable against both purple (user) and light-gray (other) backgrounds.
-    val previewBg = androidx.compose.ui.graphics.Color(0xFFF4F4F6) // soft gray-white
+    // Light: soft gray-white. Dark: the scheme's surface, so the dark text reads on it.
+    val previewBg = if (com.ethora.chat.ui.styling.isDarkSurface(MaterialTheme.colorScheme.surface)) {
+        MaterialTheme.colorScheme.surface
+    } else {
+        androidx.compose.ui.graphics.Color(0xFFF4F4F6)
+    }
     val previewText = MaterialTheme.colorScheme.onSurface
     Surface(
         modifier = modifier.clickable {
@@ -803,12 +920,14 @@ private fun UrlPreviewCard(
 private fun QuotedMessage(
     message: Message,
     isUser: Boolean,
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp)),
+            .clip(RoundedCornerShape(8.dp))
+            .then(if (onClick != null) Modifier.clickable(onClickLabel = "Open thread") { onClick() } else Modifier),
         color = if (isUser) 
             MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.1f) 
         else 
@@ -859,52 +978,99 @@ private fun QuotedMessage(
 }
 
 /**
- * Row for message reactions
+ * Reaction chips under a bubble (web MessageReaction): glyph and count per
+ * shortcode. A chip I reacted with is highlighted and a tap toggles it. A long
+ * press lists the reactors. Read-only when [onToggle] is null.
  */
 @Composable
 private fun ReactionsRow(
     reactions: Map<String, com.ethora.chat.core.models.ReactionMessage>,
     isUser: Boolean,
+    currentUserLocalPart: String?,
+    onToggle: ((String) -> Unit)?,
     modifier: Modifier = Modifier
 ) {
-    // Group reactions by emoji
-    val counts = mutableMapOf<String, Int>()
-    reactions.values.forEach { reactionMsg ->
+    // Per shortcode: count and reactor names, in first-seen order.
+    val counts = LinkedHashMap<String, Int>()
+    val reactorNames = LinkedHashMap<String, MutableList<String>>()
+    reactions.forEach { (reactorId, reactionMsg) ->
+        val name = listOfNotNull(
+            reactionMsg.data["senderFirstName"]?.takeIf { it.isNotBlank() },
+            reactionMsg.data["senderLastName"]?.takeIf { it.isNotBlank() }
+        ).joinToString(" ").ifBlank { reactorId }
         reactionMsg.emoji.forEach { emoji ->
             counts[emoji] = (counts[emoji] ?: 0) + 1
+            reactorNames.getOrPut(emoji) { mutableListOf() }.add(name)
         }
     }
-    
-    Row(
+    val mineSet: Set<String> = currentUserLocalPart
+        ?.let { reactions[it]?.emoji?.toSet() }
+        .orEmpty()
+    var namesFor by remember { mutableStateOf<String?>(null) }
+
+    FlowRow(
         modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         counts.forEach { (emoji, count) ->
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp, 
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+            val mine = emoji in mineSet
+            val chipModifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(
+                    if (mine) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f)
                 )
+                .border(
+                    1.dp,
+                    if (mine) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                    else MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                    RoundedCornerShape(12.dp)
+                )
+                .combinedClickable(
+                    enabled = true,
+                    onClickLabel = emoji,
+                    onClick = { onToggle?.invoke(emoji) },
+                    onLongClickLabel = "Who reacted",
+                    onLongClick = { namesFor = emoji }
+                )
+                .padding(horizontal = 8.dp, vertical = 2.dp)
+            Row(
+                modifier = chipModifier,
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(text = emoji, fontSize = 12.sp)
-                    if (count > 1) {
-                        Text(
-                            text = count.toString(),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
+                Text(
+                    text = com.ethora.chat.core.reactions.ReactionEmojis.glyphFor(emoji),
+                    fontSize = 14.sp
+                )
+                Text(
+                    text = count.toString(),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
+    }
+
+    namesFor?.let { emoji ->
+        AlertDialog(
+            onDismissRequest = { namesFor = null },
+            title = {
+                Text("${com.ethora.chat.core.reactions.ReactionEmojis.glyphFor(emoji)}  ${counts[emoji] ?: 0}")
+            },
+            text = {
+                Column {
+                    reactorNames[emoji].orEmpty().forEach { name ->
+                        Text(text = name, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { namesFor = null }) { Text("Close") }
+            }
+        )
     }
 }
 

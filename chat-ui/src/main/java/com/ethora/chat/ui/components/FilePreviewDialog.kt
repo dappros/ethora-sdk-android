@@ -43,8 +43,9 @@ fun FilePreviewDialog(
     if (message == null) return
     
     val mimeType = message.mimetype ?: ""
-    val fileUrl = message.location ?: ""
-    val previewUrl = message.locationPreview
+    // Secure-files URLs carry the viewer's ft token; every loader below uses these.
+    val fileUrl = rememberSecureFileUrl(message.location) ?: ""
+    val previewUrl = rememberSecureFileUrl(message.locationPreview)
     val fileName = message.originalName ?: message.fileName ?: "MediaFile"
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -418,7 +419,7 @@ private suspend fun downloadToDownloads(
 ) {
     withContext(Dispatchers.IO) {
         try {
-            val url = URL(fileUrl)
+            val url = URL(com.ethora.chat.core.networking.SecureFileUrl.withFileToken(fileUrl))
             val connection = url.openConnection()
             connection.connect()
             val ext = URLConnection.guessContentTypeFromName(fileName)

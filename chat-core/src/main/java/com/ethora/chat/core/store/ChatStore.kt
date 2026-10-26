@@ -24,7 +24,16 @@ object ChatStore {
      */
     fun setConfig(config: ChatConfig?) {
         _config.value = config
+        // Web: a changed translates.readerLocale drives the reader's chat language.
+        val readerLocale = config?.translates?.readerLocale?.takeIf { it.isNotBlank() }
+        if (readerLocale != null && readerLocale != lastReaderLocale) {
+            ReaderLanguageStore.setChatLanguage(readerLocale)
+        }
+        lastReaderLocale = readerLocale
+        com.ethora.chat.core.e2ee.E2eeRuntime.setEnabled(config?.e2ee?.enabled == true)
     }
+
+    private var lastReaderLocale: String? = null
 
     /**
      * Get current config (for auth style etc.)

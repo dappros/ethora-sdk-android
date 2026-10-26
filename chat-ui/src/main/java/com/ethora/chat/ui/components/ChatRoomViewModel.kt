@@ -8,6 +8,8 @@ import com.ethora.chat.core.config.MessageType
 import com.ethora.chat.core.config.OutgoingSendInput
 import com.ethora.chat.core.config.SendDecision
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.models.MessageAttachment
+import com.ethora.chat.core.models.MessageAttachments
 import com.ethora.chat.core.models.Room
 import com.ethora.chat.core.networking.AuthAPIHelper
 import com.ethora.chat.core.store.ChatEventDispatcher
@@ -16,13 +18,32 @@ import com.ethora.chat.core.store.ConnectionStore
 import com.ethora.chat.core.store.MessageStore
 import com.ethora.chat.core.store.MessageLoader
 import com.ethora.chat.core.store.ChatStore
+import com.ethora.chat.core.store.PendingMediaFile
 import com.ethora.chat.core.store.PendingMediaSend
 import com.ethora.chat.core.store.PendingMediaSendQueue
 import com.ethora.chat.core.store.PendingMediaSendStatus
 import com.ethora.chat.core.store.PendingMediaUploadPayload
+import com.ethora.chat.core.store.JumpRequestStore
+import com.ethora.chat.core.store.PendingJump
+import com.ethora.chat.core.store.PendingJumpPreview
 import com.ethora.chat.core.store.RoomStore
 import com.ethora.chat.core.store.UserStore
+import com.ethora.chat.core.threads.ThreadSupport
+import com.ethora.chat.core.xmpp.JumpContent
+import com.ethora.chat.core.xmpp.JumpWindow
+import com.ethora.chat.core.xmpp.JumpWindowResult
+import com.ethora.chat.core.xmpp.MAX_HISTORY_PAGE_FAILURES
 import com.ethora.chat.core.xmpp.XMPPClient
+import com.ethora.chat.core.xmpp.advanceOlderCursor
+import com.ethora.chat.core.xmpp.findMessageIndex
+import com.ethora.chat.core.xmpp.loadJumpWindow
+import com.ethora.chat.core.xmpp.loadNewerWindowPage
+import com.ethora.chat.core.xmpp.loadOlderWindowPage
+import com.ethora.chat.core.xmpp.oldestArchiveCursor
+import com.ethora.chat.core.e2ee.E2eeRuntime
+import com.ethora.chat.core.e2ee.SealedUpload
+import com.ethora.chat.core.xmpp.mergeWindowMessages
+import com.ethora.chat.core.xmpp.replyParentIdOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -57,6 +78,26 @@ class ChatRoomViewModel(
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
     
     private var isLoadingMoreInProgress = false
+
+    // ---- Jump to message (web useJumpToMessage) ----
+    /** Archive messages shown in place of the live list while a jump is open; null = live list. */
+    private val _jumpWindow = MutableStateFlow<JumpWindow?>(null)
+    val jumpWindow: StateFlow<JumpWindow?> = _jumpWindow.asStateFlow()
+
+    /** Message the list should scroll to and flash. The list calls [consumeJumpTarget]. */
+    private val _jumpTarget = MutableStateFlow<JumpTarget?>(null)
+    val jumpTarget: StateFlow<JumpTarget?> = _jumpTarget.asStateFlow()
+
+    /** Shown when a jump cannot place its message: the archived card, or "too far back". */
+    private val _jumpNotice = MutableStateFlow<JumpNotice?>(null)
+    val jumpNotice: StateFlow<JumpNotice?> = _jumpNotice.asStateFlow()
+
+    private var windowBusy = false
+
+    // Older-history paging state, owned here (web cursorRef / exhaustedRef / failuresRef).
+    private var pagingCursor: Long? = null
+    private var pagingFailures = 0
+    private var pagingExhausted = false
     
     private val _hasMoreMessages = MutableStateFlow(true)
     val hasMoreMessages: StateFlow<Boolean> = _hasMoreMessages.asStateFlow()
@@ -93,7 +134,7 @@ class ChatRoomViewModel(
                 }
                 .distinctUntilChanged()
                 .collect { 
-                    _messages.value = it
+                    publishLive(it)
                 }
         }
         
@@ -126,6 +167,16 @@ class ChatRoomViewModel(
                 }
         }
         
+        // A "scroll to this message" request for this room (search hit, quote, link).
+        viewModelScope.launch {
+            JumpRequestStore.pending.collect { jump ->
+                if (jump == null || jump.roomJid != room.jid) return@collect
+                JumpRequestStore.consume(jump.at)
+                if (JumpRequestStore.isExpired(jump)) return@collect
+                runJump(jump)
+            }
+        }
+
         // Check if messages exist in store - only load if they don't
         val storedMessages = MessageStore.messages.value[room.jid] ?: emptyList()
         if (storedMessages.isEmpty()) {
@@ -135,7 +186,7 @@ class ChatRoomViewModel(
                 val persistedMessages = MessageStore.loadMessagesFromPersistence(room.jid)
                 if (persistedMessages.isNotEmpty()) {
                     MessageStore.setMessagesForRoom(room.jid, persistedMessages)
-                    _messages.value = persistedMessages.sortedBy { it.timestamp ?: it.date.time }
+                    publishLive(persistedMessages.sortedBy { it.timestamp ?: it.date.time })
                     RoomStore.setRoomLoading(room.jid, false)
                     android.util.Log.d("ChatRoomViewModel", "Loaded ${persistedMessages.size} messages from persistence")
                     // Critical: even when cache hit, refresh newest MAM in background so any messages
@@ -155,7 +206,7 @@ class ChatRoomViewModel(
                     kotlinx.coroutines.delay(400)
                     val afterWaitMessages = MessageStore.messages.value[room.jid] ?: emptyList()
                     if (afterWaitMessages.isNotEmpty()) {
-                        _messages.value = afterWaitMessages.sortedBy { it.timestamp ?: it.date.time }
+                        publishLive(afterWaitMessages.sortedBy { it.timestamp ?: it.date.time })
                         android.util.Log.d("ChatRoomViewModel", "Global loader filled messages (${afterWaitMessages.size})")
                         RoomStore.setRoomLoading(room.jid, false)
                         refreshNewestMessages()
@@ -169,7 +220,7 @@ class ChatRoomViewModel(
         } else {
             // Messages already loaded globally, just use them (no loader)
             val sorted = storedMessages.sortedBy { it.timestamp ?: it.date.time }
-            _messages.value = sorted
+            publishLive(sorted)
             android.util.Log.d("ChatRoomViewModel", "Using pre-loaded messages (${sorted.size} messages, sorted oldest-first)")
             // Refresh newest MAM to catch anything missed while on another screen.
             viewModelScope.launch { refreshNewestMessages() }
@@ -214,33 +265,50 @@ class ChatRoomViewModel(
     /**
      * Send typing indicator (start composing)
      */
-    fun sendStartTyping() {
-        viewModelScope.launch {
-            val currentUser = UserStore.currentUser.value
-            val fullName = "${currentUser?.firstName ?: ""} ${currentUser?.lastName ?: ""}".trim()
-            if (fullName.isNotBlank()) {
-                xmppClient?.sendTypingRequest(room.jid, fullName, true)
-            }
-        }
-    }
-    
+    fun sendStartTyping() = sendTypingState(composing = true)
+
     /**
      * Send typing indicator (stop composing)
      */
-    fun sendStopTyping() {
+    fun sendStopTyping() = sendTypingState(composing = false)
+
+    /**
+     * Shared send path. Gated by config.disableTypingIndicator (web useComposing):
+     * only our own outgoing notifications are suppressed, incoming ones still render.
+     */
+    private fun sendTypingState(composing: Boolean) {
+        if (ChatStore.getConfig()?.disableTypingIndicator == true) return
         viewModelScope.launch {
             val currentUser = UserStore.currentUser.value
             val fullName = "${currentUser?.firstName ?: ""} ${currentUser?.lastName ?: ""}".trim()
             if (fullName.isNotBlank()) {
-                xmppClient?.sendTypingRequest(room.jid, fullName, false)
+                xmppClient?.sendTypingIndicator(room.jid, fullName, composing)
             }
         }
     }
 
     /**
+     * The `mainMessage` JSON a reply carries (web createMainMessageForThread), built
+     * from the parent when it is loaded, else from its id alone. Null when not a reply.
+     */
+    private fun replyMainMessage(parentId: String?): String? {
+        if (parentId == null) return null
+        val parent = MessageStore.getMessagesForRoom(room.jid)
+            .firstOrNull { ThreadSupport.threadKey(it) == parentId || it.id == parentId }
+            ?: Message(
+                id = parentId,
+                user = com.ethora.chat.core.models.User(id = ""),
+                date = java.util.Date(),
+                body = "",
+                roomJid = room.jid
+            )
+        return ThreadSupport.createMainMessageForThread(parent)
+    }
+
+    /**
      * Send message
      */
-    fun sendMessage(text: String, parentMessageId: String? = null) {
+    fun sendMessage(text: String, parentMessageId: String? = null, alsoSendToRoom: Boolean = false) {
         viewModelScope.launch {
             val currentUser = UserStore.currentUser.value
             if (currentUser == null) {
@@ -289,6 +357,10 @@ class ChatRoomViewModel(
             val messageId = "send-text-message:${UUID.randomUUID()}"
             val lastKnownTs = MessageStore.lastKnownTimestamp(room.jid)
             val optimisticTs = maxOf(System.currentTimeMillis(), lastKnownTs + 1)
+            // Web `sendMs(text, room, isReply, showInChannel, mainMessage)`: a reply
+            // carries the parent as JSON (createMainMessageForThread), keyed by the
+            // parent's archive id so web and Android read the same reference.
+            val mainMessage = replyMainMessage(finalParentMessageId)
             val optimisticMessage = Message(
                 id = messageId,
                 body = finalText,
@@ -300,7 +372,8 @@ class ChatRoomViewModel(
                 xmppId = messageId,
                 xmppFrom = "${room.jid}/${currentUser.id}",
                 isReply = finalParentMessageId != null,
-                mainMessage = finalParentMessageId
+                mainMessage = mainMessage,
+                showInChannel = if (finalParentMessageId != null) alsoSendToRoom.toString() else null
             )
             MessageStore.addMessage(room.jid, optimisticMessage)
             android.util.Log.d("ChatRoomViewModel", "Created optimistic message before send, ID: $messageId")
@@ -313,8 +386,11 @@ class ChatRoomViewModel(
                 photo = currentUser.profileImage,
                 walletAddress = currentUser.walletAddress,
                 isReply = finalParentMessageId != null,
-                mainMessage = finalParentMessageId,
-                customId = messageId
+                showInChannel = alsoSendToRoom && finalParentMessageId != null,
+                mainMessage = mainMessage,
+                customId = messageId,
+                translateSource = com.ethora.chat.core.store.ReaderLanguageStore
+                    .outgoingTranslateSource(com.ethora.chat.core.store.ChatStore.getConfig())
             )
 
             if (sentMessageId != null) {
@@ -479,106 +555,32 @@ class ChatRoomViewModel(
     }
     
     /**
-     * Load more messages (pagination) when scrolling to top
-     * Matches web: loadMoreMessages in ChatRoom.tsx exactly
-     * 
-     * React logic:
-     * - Check: !isLoadingMore && !roomsList?.[chatJID]?.historyComplete
-     * - Get lastMsgId: if idOfMessageBefore provided, use it; else use messages[length-2].id (skip delimiter-new)
-     * - Call: client?.getHistoryStanza(chatJID, max, lastMsgId)
+     * Load older messages when the reader scrolls to the top (web loadMoreMessages).
+     * While a jump window is shown, the same gesture pages the window instead.
+     *
+     * The cursor is the server's archive id of the oldest row, never a
+     * millisecond timestamp: the server reads a timestamp as a far older id and
+     * answers with the first page of the archive.
      */
-    fun loadMoreMessages(idOfMessageBefore: String? = null) {
-        // historyComplete from initial MAM query means "that query finished", NOT "no older messages exist".
-        // We must always attempt loadMore when user scrolls up; empty response will set hasMoreMessages=false.
+    fun loadMoreMessages(@Suppress("UNUSED_PARAMETER") idOfMessageBefore: String? = null) {
+        if (_jumpWindow.value != null) {
+            loadOlderInWindow()
+            return
+        }
         if (isLoadingMoreInProgress) {
             android.util.Log.d("ChatRoomViewModel", "Skipping loadMore: already in progress")
             return
         }
-        
         viewModelScope.launch {
             isLoadingMoreInProgress = true
             _isLoadingMore.value = true
             try {
-                val currentMessages = _messages.value
-                if (currentMessages.isEmpty()) {
+                val oldest = _messages.value.firstOrNull { it.id != "delimiter-new" }
+                if (oldest == null) {
                     android.util.Log.d("ChatRoomViewModel", "No messages to paginate from")
-                    isLoadingMoreInProgress = false
-                    _isLoadingMore.value = false
-                    return@launch
-                }
-                
-                val messagesWithoutDelimiter = currentMessages.filter { it.id != "delimiter-new" }
-                val oldestMessage = messagesWithoutDelimiter.firstOrNull()
-                if (oldestMessage == null) {
-                    android.util.Log.d("ChatRoomViewModel", "No valid message ID found for pagination")
-                    isLoadingMoreInProgress = false
-                    _isLoadingMore.value = false
-                    return@launch
-                }
-                
-                _scrollRestoreAnchor.value = oldestMessage.id
-
-                // Use OLDEST SERVER message for beforeId - optimistic ids are not in server archive.
-                val anchorMsg = messagesWithoutDelimiter.firstOrNull { msg ->
-                    !msg.id.startsWith("send-text-message-") && !msg.id.startsWith("pending-")
-                } ?: oldestMessage
-
-                // Match web's `loadMoreMessages(chatJID, 30, Number(firstMessageId))`:
-                // the server expects a NUMERIC `<before>` value. If the message id
-                // has a 10+ digit numeric chunk (Ethora's archive ids embed a ms
-                // timestamp — e.g. "1704067200000" or "send-media-message:…-1704067200000"),
-                // use that; otherwise fall through to the message timestamp.
-                // Sending a non-numeric id was making the server drop the `<before>`
-                // constraint and return the FIRST page of the archive, producing
-                // the classic "skip middle, jump to 1-9" pagination bug.
-                val idStr = anchorMsg.id
-                val numericFromId = Regex("\\d{10,}").find(idStr)?.value
-                val beforeId = numericFromId
-                    ?: anchorMsg.timestamp?.takeIf { it > 0 }?.toString()
-                    ?: anchorMsg.date.time.toString()
-
-                android.util.Log.d(
-                    "ChatRoomViewModel",
-                    "Triggering loadMoreMessages room=${room.jid} anchorId=${anchorMsg.id} beforeId=$beforeId"
-                )
-                
-                xmppClient?.let { client ->
-                    if (!client.isFullyConnected()) {
-                        val reconnected = client.ensureConnected(5_000)
-                        if (!reconnected) {
-                            android.util.Log.w(
-                                "ChatRoomViewModel",
-                                "Skipping loadMoreMessages: client not connected for ${room.jid}"
-                            )
-                            return@let
-                        }
-                    }
-                    client.promoteRoomHistory(room.jid)
-                    val history = client.getHistory(room.jid, max = 30, beforeMessageId = beforeId)
-                    android.util.Log.d("ChatRoomViewModel", "  Received ${history.size} older messages")
-                    
-                    if (history.isNotEmpty()) {
-                        MessageStore.addMessages(room.jid, history)
-                        android.util.Log.d("ChatRoomViewModel", "   Added ${history.size} older messages to store")
-                        kotlinx.coroutines.delay(50)
-                        val updated = (MessageStore.messages.value[room.jid] ?: emptyList())
-                            .sortedBy { it.timestamp ?: it.date.time }
-                        _messages.value = updated
-                        android.util.Log.d("ChatRoomViewModel", "   UI updated: ${updated.size} total messages")
-                    }
-
-                    val historyComplete = RoomStore.getRoomByJid(room.jid)?.historyComplete == true
-                    if (historyComplete) {
-                        android.util.Log.d("ChatRoomViewModel", "   No more messages available (historyComplete=true)")
-                        _hasMoreMessages.value = false
-                    } else if (history.isEmpty()) {
-                        android.util.Log.w(
-                            "ChatRoomViewModel",
-                            "   Empty pagination response before historyComplete for ${room.jid}; keeping hasMoreMessages=true"
-                        )
-                    }
-                } ?: run {
-                    android.util.Log.w("ChatRoomViewModel", "   XMPP client is null")
+                } else {
+                    _scrollRestoreAnchor.value = oldest.id
+                    fetchOlderPage()
                 }
             } catch (e: CancellationException) {
                 // Expected when coroutine is cancelled - don't log as error
@@ -588,9 +590,203 @@ class ChatRoomViewModel(
             } finally {
                 isLoadingMoreInProgress = false
                 _isLoadingMore.value = false
-                android.util.Log.d("ChatRoomViewModel", "  Finished loading more, isLoadingMore: false")
             }
         }
+    }
+
+    /**
+     * One page of older history into the store, with the server's cursor.
+     * Returns false when no request was made (not connected, nothing to page
+     * from, or the history is exhausted).
+     */
+    private suspend fun fetchOlderPage(): Boolean {
+        val client = xmppClient ?: return false
+        if (pagingExhausted) return false
+        val before = pagingCursor ?: oldestArchiveCursor(liveMessages()) ?: run {
+            android.util.Log.d("ChatRoomViewModel", "No archive id to page from in ${room.jid}")
+            return false
+        }
+        if (!client.isFullyConnected() && !client.ensureConnected(5_000)) {
+            android.util.Log.w("ChatRoomViewModel", "Skipping loadMoreMessages: client not connected for ${room.jid}")
+            return false
+        }
+        client.promoteRoomHistory(room.jid)
+        val page = client.getHistoryPage(room.jid, max = 30, beforeMessageId = before.toString())
+        if (page.messages.isNotEmpty()) {
+            MessageStore.addMessages(room.jid, page.messages)
+        }
+        val state = advanceOlderCursor(before, page.ok, page.complete, page.first)
+        pagingFailures = if (page.ok) 0 else pagingFailures + 1
+        pagingCursor = state.cursor
+        pagingExhausted = state.exhausted || pagingFailures >= MAX_HISTORY_PAGE_FAILURES
+        _hasMoreMessages.value = !pagingExhausted
+        android.util.Log.d(
+            "ChatRoomViewModel",
+            "History page before=$before got=${page.messages.size} ok=${page.ok} complete=${page.complete} exhausted=$pagingExhausted"
+        )
+        return true
+    }
+
+    /** Opens the window around a message, or scrolls the live list when the message is already there. */
+    private suspend fun runJump(jump: PendingJump) {
+        val content = JumpContent(createdAt = jump.createdAt, body = jump.body)
+        _jumpNotice.value = null
+
+        if (_jumpWindow.value != null) {
+            val live = liveMessages()
+            val liveIndex = findMessageIndex(live, jump.ids, content)
+            if (liveIndex >= 0) {
+                exitJumpWindow()
+                _jumpTarget.value = JumpTarget(live[liveIndex].id, jump.at)
+                return
+            }
+        } else {
+            val shown = _messages.value
+            val index = findMessageIndex(shown, jump.ids, content)
+            if (index >= 0) {
+                _jumpTarget.value = JumpTarget(shown[index].id, jump.at)
+                return
+            }
+        }
+
+        val client = xmppClient
+        if (client == null || (!client.isFullyConnected() && !client.ensureConnected(10_000))) {
+            showJumpNotice(jump)
+            return
+        }
+        when (val result = loadJumpWindow(client, room.jid, jump.ids, content)) {
+            is JumpWindowResult.Found -> showJumpWindow(result.window, jump.at)
+            JumpWindowResult.Missing -> showJumpNotice(jump)
+            JumpWindowResult.Unavailable -> {
+                // No window could be asked for: page older history until the message shows up.
+                val id = pageUntilFound(jump, content)
+                if (id != null) _jumpTarget.value = JumpTarget(id, jump.at) else showJumpNotice(jump)
+            }
+        }
+    }
+
+    private suspend fun pageUntilFound(jump: PendingJump, content: JumpContent): String? {
+        var pages = 0
+        while (true) {
+            val live = liveMessages()
+            val index = findMessageIndex(live, jump.ids, content)
+            if (index >= 0) return live[index].id
+            if (pages >= MAX_JUMP_HISTORY_PAGES || !fetchOlderPage()) return null
+            pages += 1
+        }
+    }
+
+    private fun showJumpWindow(window: JumpWindow, at: Long) {
+        _jumpWindow.value = window
+        _messages.value = window.messages
+        _jumpTarget.value = JumpTarget(window.targetId, at)
+    }
+
+    private fun showJumpNotice(jump: PendingJump) {
+        val preview = jump.preview
+        _jumpNotice.value = if (preview != null) {
+            JumpNotice.Archived(preview, jump.at)
+        } else {
+            JumpNotice.NotFound(jump.at)
+        }
+    }
+
+    /** "Jump to latest messages": back to the live list. */
+    fun jumpToLatest() {
+        if (_jumpWindow.value != null) exitJumpWindow()
+    }
+
+    private fun exitJumpWindow() {
+        _jumpWindow.value = null
+        _messages.value = liveMessages()
+    }
+
+    /** Pages the window toward older messages (the list reached its top). */
+    fun loadOlderInWindow() = pageWindow(older = true)
+
+    /** Pages the window toward newer messages (the list reached its bottom). */
+    fun loadNewerInWindow() = pageWindow(older = false)
+
+    private fun pageWindow(older: Boolean) {
+        val client = xmppClient ?: return
+        val window = _jumpWindow.value ?: return
+        if (windowBusy) return
+        if (older && !window.hasOlder) return
+        if (!older && !window.hasNewer) return
+        viewModelScope.launch {
+            windowBusy = true
+            try {
+                if (older) {
+                    val page = loadOlderWindowPage(client, window) ?: return@launch
+                    val current = _jumpWindow.value ?: return@launch
+                    if (current.targetId != window.targetId) return@launch
+                    _scrollRestoreAnchor.value = current.messages.firstOrNull()?.id
+                    updateWindow(
+                        current.copy(
+                            messages = mergeWindowMessages(current.messages, page.messages),
+                            olderCursor = page.olderCursor,
+                            hasOlder = page.hasOlder
+                        )
+                    )
+                } else {
+                    val page = loadNewerWindowPage(client, window) ?: return@launch
+                    val current = _jumpWindow.value ?: return@launch
+                    if (current.targetId != window.targetId) return@launch
+                    updateWindow(
+                        current.copy(
+                            messages = mergeWindowMessages(current.messages, page.messages),
+                            newerCursor = page.newerCursor,
+                            hasNewer = page.hasNewer
+                        )
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("ChatRoomViewModel", "Error paging jump window", e)
+            } finally {
+                windowBusy = false
+            }
+        }
+    }
+
+    private fun updateWindow(window: JumpWindow) {
+        _jumpWindow.value = window
+        _messages.value = window.messages
+    }
+
+    /** The list scrolled to [JumpTarget] and flashed it. */
+    fun consumeJumpTarget(at: Long) {
+        if (_jumpTarget.value?.at == at) _jumpTarget.value = null
+    }
+
+    fun dismissJumpNotice() {
+        _jumpNotice.value = null
+    }
+
+    /** Opens the message [parent] that a reply quotes. */
+    fun jumpToQuotedMessage(parent: com.ethora.chat.core.models.Message) {
+        val createdAt = java.time.Instant.ofEpochMilli(parent.timestamp ?: parent.date.time).toString()
+        JumpRequestStore.request(
+            roomJid = room.jid,
+            ids = listOf(parent.id, parent.xmppId),
+            createdAt = createdAt,
+            body = parent.body,
+            preview = PendingJumpPreview(
+                roomJid = room.jid,
+                sender = parent.user.fullName,
+                body = parent.body,
+                createdAt = createdAt
+            )
+        )
+    }
+
+    private fun liveMessages(): List<com.ethora.chat.core.models.Message> =
+        (MessageStore.messages.value[room.jid] ?: emptyList()).sortedBy { it.timestamp ?: it.date.time }
+
+    /** Writes the live list unless a jump window owns the list. */
+    private fun publishLive(list: List<com.ethora.chat.core.models.Message>) {
+        if (_jumpWindow.value == null) _messages.value = list
     }
 
     fun clearScrollRestoreAnchor() {
@@ -598,62 +794,22 @@ class ChatRoomViewModel(
     }
     
     /**
-     * Queue media for durable upload + XMPP send. The optimistic message stays
-     * visible while the queue retries across reconnects and app foregrounds.
+     * Queue one media message holding every file in [files], in order. The
+     * message is one stanza: each file is uploaded (secure route, web parity),
+     * then a single media message goes out with the caption on <data>, and the
+     * `attachments` JSON when there is more than one file. The optimistic bubble
+     * stays visible while the queue retries across reconnects and foregrounds.
      */
-    /**
-     * Combo send: queue the media exactly like [sendMedia], and ask the
-     * queue processor to dispatch [caption] as a follow-up text message
-     * AFTER the XMPP media send succeeds. This guarantees the receiver
-     * sees `[image][caption]` in order — previously the two sends raced
-     * because the text-only path is a single stanza while the media path
-     * has to upload first, and the text usually won.
-     *
-     * Falls back to the plain caption-less path when [caption] is blank.
-     */
-    fun sendMediaWithCaption(
-        file: File,
-        mimeType: String,
-        caption: String,
-        replyToMessageId: String? = null
-    ) {
-        val trimmed = caption.trim()
-        if (trimmed.isEmpty()) {
-            sendMedia(file, mimeType)
-            return
-        }
-        sendMedia(
-            file = file,
-            mimeType = mimeType,
-            caption = trimmed,
-            replyToMessageId = replyToMessageId
-        )
-    }
-
-    fun sendMedia(
-        file: File,
-        mimeType: String,
-        retryCount: Int = 0,
+    fun sendMediaBatch(
+        files: List<Pair<File, String>>,
         caption: String? = null,
         replyToMessageId: String? = null
     ) {
         viewModelScope.launch {
             try {
                 val config = ChatStore.getConfig()
-                val interceptionInput = OutgoingSendInput(
-                    roomJid = room.jid,
-                    messageType = MessageType.MEDIA,
-                    fileName = file.name,
-                    mimeType = mimeType
-                )
-                val sendDecision = config?.onBeforeSend?.invoke(interceptionInput)
-                if (sendDecision is SendDecision.Cancel) return@launch
-                val effectiveInput = when (sendDecision) {
-                    is SendDecision.Proceed -> sendDecision.input
-                    else -> interceptionInput
-                }
-                val effectiveMimeType = effectiveInput.mimeType ?: mimeType
-
+                val limits = config?.attachments ?: com.ethora.chat.core.config.AttachmentsConfig()
+                if (files.isEmpty()) return@launch
                 val currentUser = UserStore.currentUser.value
                 if (currentUser == null) {
                     android.util.Log.e("ChatRoomViewModel", "Cannot send media: user or token is null")
@@ -662,55 +818,84 @@ class ChatRoomViewModel(
                             roomJid = room.jid,
                             messageType = MessageType.MEDIA,
                             error = IllegalStateException("User is null"),
-                            metadata = mapOf("fileName" to file.name, "mimeType" to effectiveMimeType)
-                        )
-                    )
-                    return@launch
-                }
-                
-                // Validate file exists and is readable
-                if (!file.exists() || !file.canRead()) {
-                    android.util.Log.e("ChatRoomViewModel", "File does not exist or cannot be read: ${file.absolutePath}")
-                    ChatEventDispatcher.emit(
-                        ChatEvent.MediaUploadResult(
-                            roomJid = room.jid,
-                            fileName = file.name,
-                            mimeType = effectiveMimeType,
-                            success = false,
-                            error = IllegalStateException("File does not exist or cannot be read")
+                            metadata = mapOf("fileName" to files.first().first.name, "mimeType" to files.first().second)
                         )
                     )
                     return@launch
                 }
 
-                val preparedMedia = prepareMediaForUpload(file, effectiveMimeType)
-                val uploadFile = preparedMedia.first
-                val uploadMimeType = preparedMedia.second
-                
-                // Validate file size (max 50MB)
-                val maxSizeBytes = 50 * 1024 * 1024L // 50MB
-                val fileSize = uploadFile.length()
-                if (fileSize > maxSizeBytes) {
-                    android.util.Log.e("ChatRoomViewModel", "File too large: ${fileSize} bytes (max: $maxSizeBytes)")
-                    ChatEventDispatcher.emit(
-                        ChatEvent.MediaUploadResult(
-                            roomJid = room.jid,
-                            fileName = uploadFile.name,
-                            mimeType = uploadMimeType,
-                            success = false,
-                            error = IllegalStateException("File too large")
-                        )
-                    )
-                    return@launch
+                val accepted = files.take(limits.effectiveMaxFiles)
+                if (accepted.size < files.size) {
+                    android.util.Log.w("ChatRoomViewModel", "Dropping ${files.size - accepted.size} files over attachments.maxFiles=${limits.effectiveMaxFiles}")
                 }
-                
-                // Create optimistic message
+
+                val prepared = mutableListOf<Pair<File, String>>()
+                for ((file, mimeType) in accepted) {
+                    val interceptionInput = OutgoingSendInput(
+                        roomJid = room.jid,
+                        messageType = MessageType.MEDIA,
+                        fileName = file.name,
+                        mimeType = mimeType
+                    )
+                    val sendDecision = config?.onBeforeSend?.invoke(interceptionInput)
+                    if (sendDecision is SendDecision.Cancel) return@launch
+                    val effectiveInput = when (sendDecision) {
+                        is SendDecision.Proceed -> sendDecision.input
+                        else -> interceptionInput
+                    }
+                    val effectiveMimeType = effectiveInput.mimeType ?: mimeType
+
+                    if (!file.exists() || !file.canRead()) {
+                        android.util.Log.e("ChatRoomViewModel", "File does not exist or cannot be read: ${file.absolutePath}")
+                        ChatEventDispatcher.emit(
+                            ChatEvent.MediaUploadResult(
+                                roomJid = room.jid,
+                                fileName = file.name,
+                                mimeType = effectiveMimeType,
+                                success = false,
+                                error = IllegalStateException("File does not exist or cannot be read")
+                            )
+                        )
+                        return@launch
+                    }
+
+                    val (uploadFile, uploadMimeType) = prepareMediaForUpload(file, effectiveMimeType)
+                    val fileSize = uploadFile.length()
+                    if (fileSize > limits.effectiveMaxFileBytes) {
+                        android.util.Log.e("ChatRoomViewModel", "File too large: $fileSize bytes (max: ${limits.effectiveMaxFileBytes})")
+                        ChatEventDispatcher.emit(
+                            ChatEvent.MediaUploadResult(
+                                roomJid = room.jid,
+                                fileName = uploadFile.name,
+                                mimeType = uploadMimeType,
+                                success = false,
+                                error = IllegalStateException("File too large")
+                            )
+                        )
+                        return@launch
+                    }
+                    prepared += uploadFile to uploadMimeType
+                }
+
+                val (firstFile, firstMime) = prepared.first()
                 // Use timestamp-based ID that will be replaced by server echo
                 val messageId = "send-media-message:${UUID.randomUUID()}"
                 // Same max(now, last+1) trick as text send — keeps the freshly
                 // sent media at the very bottom even if server clocks drift.
                 val lastKnownTs = MessageStore.lastKnownTimestamp(room.jid)
                 val optimisticTs = maxOf(System.currentTimeMillis(), lastKnownTs + 1)
+                val trimmedCaption = caption?.trim()?.takeIf { it.isNotEmpty() }
+                val optimisticAttachments = prepared.map { (file, mime) ->
+                    val localUri = "file://${file.absolutePath}"
+                    MessageAttachment(
+                        location = localUri,
+                        locationPreview = if (mime.startsWith("image/")) localUri else null,
+                        mimetype = mime,
+                        originalName = file.name,
+                        fileName = file.name,
+                        size = file.length().toString()
+                    )
+                }
                 val optimisticMessage = Message(
                     id = messageId,
                     body = "media",
@@ -724,62 +909,41 @@ class ChatRoomViewModel(
                     xmppFrom = "${room.jid}/${currentUser.id}",
                     isSystemMessage = "false",
                     isMediafile = "true",
-                    fileName = uploadFile.name,
-                    // Use the local file URI so the image/video appears in the bubble
-                    // immediately while the upload runs. Coil handles `file://` URIs.
-                    // When the server echo returns, both `location` and `locationPreview`
-                    // get replaced with the real CDN URL in the deep-merge.
-                    location = "file://${uploadFile.absolutePath}",
-                    locationPreview = if (uploadMimeType.startsWith("image/")) "file://${uploadFile.absolutePath}" else "",
-                    mimetype = uploadMimeType,
-                    originalName = uploadFile.name,
-                    size = uploadFile.length().toString()
+                    fileName = firstFile.name,
+                    // The local file URI shows the picture while the upload runs. When the
+                    // server echo returns, location and locationPreview are replaced by the CDN URLs.
+                    location = "file://${firstFile.absolutePath}",
+                    locationPreview = if (firstMime.startsWith("image/")) "file://${firstFile.absolutePath}" else "",
+                    mimetype = firstMime,
+                    originalName = firstFile.name,
+                    size = firstFile.length().toString(),
+                    caption = trimmedCaption,
+                    attachments = if (optimisticAttachments.size > 1) optimisticAttachments else null,
+                    isReply = replyToMessageId != null,
+                    mainMessage = replyMainMessage(replyToMessageId)
                 )
                 MessageStore.addMessage(room.jid, optimisticMessage)
-                android.util.Log.d("ChatRoomViewModel", "Created optimistic media message with pending=true, ID: $messageId")
+                android.util.Log.d("ChatRoomViewModel", "Created optimistic media message with pending=true, ID: $messageId (${prepared.size} files)")
                 schedulePendingFallback(messageId)
-
-                // Optimistic CAPTION bubble — added now, not after the upload
-                // completes, so the user sees their text immediately in the
-                // "sending" state. When the upload finally fires the XMPP
-                // text send, we reuse this id as `customId` so the echo
-                // merges into THIS row instead of appending a second one.
-                val trimmedCaption = caption?.trim()?.takeIf { it.isNotEmpty() }
-                val captionMessageId = if (trimmedCaption != null) {
-                    val captionId = "send-text-message:${UUID.randomUUID()}"
-                    // Use optimisticTs+1 so the caption sorts AFTER the media
-                    // in the timestamp-ordered list (web parity: media
-                    // bubble first, caption second).
-                    val captionTs = optimisticTs + 1
-                    val captionMessage = Message(
-                        id = captionId,
-                        body = trimmedCaption,
-                        user = currentUser,
-                        date = Date(captionTs),
-                        timestamp = captionTs,
-                        roomJid = room.jid,
-                        pending = true,
-                        xmppId = captionId,
-                        xmppFrom = "${room.jid}/${currentUser.id}",
-                        isReply = replyToMessageId != null,
-                        mainMessage = replyToMessageId
-                    )
-                    MessageStore.addMessage(room.jid, captionMessage)
-                    schedulePendingFallback(captionId)
-                    captionId
-                } else null
 
                 PendingMediaSendQueue.enqueue(
                     PendingMediaSend(
                         roomJid = room.jid,
                         messageId = messageId,
-                        localFilePath = uploadFile.absolutePath,
-                        fileName = uploadFile.name,
-                        mimeType = uploadMimeType,
+                        localFilePath = firstFile.absolutePath,
+                        fileName = firstFile.name,
+                        mimeType = firstMime,
                         createdAt = optimisticTs,
                         caption = trimmedCaption,
                         replyToMessageId = replyToMessageId,
-                        captionMessageId = captionMessageId
+                        captionMessageId = null,
+                        files = prepared.map { (file, mime) ->
+                            PendingMediaFile(
+                                localFilePath = file.absolutePath,
+                                fileName = file.name,
+                                mimeType = mime
+                            )
+                        }
                     )
                 )
                 processPendingMediaQueue()
@@ -790,11 +954,35 @@ class ChatRoomViewModel(
                         roomJid = room.jid,
                         messageType = MessageType.MEDIA,
                         error = e,
-                        metadata = mapOf("fileName" to file.name, "mimeType" to mimeType)
+                        metadata = mapOf("fileName" to files.first().first.name, "mimeType" to files.first().second)
                     )
                 )
             }
         }
+    }
+
+    /** Single-file send. Kept for existing callers; the caption now rides on the media message. */
+    fun sendMedia(
+        file: File,
+        mimeType: String,
+        retryCount: Int = 0,
+        caption: String? = null,
+        replyToMessageId: String? = null
+    ) {
+        sendMediaBatch(listOf(file to mimeType), caption, replyToMessageId)
+    }
+
+    /**
+     * Combo send: one media message with the caption (web parity). Blank captions
+     * are dropped.
+     */
+    fun sendMediaWithCaption(
+        file: File,
+        mimeType: String,
+        caption: String,
+        replyToMessageId: String? = null
+    ) {
+        sendMediaBatch(listOf(file to mimeType), caption, replyToMessageId)
     }
 
     fun processPendingMediaQueue() {
@@ -817,8 +1005,12 @@ class ChatRoomViewModel(
                     it.copy(status = PendingMediaSendStatus.UPLOADING)
                 } ?: return@forEach
 
-                val uploadPayload = working.uploaded ?: run {
-                    val file = File(working.localFilePath)
+                // Upload every file that has no payload yet. Each finished upload is saved
+                // at once, so a retry after a later failure never uploads a file twice.
+                val files = working.effectiveFiles.toMutableList()
+                for (index in files.indices) {
+                    if (files[index].uploaded != null) continue
+                    val file = File(files[index].localFilePath)
                     if (!file.exists() || !file.canRead()) {
                         markPendingMediaFailed(
                             working,
@@ -827,13 +1019,45 @@ class ChatRoomViewModel(
                         return@forEach
                     }
 
+                    // In an encrypted room each file is sealed before it leaves the device: the
+                    // server gets opaque bytes under a random name, the key goes in the stanza body.
+                    val sealRoom = E2eeRuntime.isE2eeRoom(working.roomJid)
+                    var sealedKey: String? = null
                     val uploadResult = withContext(Dispatchers.IO) {
-                        AuthAPIHelper.uploadFile(
-                            file = file,
-                            mimeType = working.mimeType,
-                            token = token,
-                            baseUrl = ChatStore.getEffectiveBaseUrl()
-                        )
+                        if (sealRoom) {
+                            val sealed = try {
+                                SealedUpload.seal(
+                                    source = file,
+                                    mimetype = files[index].mimeType,
+                                    originalName = files[index].fileName,
+                                    outDir = File(appCacheDir(), "sealed")
+                                )
+                            } catch (e: Exception) {
+                                android.util.Log.e("ChatRoomViewModel", "Sealing the attachment failed", e)
+                                return@withContext null
+                            }
+                            try {
+                                sealedKey = sealed.keyMaterial
+                                AuthAPIHelper.uploadFile(
+                                    file = sealed.file,
+                                    mimeType = SealedUpload.SEALED_MIMETYPE,
+                                    token = token,
+                                    baseUrl = ChatStore.getEffectiveBaseUrl(),
+                                    chatName = working.roomJid.substringBefore('@'),
+                                    clientEncrypted = true
+                                )
+                            } finally {
+                                sealed.file.delete()
+                            }
+                        } else {
+                            AuthAPIHelper.uploadFile(
+                                file = file,
+                                mimeType = files[index].mimeType,
+                                token = token,
+                                baseUrl = ChatStore.getEffectiveBaseUrl(),
+                                chatName = working.roomJid.substringBefore('@')
+                            )
+                        }
                     }
                     if (uploadResult == null) {
                         markPendingMediaFailed(working, IllegalStateException("Upload failed"))
@@ -857,26 +1081,39 @@ class ChatRoomViewModel(
                             success = true
                         )
                     )
-                    PendingMediaUploadPayload.from(uploadResult)
+                    files[index] = files[index].copy(
+                        uploaded = PendingMediaUploadPayload.from(uploadResult),
+                        sealedKey = sealedKey
+                    )
+                    working = PendingMediaSendQueue.update(working.id) {
+                        it.withFiles(files.toList()).copy(nextRetryAt = 0L)
+                    } ?: return@forEach
                 }
 
+                val uploadResults = files.map { checkNotNull(it.uploaded).toFileUploadResult() }
                 working = PendingMediaSendQueue.update(working.id) {
-                    it.copy(
-                        uploaded = uploadPayload,
-                        status = PendingMediaSendStatus.READY_TO_SEND,
-                        nextRetryAt = 0L
-                    )
+                    it.copy(status = PendingMediaSendStatus.READY_TO_SEND, nextRetryAt = 0L)
                 } ?: return@forEach
 
-                val uploadResult = uploadPayload.toFileUploadResult()
-                updateOptimisticMediaMessage(working, uploadResult)
+                updateOptimisticMediaMessage(working, uploadResults)
 
                 if (!client.isFullyConnected() && !client.ensureConnected(15_000)) {
                     markPendingMediaFailed(working, IllegalStateException("XMPP not connected"))
                     return@forEach
                 }
 
-                val mediaData = buildMediaData(uploadResult, currentUser)
+                // Entries queued before the caption moved onto the media message still send it
+                // as a follow-up text (captionMessageId is set only for those).
+                val mediaCaption = if (working.captionMessageId == null) working.caption else null
+                val sealedKeys = files.mapNotNull { it.sealedKey }
+                val sealed = E2eeRuntime.isE2eeRoom(working.roomJid)
+                if (sealed && sealedKeys.size != files.size) {
+                    // A clear file in an encrypted room would leak it: never send.
+                    markPendingMediaFailed(working, IllegalStateException("Attachment is not sealed"))
+                    return@forEach
+                }
+                val mediaData = buildMediaData(uploadResults, currentUser, mediaCaption, working.replyToMessageId)
+                    .let { data -> if (sealed) data + ("e2eeKeys" to sealedKeys) else data }
                 val sent = try {
                     client.sendMediaMessage(working.roomJid, mediaData, working.messageId)
                 } catch (e: Exception) {
@@ -893,12 +1130,8 @@ class ChatRoomViewModel(
                     val pendingCaptionId = working.captionMessageId
                     PendingMediaSendQueue.remove(working.id, deleteLocalFile = true)
                     if (!pendingCaption.isNullOrBlank() && !pendingCaptionId.isNullOrBlank()) {
-                        // The optimistic caption bubble was already added
-                        // at send-tap time (see `sendMedia`). Transmit the
-                        // XMPP stanza with `customId = pendingCaptionId` so
-                        // the server's echo merges into THAT row instead of
-                        // creating a second one. If the transport rejects,
-                        // mark only the caption row as failed.
+                        // Legacy entry: the optimistic caption bubble was added at send time.
+                        // Send the text with customId so the echo merges into that row.
                         viewModelScope.launch {
                             val sentId = try {
                                 client.sendMessage(
@@ -909,7 +1142,7 @@ class ChatRoomViewModel(
                                     photo = currentUser.profileImage,
                                     walletAddress = currentUser.walletAddress,
                                     isReply = pendingReply != null,
-                                    mainMessage = pendingReply,
+                                    mainMessage = replyMainMessage(pendingReply),
                                     customId = pendingCaptionId
                                 )
                             } catch (e: Exception) {
@@ -940,8 +1173,8 @@ class ChatRoomViewModel(
                             messageType = MessageType.MEDIA,
                             user = currentUser,
                             metadata = mapOf(
-                                "location" to uploadResult.location,
-                                "mimetype" to uploadResult.mimetype
+                                "location" to uploadResults.first().location,
+                                "mimetype" to uploadResults.first().mimetype
                             )
                         )
                     )
@@ -953,6 +1186,9 @@ class ChatRoomViewModel(
             }
         }
     }
+
+    /** On Android `java.io.tmpdir` is the app's cache directory. */
+    private fun appCacheDir(): File = File(System.getProperty("java.io.tmpdir") ?: ".")
 
     private fun markPendingMediaFailed(item: PendingMediaSend, error: Throwable) {
         // Honor RetryConfig: when autoRetry is false (default) the item goes
@@ -990,60 +1226,86 @@ class ChatRoomViewModel(
 
     private fun updateOptimisticMediaMessage(
         item: PendingMediaSend,
-        uploadResult: com.ethora.chat.core.networking.FileUploadResult
+        uploadResults: List<com.ethora.chat.core.networking.FileUploadResult>
     ) {
         val existing = MessageStore.getMessagesForRoom(item.roomJid)
             .firstOrNull { it.id == item.messageId }
+        // A sealed upload is ciphertext: the bubble keeps the local picture until the echo.
+        if (E2eeRuntime.isE2eeRoom(item.roomJid)) return
+        val first = uploadResults.first()
         val updated = existing?.copy(
-            location = uploadResult.location,
-            locationPreview = uploadResult.locationPreview,
-            fileName = uploadResult.filename,
-            mimetype = uploadResult.mimetype,
-            originalName = uploadResult.originalName,
-            size = uploadResult.size,
+            location = first.location,
+            locationPreview = first.locationPreview,
+            fileName = first.filename,
+            mimetype = first.mimetype,
+            originalName = first.originalName,
+            size = first.size,
+            attachments = if (uploadResults.size > 1) uploadResults.map { it.toMessageAttachment() } else null,
             pending = true
         ) ?: return
         MessageStore.updateMessage(item.roomJid, updated)
     }
 
+    private fun com.ethora.chat.core.networking.FileUploadResult.toMessageAttachment(): MessageAttachment =
+        MessageAttachment(
+            attachmentId = attachmentId,
+            location = location,
+            locationPreview = locationPreview,
+            mimetype = mimetype,
+            originalName = originalName,
+            fileName = filename,
+            size = size,
+            duration = duration
+        )
+
     private fun buildMediaData(
-        uploadResult: com.ethora.chat.core.networking.FileUploadResult,
-        currentUser: com.ethora.chat.core.models.User
+        uploadResults: List<com.ethora.chat.core.networking.FileUploadResult>,
+        currentUser: com.ethora.chat.core.models.User,
+        caption: String?,
+        replyToMessageId: String? = null
     ): Map<String, Any> {
+        val uploadResult = uploadResults.first()
         val xmppHost = ChatStore.getEffectiveXmppSettings().host
         val senderJID = currentUser.xmppUsername?.let { "$it@$xmppHost" } ?: ""
-        return mapOf(
-            "senderJID" to senderJID,
-            "senderFirstName" to (currentUser.firstName ?: ""),
-            "senderLastName" to (currentUser.lastName ?: ""),
-            "senderWalletAddress" to (currentUser.walletAddress ?: ""),
-            "isSystemMessage" to "false",
-            "tokenAmount" to "0",
-            "receiverMessageId" to "0",
-            "mucname" to (room.name ?: ""),
-            "photoURL" to (currentUser.profileImage ?: ""),
-            "isMediafile" to "true",
-            "createdAt" to uploadResult.createdAt,
-            "expiresAt" to (uploadResult.expiresAt ?: ""),
-            "fileName" to uploadResult.filename,
-            "isVisible" to (uploadResult.isVisible?.toString() ?: "true"),
-            "location" to uploadResult.location,
-            "locationPreview" to (uploadResult.locationPreview ?: ""),
-            "mimetype" to uploadResult.mimetype,
-            "originalName" to uploadResult.originalName,
-            "ownerKey" to (uploadResult.ownerKey ?: ""),
-            "size" to uploadResult.size,
-            "duration" to (uploadResult.duration ?: ""),
-            "updatedAt" to (uploadResult.updatedAt ?: ""),
-            "userId" to (uploadResult.userId ?: currentUser.id),
-            "waveForm" to (uploadResult.waveForm ?: ""),
-            "attachmentId" to (uploadResult.attachmentId ?: ""),
-            "isReply" to "false",
-            "showInChannel" to "true",
-            "mainMessage" to "",
-            "roomJid" to room.jid,
-            "push" to "true"
-        )
+        return buildMap {
+            put("senderJID", senderJID)
+            put("senderFirstName", currentUser.firstName ?: "")
+            put("senderLastName", currentUser.lastName ?: "")
+            put("senderWalletAddress", currentUser.walletAddress ?: "")
+            put("isSystemMessage", "false")
+            put("tokenAmount", "0")
+            put("receiverMessageId", "0")
+            put("mucname", room.name ?: "")
+            put("photoURL", currentUser.profileImage ?: "")
+            put("isMediafile", "true")
+            put("createdAt", uploadResult.createdAt)
+            put("expiresAt", uploadResult.expiresAt ?: "")
+            put("fileName", uploadResult.filename)
+            put("isVisible", uploadResult.isVisible?.toString() ?: "true")
+            put("location", uploadResult.location)
+            put("locationPreview", uploadResult.locationPreview ?: "")
+            put("mimetype", uploadResult.mimetype)
+            put("originalName", uploadResult.originalName)
+            put("ownerKey", uploadResult.ownerKey ?: "")
+            put("size", uploadResult.size)
+            put("duration", uploadResult.duration ?: "")
+            put("updatedAt", uploadResult.updatedAt ?: "")
+            put("userId", uploadResult.userId ?: currentUser.id)
+            put("waveForm", uploadResult.waveForm ?: "")
+            put("attachmentId", uploadResult.attachmentId ?: "")
+            // Web: `attachments` only when there is more than one file; the flat
+            // fields above describe the first file for readers that predate it.
+            if (uploadResults.size > 1) {
+                put("attachments", MessageAttachments.serialize(uploadResults.map { it.toMessageAttachment() }))
+            }
+            if (!caption.isNullOrBlank()) put("caption", caption)
+            // Web parity: a reply to a message carries the parent reference JSON.
+            put("isReply", (replyToMessageId != null).toString())
+            put("showInChannel", "true")
+            put("mainMessage", replyMainMessage(replyToMessageId) ?: "")
+            put("roomJid", room.jid)
+            put("push", "true")
+        }
     }
 
     private fun restoreQueuedMediaMessages() {
@@ -1054,8 +1316,10 @@ class ChatRoomViewModel(
                 val exists = MessageStore.getMessagesForRoom(room.jid)
                     .any { it.id == item.messageId }
                 if (exists) return@forEach
-                val upload = item.uploaded
-                val localUri = "file://${item.localFilePath}"
+                val files = item.effectiveFiles
+                val first = files.first()
+                val upload = first.uploaded
+                val localUri = "file://${first.localFilePath}"
                 val message = Message(
                     id = item.messageId,
                     body = "media",
@@ -1069,12 +1333,31 @@ class ChatRoomViewModel(
                     xmppFrom = "${item.roomJid}/${currentUser.id}",
                     isSystemMessage = "false",
                     isMediafile = "true",
-                    fileName = upload?.filename ?: item.fileName,
+                    fileName = upload?.filename ?: first.fileName,
                     location = upload?.location ?: localUri,
-                    locationPreview = upload?.locationPreview ?: if (item.mimeType.startsWith("image/")) localUri else "",
-                    mimetype = upload?.mimetype ?: item.mimeType,
-                    originalName = upload?.originalName ?: item.fileName,
-                    size = upload?.size ?: File(item.localFilePath).length().toString()
+                    locationPreview = upload?.locationPreview ?: if (first.mimeType.startsWith("image/")) localUri else "",
+                    mimetype = upload?.mimetype ?: first.mimeType,
+                    originalName = upload?.originalName ?: first.fileName,
+                    size = upload?.size ?: File(first.localFilePath).length().toString(),
+                    caption = item.caption?.takeIf { item.captionMessageId == null },
+                    attachments = if (files.size > 1) {
+                        files.map { file ->
+                            val payload = file.uploaded
+                            val fileUri = "file://${file.localFilePath}"
+                            MessageAttachment(
+                                attachmentId = payload?.attachmentId,
+                                location = payload?.location ?: fileUri,
+                                locationPreview = payload?.locationPreview
+                                    ?: if (file.mimeType.startsWith("image/")) fileUri else null,
+                                mimetype = payload?.mimetype ?: file.mimeType,
+                                originalName = payload?.originalName ?: file.fileName,
+                                fileName = payload?.filename ?: file.fileName,
+                                size = payload?.size ?: File(file.localFilePath).length().toString()
+                            )
+                        }
+                    } else {
+                        null
+                    }
                 )
                 MessageStore.addMessage(room.jid, message)
             }
@@ -1414,41 +1697,98 @@ class ChatRoomViewModel(
     }
     
     /**
-     * Send reaction
+     * Send reaction for a message by id. Kept for existing callers; the UI uses
+     * [toggleReaction], which takes the message itself.
      */
     fun sendReaction(messageId: String, emoji: String) {
+        val message = _messages.value.firstOrNull { it.id == messageId } ?: return
+        toggleReaction(message, emoji)
+    }
+
+    /**
+     * Toggles my [emoji] on [message] and sends my full new set, as web does
+     * (`handleReactionMessage` in Message.tsx): remove it when present, else add.
+     * The target is the archive id, which is what web and the server key on.
+     * Nothing is applied locally: the groupchat reflection updates every occupant,
+     * the sender included.
+     */
+    fun toggleReaction(message: Message, emoji: String) {
+        if (message.pending == true || message.isDeleted == true) return
+        val currentUser = UserStore.currentUser.value
+        if (currentUser == null) {
+            android.util.Log.e("ChatRoomViewModel", "Cannot send reaction: user is null")
+            return
+        }
         viewModelScope.launch {
             try {
-                val currentUser = UserStore.currentUser.value
-                if (currentUser == null) {
-                    android.util.Log.e("ChatRoomViewModel", "Cannot send reaction: user is null")
-                    return@launch
-                }
-                
-                // Get current reactions for this message
-                val currentMessages = _messages.value
-                val message = currentMessages.firstOrNull { it.id == messageId }
-                val currentReactions = message?.reaction?.get(currentUser.xmppUsername?.split("@")?.firstOrNull() ?: currentUser.id)?.emoji ?: emptyList()
-                
-                // Toggle reaction: if already present, remove it; otherwise add it
-                val newReactions = if (currentReactions.contains(emoji)) {
-                    currentReactions.filter { it != emoji }
-                } else {
-                    currentReactions + emoji
-                }
-                
-                xmppClient?.sendMessageReaction(room.jid, messageId, newReactions)
+                val myLocalPart = currentUser.xmppUsername?.substringBefore("@")?.takeIf { it.isNotBlank() }
+                    ?: currentUser.id
+                val mine = message.reaction?.get(myLocalPart)?.emoji.orEmpty()
+                val next = if (mine.contains(emoji)) mine.filter { it != emoji } else mine + emoji
+                xmppClient?.sendMessageReaction(room.jid, ThreadSupport.threadKey(message), next)
                 ChatEventDispatcher.emit(
                     ChatEvent.ReactionSent(
                         roomJid = room.jid,
-                        messageId = messageId,
+                        messageId = message.id,
                         emoji = emoji
                     )
                 )
-                // MessageStore will be updated via delegate callback
             } catch (e: Exception) {
                 android.util.Log.e("ChatRoomViewModel", "Error sending reaction", e)
             }
         }
     }
+
+    private val _threadLoading = MutableStateFlow(false)
+    /** True while older thread replies are being fetched from the archive. */
+    val threadLoading: StateFlow<Boolean> = _threadLoading.asStateFlow()
+
+    /**
+     * Pages the archive backwards until the thread's parent is reached, so every
+     * reply of [parentKey] is in the store. Web `ThreadWrapper.loadMoreMessages`:
+     * page size 100 (web THREAD_HISTORY_PAGE_SIZE), one request in flight, and stop
+     * once the cursor is at or before the parent (every reply is newer than it).
+     */
+    suspend fun loadThreadHistory(parentKey: String, pageSize: Int = 100, maxPages: Int = 50) {
+        val parentNumeric = parentKey.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }?.toLongOrNull() ?: return
+        val client = xmppClient ?: return
+        _threadLoading.value = true
+        try {
+            var previousCursor = Long.MAX_VALUE
+            repeat(maxPages) {
+                val cursor = MessageStore.getMessagesForRoom(room.jid)
+                    .mapNotNull { ThreadSupport.numericKey(it) }
+                    .minOrNull() ?: return
+                if (cursor <= parentNumeric || cursor >= previousCursor) return
+                previousCursor = cursor
+                if (!client.isFullyConnected() && !client.ensureConnected(5_000)) return
+                client.promoteRoomHistory(room.jid)
+                val page = client.getHistory(room.jid, max = pageSize, beforeMessageId = cursor.toString())
+                if (page.isEmpty()) return
+                MessageStore.addMessages(room.jid, page)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("ChatRoomViewModel", "loadThreadHistory failed for ${room.jid}", e)
+        } finally {
+            _threadLoading.value = false
+        }
+    }
 }
+
+/** Where the list should scroll. [at] identifies the request, so it is acted on once. */
+data class JumpTarget(val messageId: String, val at: Long)
+
+/** Why a jump could not place its message in the transcript. */
+sealed interface JumpNotice {
+    val at: Long
+
+    /** The message is known (a search hit or quote): show it in a card. */
+    data class Archived(val preview: PendingJumpPreview, override val at: Long) : JumpNotice
+
+    /** Nothing is known about the message and the archive does not have it. */
+    data class NotFound(override val at: Long) : JumpNotice
+}
+
+private const val MAX_JUMP_HISTORY_PAGES = 40

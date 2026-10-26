@@ -29,8 +29,9 @@ fun MediaMessage(
     modifier: Modifier = Modifier
 ) {
     val mimeType = message.mimetype ?: ""
-    val fileUrl = message.location
-    val previewUrl = message.locationPreview
+    // Secure-files URLs carry the viewer token; the bare URL is never loaded.
+    val fileUrl = rememberSecureFileUrl(message.location)
+    val previewUrl = rememberSecureFileUrl(message.locationPreview)
     val fileName = message.originalName ?: message.fileName ?: "MediaFile"
     
     when {

@@ -29,7 +29,9 @@ data class ChatThemeOverrides(
     val chatBackgroundImage: String? = null,
     val headerBackground: Color? = null,
     val inputBarBackground: Color? = null,
-    val inputTextColor: Color? = null
+    val inputTextColor: Color? = null,
+    /** Tint for the chat's icons (web `colors.icons`). Null = primary. */
+    val iconTint: Color? = null
 ) {
     companion object {
         val Empty = ChatThemeOverrides()
@@ -55,8 +57,12 @@ internal fun resolveOverrides(
         return parseHexColor(raw)
     }
     return ChatThemeOverrides(
-        outgoingBubbleBackground = pick(bubble?.backgroundMessageUser, bubble?.backgroundMessageUserDark),
-        incomingBubbleBackground = pick(bubble?.backgroundMessage, bubble?.backgroundMessageDark),
+        // Web-style flat colour keys (`colors.ownMessageBackground` etc.) are the
+        // fallback when the bubble / input style doesn't set the same thing.
+        outgoingBubbleBackground = pick(bubble?.backgroundMessageUser, bubble?.backgroundMessageUserDark)
+            ?: parseHexColor(colors?.ownMessageBackground),
+        incomingBubbleBackground = pick(bubble?.backgroundMessage, bubble?.backgroundMessageDark)
+            ?: parseHexColor(colors?.otherMessageBackground),
         outgoingBubbleText = pick(bubble?.colorUser, bubble?.colorUserDark),
         incomingBubbleText = pick(bubble?.color, bubble?.colorDark),
         chatBackground = pick(background?.color, background?.colorDark),
@@ -64,18 +70,24 @@ internal fun resolveOverrides(
             background?.imageDark ?: background?.image
         } else background?.image,
         headerBackground = pick(colors?.headerColor, colors?.headerColorDark),
-        inputBarBackground = pick(colors?.inputBarColor, colors?.inputBarColorDark),
+        inputBarBackground = pick(colors?.inputBarColor, colors?.inputBarColorDark)
+            ?: parseHexColor(colors?.inputBackground),
         inputTextColor = pick(colors?.inputTextColor, colors?.inputTextColorDark)
+            ?: parseHexColor(colors?.colorInput),
+        iconTint = parseHexColor(colors?.icons)
     )
 }
 
 internal fun parseHexColor(raw: String?): Color? {
     if (raw.isNullOrBlank()) return null
-    val normalized = raw.trim().let { if (it.startsWith("#")) it else "#$it" }
-    return try {
-        Color(android.graphics.Color.parseColor(normalized))
-    } catch (_: IllegalArgumentException) {
-        null
+    // Pure Kotlin (android.graphics.Color is not available to JVM tests): #RGB, #RRGGBB or #AARRGGBB.
+    val hex = raw.trim().removePrefix("#")
+    if (!hex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) return null
+    return when (hex.length) {
+        3 -> hex.map { "$it$it" }.joinToString("").toLong(16).let { Color(0xFF000000L or it) }
+        6 -> Color(0xFF000000L or hex.toLong(16))
+        8 -> Color(hex.toLong(16))
+        else -> null
     }
 }
 

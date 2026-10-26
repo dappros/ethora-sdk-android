@@ -2,8 +2,19 @@ package com.ethora.chat.core.xmpp
 
 import android.util.Log
 import com.ethora.chat.core.models.Message
+import com.ethora.chat.core.models.MessageAttachments
 import com.ethora.chat.core.networking.DnsFallback
 import com.ethora.chat.core.models.User
+import com.ethora.chat.core.e2ee.E2eeRuntime
+import com.ethora.chat.core.e2ee.OmemoIqException
+import com.ethora.chat.core.e2ee.OmemoManager
+import com.ethora.chat.core.e2ee.OmemoStanzas
+import com.ethora.chat.core.e2ee.OmemoTransport
+import com.ethora.chat.core.e2ee.XmlElement
+import com.ethora.chat.core.e2ee.XmlParser
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.*
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.*
@@ -20,8 +31,8 @@ import kotlin.jvm.Volatile
  */
 class XMPPWebSocketConnection(
     private val wsUrl: String,
-    private val username: String,
-    private val password: String,
+    private var username: String,
+    private var password: String,
     private val host: String,
     private val conference: String,
     private val resource: String = "default",
@@ -70,6 +81,24 @@ class XMPPWebSocketConnection(
     fun setClientWrapper(client: XMPPClient) {
         this.clientWrapper = client
     }
+
+    /**
+     * Supplies fresh (username, password) after a SASL failure, mirroring web
+     * `xmppClient.authRecovery`. Returns null when no credentials can be found.
+     */
+    var credentialsProvider: (suspend () -> Pair<String, String>?)? = null
+
+    private var saslRecoveryAttempts = 0
+    private val maxSaslRecoveryAttempts = 3
+
+    /**
+     * A socket that has been replaced (after a credential recovery) can still
+     * deliver close or failure callbacks. Those must not touch the live socket.
+     */
+    private fun isStaleSocket(ws: WebSocket): Boolean {
+        val current = webSocket
+        return current != null && current !== ws
+    }
     
     // MAM query collectors
     private val mamCollectors = mutableMapOf<String, (XMPPStanza) -> Unit>()
@@ -104,6 +133,9 @@ class XMPPWebSocketConnection(
         "$prefix:${System.currentTimeMillis()}"
 
     internal companion object {
+        /** How long an OMEMO PEP request may wait for its IQ reply. */
+        const val OMEMO_IQ_TIMEOUT_MS = 15_000L
+
         // <chatjson xmlns="chatjson:store" value="{...}"/> — the prosody mod
         // echoes the stored payload back with single-quoted attributes, so
         // accept both quote styles. Returns null when no chatjson element is
@@ -212,6 +244,7 @@ class XMPPWebSocketConnection(
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (isStaleSocket(webSocket)) return
                     Log.d(TAG, "📨 Received WebSocket message: ${text.take(200)}")
                     com.ethora.chat.core.store.LogStore.receive(
                         TAG,
@@ -225,6 +258,7 @@ class XMPPWebSocketConnection(
                 }
 
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                    if (isStaleSocket(webSocket)) return
                     Log.d(TAG, "📨 Received WebSocket binary message")
                     val text = bytes.utf8()
                     com.ethora.chat.core.store.LogStore.receive(
@@ -239,6 +273,7 @@ class XMPPWebSocketConnection(
                 }
 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    if (isStaleSocket(webSocket)) return
                     Log.d(TAG, "🔌 WebSocket closing: $code - $reason")
                     com.ethora.chat.core.store.LogStore.warning(
                         TAG,
@@ -257,6 +292,7 @@ class XMPPWebSocketConnection(
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    if (isStaleSocket(webSocket)) return
                     Log.d(TAG, "🔌 WebSocket closed: $code - $reason")
                     com.ethora.chat.core.store.LogStore.warning(
                         TAG,
@@ -275,6 +311,7 @@ class XMPPWebSocketConnection(
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (isStaleSocket(webSocket)) return
                     Log.e(TAG, "❌ WebSocket failure", t)
                     com.ethora.chat.core.store.LogStore.error(
                         TAG,
@@ -326,6 +363,46 @@ class XMPPWebSocketConnection(
         Log.d(TAG, "📤 Sent stream open (${if (useLegacyStreamOpen) "legacy" else "RFC7395"}): ${streamOpen.take(200)}")
     }
     
+    // ----- OMEMO (E2EE) transport: IQ request/reply correlation for PEP ------
+    private val omemoPending = ConcurrentHashMap<String, CompletableDeferred<String>>()
+
+    /** Our bare JID, the `from` side of every OMEMO stanza we build. */
+    private fun ownBareJid(): String = resolveBareJid(username) ?: username.lowercase()
+
+    private inner class OmemoTransportAdapter(override val ownJid: String) : OmemoTransport {
+        override suspend fun request(iq: XmlElement): XmlElement {
+            val id = "omemo-${System.nanoTime()}"
+            iq.attrs["id"] = id
+            val reply = CompletableDeferred<String>()
+            omemoPending[id] = reply
+            try {
+                if (!sendRaw(iq.toXml())) throw IllegalStateException("WebSocket rejected OMEMO IQ")
+                val result = withTimeout(OMEMO_IQ_TIMEOUT_MS) { reply.await() }
+                val element = XmlParser.parse(result)
+                if (element.attr("type") == "error") {
+                    val condition = element.child("error")?.elements?.firstOrNull { it.name != "text" }?.name
+                    throw OmemoIqException(condition ?: "error")
+                }
+                return element
+            } finally {
+                omemoPending.remove(id)
+            }
+        }
+
+        override fun send(stanza: XmlElement) {
+            sendRaw(stanza.toXml())
+        }
+    }
+
+    /** Completes a pending OMEMO IQ when [xml] is its reply. Returns true when it consumed the stanza. */
+    private fun completeOmemoIq(xml: String): Boolean {
+        if (omemoPending.isEmpty() || !xml.startsWith("<iq")) return false
+        val id = extractAttribute(xml, "id") ?: return false
+        val pending = omemoPending[id] ?: return false
+        pending.complete(xml)
+        return true
+    }
+
     /**
      * Handle incoming XMPP stanza
      */
@@ -383,8 +460,19 @@ class XMPPWebSocketConnection(
                     } else if (xml.contains("<failure") || (xml.contains("failure") && xml.contains("urn:ietf:params:xml:ns:xmpp-sasl"))) {
                         Log.e(TAG, "❌ SASL Authentication failed: $xml")
                         authState = AuthState.NOT_STARTED
-                        clientWrapper?.let { client ->
-                            delegate?.onStatusChanged(client, ConnectionStatus.ERROR)
+                        if (!disconnectRequested && credentialsProvider != null && saslRecoveryAttempts < maxSaslRecoveryAttempts) {
+                            // The XMPP password is short lived. Re-mint it and reconnect.
+                            saslRecoveryAttempts += 1
+                            com.ethora.chat.core.store.LogStore.warning(
+                                TAG,
+                                "🔐 SASL failed, refreshing XMPP credentials (attempt $saslRecoveryAttempts)",
+                                category = "xmpp-transport"
+                            )
+                            scope.launch { recoverFromSaslFailure() }
+                        } else {
+                            clientWrapper?.let { client ->
+                                delegate?.onStatusChanged(client, ConnectionStatus.ERROR)
+                            }
                         }
                     }
                 }
@@ -434,6 +522,8 @@ class XMPPWebSocketConnection(
                             )
                             authState = AuthState.AUTHENTICATED
                             isAuthenticated = true
+                            saslRecoveryAttempts = 0
+                            E2eeRuntime.onOnline(OmemoTransportAdapter(ownBareJid()))
                             clientWrapper?.let { client ->
                                 delegate?.onXMPPClientConnected(client)
                             }
@@ -488,8 +578,11 @@ class XMPPWebSocketConnection(
                         } catch (_: Throwable) {}
                         return
                     }
+                    if (completeOmemoIq(xml)) return
+                    // E2EE seam: decrypts in place when OMEMO is on; drops session-only messages.
+                    val routed = OmemoStanzas.rewriteInbound(xml, host) ?: return
                     // Handle normal XMPP stanzas
-                    parseAndHandleStanza(xml)
+                    parseAndHandleStanza(routed)
                 }
                 else -> {
                     Log.d(TAG, "📨 Received stanza in state: $authState")
@@ -546,6 +639,18 @@ class XMPPWebSocketConnection(
         try {
             val stanzaType = extractAttribute(xml, "type")
             val stanzaId = extractAttribute(xml, "id") ?: ""
+
+            // Server push pointer (urn:ethora:events:1). Web handleStanza claims
+            // it before any other routing, so it goes no further when claimed.
+            if (xml.contains("<ethora-event") &&
+                com.ethora.chat.core.store.EthoraEvents.handle(
+                    xml,
+                    host,
+                    com.ethora.chat.core.store.ChatStore.getEffectiveAppId()
+                )
+            ) {
+                return
+            }
             
             // Check if this is a MAM result message
             if (xml.contains("urn:xmpp:mam:2") && xml.contains("<result")) {
@@ -628,16 +733,50 @@ class XMPPWebSocketConnection(
                 return
             }
 
+            // 0. Call signalling (web: onCallTokenMessage runs before the chat handlers).
+            //    call-token / call-invite / call-state never reach the chat pipeline.
+            //    Archived rows are handled in XMPPClient.parseMAMResult instead.
+            if (!xml.contains("urn:xmpp:mam:2") && com.ethora.chat.core.call.CallSignaling.handleInbound(xml, transport = com.ethora.chat.core.call.CallTransport(host) { sendRaw(it) })) {
+                return
+            }
+
             // 1. Message error
             if (stanzaType == "error") {
                 parseAndHandleMessageError(xml)
                 return
             }
 
+            // 1b. Delivery receipts (XEP-0184) and read markers (XEP-0333), element-based.
+            // Unwrap MUC-SUB first: the MUC may deliver the reflected stanza inside a pubsub event.
+            if (xml.contains("<received") || xml.contains("<displayed")) {
+                val inner = unwrapMucSubInnerMessage(xml)
+                ReceiptStanzas.parseReceived(inner)?.let { receipt ->
+                    handleReceivedReceipt(receipt)
+                    return
+                }
+                ReceiptStanzas.parseDisplayed(inner)?.let { marker ->
+                    handleDisplayedMarker(marker)
+                    return
+                }
+            }
+
             // 2. Chat invite
             if (xml.contains("<invite")) {
                 parseAndHandleChatInvite(xml)
                 return
+            }
+
+            // 2b. Members-refresh wake-up (web onMembersRefreshSignal)
+            if (xml.contains("<members-refresh")) {
+                val roomJidOfSignal = extractAttribute(xml, "from")?.substringBefore('/').orEmpty()
+                if (roomJidOfSignal.isNotEmpty()) {
+                    com.ethora.chat.core.store.EthoraEvents.refreshRoomMembers(roomJidOfSignal.substringBefore('@'))
+                }
+            }
+
+            // 2c. Server-driven membership change: <x muc#user><item jid affiliation/></x>
+            if (xml.contains(MUC_USER_NS)) {
+                parseAndHandleMembershipChange(xml)
             }
 
             // 3. Reactions (element-based — matches web's stanza.getChild('reactions'))
@@ -897,6 +1036,9 @@ class XMPPWebSocketConnection(
             // as a centered banner (SystemMessage.tsx) rather than a chat
             // bubble; carry the flag through so the Android UI can do the same.
             val isSystemMessage = extractAttribute(dataXml, "isSystemMessage")
+            // Reply and thread fields, as web getDataFromXml reads them. `mainMessage`
+            // is the parent reference JSON (see ThreadSupport).
+            val replyFields = replyFieldsFrom(dataXml)
             
             // Extract media fields for media message matching (already extracted above)
             val locationPreview = extractAttribute(dataXml, "locationPreview")
@@ -905,6 +1047,14 @@ class XMPPWebSocketConnection(
             val originalName = extractAttribute(dataXml, "originalName")
             val size = extractAttribute(dataXml, "size")
             val waveForm = extractAttribute(dataXml, "waveForm")
+            val caption = extractAttribute(dataXml, "caption")?.takeIf { it.isNotBlank() }
+            val attachments = MessageAttachments.parse(extractAttribute(dataXml, "attachments")).takeIf { it.isNotEmpty() }
+            // E2EE: a message in an encrypted room that did not arrive inside an OMEMO payload
+            // is sent in clear, whatever it claims about itself.
+            val unencrypted = (E2eeRuntime.isE2eeRoom(from.substringBefore("/")) &&
+                extractAttribute(dataXml, "omemoEncrypted") != "true").takeIf { it }
+            val e2eeKeys = extractAttribute(dataXml, "e2eeKeys")?.split(",")?.filter { it.isNotBlank() }
+            val clientEncrypted = extractAttribute(dataXml, "clientEncrypted")
             
             val cleanPhotoURL = photoURL?.takeIf { it.isNotBlank() && it != "none" && it.isNotEmpty() }
             
@@ -961,7 +1111,17 @@ class XMPPWebSocketConnection(
                 originalName = originalName,
                 size = size,
                 waveForm = waveForm,
-                archiveId = archiveId?.takeIf { it.isNotBlank() }
+                caption = caption,
+                attachments = attachments,
+                archiveId = archiveId?.takeIf { it.isNotBlank() },
+                isReply = replyFields.isReply,
+                showInChannel = replyFields.showInChannel,
+                mainMessage = replyFields.mainMessage,
+                translations = MessageTranslationXml.parseTranslations(xml)?.takeIf { it.isNotEmpty() },
+                langSource = MessageTranslationXml.parseSource(xml),
+                unencrypted = unencrypted,
+                e2eeKeys = e2eeKeys,
+                clientEncrypted = clientEncrypted
             )
             
             // Add to MessageStore with pending reconciliation
@@ -982,6 +1142,12 @@ class XMPPWebSocketConnection(
                 Log.d(TAG, "✅ Matched pending message via ID matching")
             }
             
+            // XEP-0184: acknowledge live messages from other users so their tick flips to
+            // delivered (web onRealtimeMessage). Own echoes and system broadcasts are not acked.
+            if (isSystemMessage != "true" && !isOwnSender(username, senderJID)) {
+                sendReceivedReceiptStanza(effectiveMessageId, roomJid)
+            }
+
             Log.d(TAG, "📨 Parsed real-time message: ID=$effectiveMessageId, stanzaId=$messageId, archiveId=$archiveId, From=$from, Body=${body.take(50)}, isMedia=$hasMedia, wasPending=$wasPending")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing real-time message", e)
@@ -1084,69 +1250,46 @@ class XMPPWebSocketConnection(
     }
     
     /**
-     * Parse and handle reaction stanza
-     * Matches web: onReactionMessage in stanzaHandlers.ts
+     * Parse and handle reaction stanza (live MUC reflection).
+     * Matches web: onReactionMessage in stanzaHandlers.ts. The room comes from
+     * `<stanza-id by>`, not from `to` (which is the recipient occupant here).
      */
     private fun parseAndHandleReaction(xml: String) {
         try {
-            // Extract <reactions> element
-            val reactionsStart = xml.indexOf("<reactions")
-            val reactionsEnd = xml.indexOf(">", reactionsStart)
-            if (reactionsStart == -1 || reactionsEnd == -1) {
-                Log.w(TAG, "⚠️ Reaction stanza missing <reactions> element")
+            val parsed = ReactionStanza.parse(xml)
+            if (parsed == null) {
+                Log.w(TAG, "⚠️ Reaction stanza missing <reactions> id/from")
                 return
             }
-            
-            val reactionsXml = xml.substring(reactionsStart, xml.indexOf("</reactions>", reactionsEnd) + "</reactions>".length)
-            val messageId = extractAttribute(reactionsXml, "id")
-            val from = extractAttribute(reactionsXml, "from")
-            
-            if (messageId.isNullOrBlank() || from.isNullOrBlank()) {
-                Log.w(TAG, "⚠️ Reaction stanza missing id or from attribute")
-                return
-            }
-            
-            // Extract reaction emojis
-            val reactionElements = mutableListOf<String>()
-            var searchStart = reactionsEnd + 1
-            while (true) {
-                val reactionStart = xml.indexOf("<reaction>", searchStart)
-                if (reactionStart == -1) break
-                val reactionEnd = xml.indexOf("</reaction>", reactionStart)
-                if (reactionEnd == -1) break
-                val reactionText = xml.substring(reactionStart + "<reaction>".length, reactionEnd)
-                reactionElements.add(reactionText)
-                searchStart = reactionEnd + "</reaction>".length
-            }
-            
-            // Extract data element
-            val dataStart = xml.indexOf("<data")
-            val dataEnd = xml.indexOf("/>", dataStart)
-            val dataXml = if (dataStart != -1 && dataEnd != -1) {
-                xml.substring(dataStart, dataEnd + 2)
-            } else ""
-            
-            val senderFirstName = extractAttribute(dataXml, "senderFirstName") ?: ""
-            val senderLastName = extractAttribute(dataXml, "senderLastName") ?: ""
-            val data = mapOf(
-                "senderFirstName" to senderFirstName,
-                "senderLastName" to senderLastName
-            )
-            
-            // Extract room JID from from attribute
-            val roomJid = extractAttribute(xml, "to")?.split("/")?.firstOrNull() ?: return
-            
-            Log.d(TAG, "😀 Reaction received: room=$roomJid, messageId=$messageId, from=$from, reactions=$reactionElements")
-            
-            // Notify delegate
-            clientWrapper?.let { client ->
-                delegate?.onReactionReceived(client, roomJid, messageId, from, reactionElements, data)
-            }
+            Log.d(TAG, "😀 Reaction received: target=${parsed.targetId}, from=${parsed.from}, reactions=${parsed.emoji}")
+            applyReactionStanza(parsed)
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing reaction stanza", e)
         }
     }
-    
+
+    /**
+     * Stores one parsed reaction and tells the delegate. Shared by the live and
+     * the MAM path, so both get the same newest-wins rule.
+     */
+    private fun applyReactionStanza(parsed: ParsedReactionStanza) {
+        val roomJid = parsed.roomJid ?: run {
+            Log.w(TAG, "⚠️ Reaction without a room (no stanza-id by), target=${parsed.targetId}")
+            return
+        }
+        com.ethora.chat.core.store.MessageStore.setReaction(
+            roomJid = roomJid,
+            targetId = parsed.targetId,
+            reactorId = parsed.reactorId,
+            emoji = parsed.emoji,
+            data = parsed.data,
+            timestamp = parsed.timestamp
+        )
+        clientWrapper?.let { client ->
+            delegate?.onReactionReceived(client, roomJid, parsed.targetId, parsed.from, parsed.emoji, parsed.data)
+        }
+    }
+
     /**
      * Parse and handle delete message stanza
      * Matches web: onDeleteMessage in stanzaHandlers.ts
@@ -1217,16 +1360,63 @@ class XMPPWebSocketConnection(
         
         val id = if (isTyping) "typing-${System.currentTimeMillis()}" else "stop-typing-${System.currentTimeMillis()}"
         val composingElement = if (isTyping) "composing" else "paused"
-        val escapedFullName = fullName
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\"", "&quot;")
-            .replace("'", "&apos;")
-        
-        val message = """<message type="groupchat" id="$id" to="$fixedRoomJid"><$composingElement xmlns="http://jabber.org/protocol/chatstates" /><data fullName="$escapedFullName" /></message>"""
-        sendRaw(message)
+        sendRaw(ReceiptStanzas.typingStanza(id, fixedRoomJid, fullName, isTyping))
         Log.d(TAG, "📝 Sent typing indicator to $fixedRoomJid: $composingElement (user: $fullName)")
+    }
+
+    /**
+     * XEP-0184 delivery receipt for a live message from another user.
+     * Matches web sendReceivedReceipt.xmpp.ts (broadcast to the room).
+     */
+    fun sendReceivedReceiptStanza(messageId: String, roomJid: String): Boolean {
+        val from = selfBareJid() ?: return false
+        if (!isAuthenticated || messageId.isBlank() || roomJid.isBlank()) return false
+        val id = "${ReceiptStanzas.RECEIVED_ID_PREFIX}${System.currentTimeMillis()}"
+        return sendRaw(ReceiptStanzas.receivedStanza(id, from, fixRoomJid(roomJid), messageId))
+    }
+
+    /**
+     * XEP-0333 read marker: [messageId] is the newest message this user has displayed.
+     * Matches web sendDisplayedMarker.xmpp.ts (broadcast to the room).
+     */
+    fun sendDisplayedMarkerStanza(messageId: String, roomJid: String): Boolean {
+        val from = selfBareJid() ?: return false
+        if (!isAuthenticated || messageId.isBlank() || roomJid.isBlank()) return false
+        val id = "${ReceiptStanzas.DISPLAYED_ID_PREFIX}${System.currentTimeMillis()}"
+        return sendRaw(ReceiptStanzas.displayedStanza(id, from, fixRoomJid(roomJid), messageId))
+    }
+
+    private fun fixRoomJid(roomJid: String): String =
+        if (roomJid.contains("@")) roomJid else "$roomJid@$conference"
+
+    private fun selfBareJid(): String? =
+        resolveBareJid(com.ethora.chat.core.store.UserStore.currentUser.value?.xmppUsername)
+            ?: resolveBareJid(username)
+
+    private fun isOwnSender(nickname: String, senderJid: String?): Boolean {
+        val me = ReceiptStanzas.normalizeLocal(
+            com.ethora.chat.core.store.UserStore.currentUser.value?.xmppUsername ?: username
+        )
+        if (me.isBlank()) return false
+        return ReceiptStanzas.normalizeLocal(nickname) == me ||
+            ReceiptStanzas.normalizeLocal(senderJid) == me
+    }
+
+    private fun handleReceivedReceipt(receipt: ReceiptStanzas.Receipt) {
+        com.ethora.chat.core.store.MessageStore.applyReceivedReceipt(
+            receipt.roomJid,
+            receipt.messageId,
+            receipt.fromXmppUsername,
+            System.currentTimeMillis()
+        )
+    }
+
+    private fun handleDisplayedMarker(marker: ReceiptStanzas.Receipt) {
+        com.ethora.chat.core.store.RoomStore.applyDisplayedMarker(
+            marker.roomJid,
+            marker.fromXmppUsername,
+            marker.messageId
+        )
     }
     
     /**
@@ -1274,7 +1464,8 @@ class XMPPWebSocketConnection(
         isReply: Boolean = false,
         showInChannel: Boolean = false,
         mainMessage: String? = null,
-        customId: String? = null
+        customId: String? = null,
+        translateSource: String? = null
     ): String? {
         if (!isAuthenticated) {
             Log.e(TAG, "Cannot send message: not authenticated")
@@ -1339,7 +1530,16 @@ class XMPPWebSocketConnection(
         // bookkeeping.
         val originIdElement = """<origin-id xmlns="urn:xmpp:sid:0" id="$messageId"/>"""
 
-        val message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$originIdElement$dataElement<body>$escapedBody</body></message>"""
+        // Web sendTextMessageWithTranslateTag: `<translate source>` declares the text's language so
+        // each reader's server can translate it. Only when the reader has translation sending on.
+        val translateElement = translateSource?.takeIf { it.isNotBlank() }
+            ?.let { MessageTranslationXml.translateElement(it) }
+            ?: ""
+        var message = """<message to="$fixedRoomJid" type="groupchat" id="$messageId">$originIdElement$dataElement<body>$escapedBody</body>$translateElement</message>"""
+        // E2EE seam (flag-gated): in an e2ee room the body goes inside OMEMO and <data>
+        // stays in the clear for the push pipeline. If encryption fails the message
+        // goes out in clear rather than not at all, as on web.
+        encryptOutgoingText(fixedRoomJid, messageId, body, dataElement)?.let { message = it }
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMessage() to $fixedRoomJid")
         // Surface OkHttp queue rejection (the silent-drop root cause behind
         // "spam 15 messages, 2 don't go"). Three attempts with tiny exp.
@@ -1369,6 +1569,26 @@ class XMPPWebSocketConnection(
         return messageId
     }
     
+    /** Encrypted stanza for an outgoing text in an e2ee room, or null to send the plain one. */
+    private suspend fun encryptOutgoingText(roomJid: String, id: String, body: String, dataXml: String): String? {
+        if (!E2eeRuntime.isE2eeRoom(roomJid)) return null
+        val cleartext = try {
+            XmlParser.parseFragments(dataXml)
+        } catch (e: IllegalArgumentException) {
+            return null
+        }
+        return when (val outcome = E2eeRuntime.encryptGroupStanza(
+            roomJid, host, id, listOf(XmlElement("body").add(body)), cleartext.filterIsInstance<XmlElement>()
+        )) {
+            is E2eeRuntime.Outcome.Encrypted -> outcome.stanza.toXml()
+            is E2eeRuntime.Outcome.Failed -> {
+                Log.w(TAG, "OMEMO: sending to $roomJid in clear - ${outcome.reason}")
+                null
+            }
+            E2eeRuntime.Outcome.NotEncrypted -> null
+        }
+    }
+
     /**
      * Send media message
      * Matches web: sendMediaMessage.xmpp.ts
@@ -1400,17 +1620,27 @@ class XMPPWebSocketConnection(
         }
         val fromAttribute = senderJid?.let { """ from="$it"""" } ?: ""
         
-        // Build data element XML with all media attributes
-        val dataAttributes = mediaData.map { (key, value) ->
-            val escapedValue = value.toString()
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\"", "&quot;")
-                .replace("'", "&apos;")
-            "$key=\"$escapedValue\""
-        }.joinToString(" ")
-        
+        // Sealed attachments (e2ee rooms) carry their per-file keys in `e2eeKeys`.
+        // Those keys never go into <data>: they are put in the OMEMO body below.
+        val sealedKeys = (mediaData["e2eeKeys"] as? List<*>)?.map { it.toString() }?.takeIf { it.isNotEmpty() }
+        val e2eeRoom = E2eeRuntime.isE2eeRoom(fixedRoomJid)
+        if (sealedKeys != null && !e2eeRoom) {
+            Log.e(TAG, "Refusing to send sealed attachment to a room that is not end-to-end encrypted")
+            return false
+        }
+        if (e2eeRoom && sealedKeys == null) {
+            // Clear media in an e2ee room would leak the file, so refuse, as on web
+            Log.e(TAG, "Refusing to send unsealed media to end-to-end encrypted room $fixedRoomJid")
+            return false
+        }
+        // The caption of a sealed message travels inside the encrypted body, not in `<data>`.
+        val sealedCaption = if (sealedKeys != null) (mediaData["caption"] as? String)?.takeIf { it.isNotBlank() } else null
+        val dataMap = if (sealedKeys != null) {
+            mediaData.filterKeys { it != "e2eeKeys" && it != "caption" } + ("clientEncrypted" to "true")
+        } else {
+            mediaData
+        }
+
         // Escape messageId for XML id attribute
         val safeId = messageId
             .replace("&", "&amp;")
@@ -1418,14 +1648,26 @@ class XMPPWebSocketConnection(
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
             .replace("'", "&apos;")
-        // XEP-0359 origin-id mirrors the same correlation handle for media
-        // echoes — see sendMessage() above for the rationale. Without it,
-        // media echoes that come back through MUC-SUB rewrites would have
-        // to fall through to the heuristic content match (location/fileName
-        // body windowing).
-        val originIdElement = """<origin-id xmlns="urn:xmpp:sid:0" id="$safeId"/>"""
-        // Matches web version: includes from attribute and store hint
-        val message = """<message id="$safeId" type="groupchat"$fromAttribute to="$fixedRoomJid">$originIdElement<body>media</body><store xmlns="urn:xmpp:hints"/><data $dataAttributes/></message>"""
+        // Matches web version: includes from attribute, store hint and XEP-0359 origin-id
+        var message = buildMediaMessageXml(fixedRoomJid, fromAttribute, dataMap, safeId)
+        if (sealedKeys != null) {
+            // The keys go inside the OMEMO payload; <data> and the store hint stay in clear.
+            val cleartext = XmlParser.parseFragments("""<data ${mediaDataAttributes(dataMap)}/><store xmlns="urn:xmpp:hints"/>""")
+            val outcome = E2eeRuntime.encryptGroupStanza(
+                fixedRoomJid,
+                host,
+                messageId,
+                listOf(XmlElement("body").add(com.ethora.chat.core.e2ee.OmemoFileEnvelope.sealedMediaBody(sealedKeys, sealedCaption))),
+                cleartext.filterIsInstance<XmlElement>()
+            )
+            message = when (outcome) {
+                is E2eeRuntime.Outcome.Encrypted -> outcome.stanza.toXml()
+                else -> {
+                    Log.e(TAG, "OMEMO: refusing to send sealed attachment to $fixedRoomJid - $outcome")
+                    return false
+                }
+            }
+        }
         com.ethora.chat.core.store.LogStore.info(TAG, "Executing sendMediaMessage() to $fixedRoomJid")
         val ws = webSocket
         if (ws == null) {
@@ -1502,12 +1744,32 @@ class XMPPWebSocketConnection(
     }
     
     /**
+     * MAM query for a window or a time range (see [buildMamQueryStanza]).
+     * Results and the <fin> are routed to the collector registered under [queryId].
+     */
+    suspend fun sendMamWindowQuery(roomJid: String, max: Int, queryId: String, cursor: WindowCursor): Boolean {
+        if (!isAuthenticated) {
+            Log.e(TAG, "Cannot send MAM window query: not authenticated")
+            return false
+        }
+        val fixedRoomJid = if (roomJid.contains("@")) roomJid else "$roomJid@$conference"
+        sendRaw(buildMamQueryStanza(fixedRoomJid, queryId, max, cursor))
+        return true
+    }
+
+    /**
      * Edit message
      * Matches web: editMessage.xmpp.ts
      */
     suspend fun editMessage(roomJid: String, messageId: String, newText: String) {
         if (!isAuthenticated) {
             Log.e(TAG, "Cannot edit message: not authenticated")
+            return
+        }
+        // An edit is a plain <replace>, so it would put the new text in clear next to an
+        // encrypted original. Edits are blocked in e2ee rooms until they are encrypted too.
+        if (E2eeRuntime.isE2eeRoom(roomJid)) {
+            Log.w(TAG, "Edit blocked: messages in end-to-end encrypted rooms cannot be edited yet")
             return
         }
 
@@ -1559,8 +1821,8 @@ class XMPPWebSocketConnection(
     }
     
     /**
-     * Send message reaction
-     * Matches web: sendMessageReaction.xmpp.ts
+     * Send message reaction. Sends my FULL reaction set for [messageId]: an empty
+     * list removes all of mine. Matches web: sendMessageReaction.xmpp.ts.
      */
     suspend fun sendMessageReaction(roomJid: String, messageId: String, reactions: List<String>) {
         if (!isAuthenticated) {
@@ -1575,31 +1837,24 @@ class XMPPWebSocketConnection(
         }
 
         val currentUser = com.ethora.chat.core.store.UserStore.currentUser.value
-        val senderFirstName = currentUser?.firstName ?: ""
-        val senderLastName = currentUser?.lastName ?: ""
         val fromJid = resolveBareJid(currentUser?.userJID)
             ?: resolveBareJid(currentUser?.xmppUsername)
             ?: resolveBareJid(username)
             ?: ""
-        
-        val id = "message-reaction:${System.currentTimeMillis()}"
-        
-        // Build reactions XML
-        val reactionsXml = reactions.joinToString("") { reaction ->
-            "<reaction>$reaction</reaction>"
-        }
-        
-        val stanza = """<message type="groupchat" id="$id" from="$fromJid" to="$fixedRoomJid">
-            |<reactions id="$messageId" from="$fromJid" xmlns="urn:xmpp:reactions:0">
-            |$reactionsXml
-            |</reactions>
-            |<data senderFirstName="${escapeXml(senderFirstName)}" senderLastName="${escapeXml(senderLastName)}"/>
-            |<store xmlns="urn:xmpp:hints"/>
-            |</message>""".trimMargin()
+
+        val stanza = ReactionStanza.buildSend(
+            stanzaId = ReactionStanza.newStanzaId(),
+            fromJid = fromJid,
+            roomJid = fixedRoomJid,
+            targetId = messageId,
+            emoji = reactions,
+            firstName = currentUser?.firstName ?: "",
+            lastName = currentUser?.lastName ?: ""
+        )
         sendRaw(stanza)
         Log.d(TAG, "😀 Sent reaction to $fixedRoomJid: messageId=$messageId, reactions=$reactions")
     }
-    
+
     /**
      * Parse and handle room creation stanza
      * Matches web: onNewRoomCreated in stanzaHandlers.ts
@@ -1637,12 +1892,38 @@ class XMPPWebSocketConnection(
                 if (hasStatus110 && hasStatus321) {
                     val roomJid = from.split("/").firstOrNull() ?: return
                     Log.d(TAG, "🚫 User was kicked from room: $roomJid")
-                    // TODO: Notify delegate or remove room from RoomStore
-                    // For now, just log it
+                    com.ethora.chat.core.store.RoomStore.removeRoom(roomJid)
+                    scope.launch {
+                        try {
+                            com.ethora.chat.core.store.RoomStore.setRooms(
+                                com.ethora.chat.core.networking.RoomsAPIHelper.getRooms()
+                            )
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Room list refresh after kick failed", e)
+                        }
+                    }
                     return
                 }
             }
             
+            // Another occupant joined, left or was kicked (web onPresenceInRoom).
+            // Our own echo is skipped: the membership of our own join is the REST load.
+            val occupantNick = from.substringAfter('/', "")
+            if (occupantNick.isNotEmpty() && occupantNick != resolveOccupantNick()) {
+                val itemTag = Regex("<item\\b[^>]*>").find(xml)?.value
+                val roomJidOfPresence = from.substringBefore('/')
+                val roomForPresence = com.ethora.chat.core.store.RoomStore.getRoomByJid(roomJidOfPresence)
+                if (itemTag != null && roomForPresence != null) {
+                    val affiliation = extractAttribute(itemTag, "affiliation").orEmpty()
+                    com.ethora.chat.core.store.RoomMembership.afterPresence(
+                        roomForPresence,
+                        occupantNick,
+                        affiliation,
+                        unavailable = type == "unavailable"
+                    )?.let { com.ethora.chat.core.store.RoomStore.updateRoom(it) }
+                }
+            }
+
             // Handle presence in room (id="presenceInRoom") OR any MUC presence response
             // with our own occupant JID. Either way, mark this room as presence-acked so
             // subsequent sends don't waste a roundtrip re-joining the MUC, and any pending
@@ -1656,6 +1937,14 @@ class XMPPWebSocketConnection(
                 val roleMatch = "role=\"([^\"]+)\"".toRegex().find(xml)
                 val role = roleMatch?.groupValues?.get(1)
                 Log.d(TAG, "👤 Presence in room ACK: $roomJid, role=$role")
+                // web setRoomRole: only our own requested join carries our role
+                if (presenceId == "presenceInRoom" && role != null) {
+                    com.ethora.chat.core.store.RoomStore.getRoomByJid(roomJid)?.let { room ->
+                        if (room.role != role) {
+                            com.ethora.chat.core.store.RoomStore.updateRoom(room.copy(role = role))
+                        }
+                    }
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing presence stanza", e)
@@ -1688,7 +1977,8 @@ class XMPPWebSocketConnection(
 
             // Handle MAM query completion (contains <fin> element)
             // Matches web: onGetLastMessageArchive in stanzaHandlers.ts
-            if (type == "result" && xml.contains("<fin")) {
+            // Windowed queries (jump) answer their own collector; their <fin> must not move the room's history cursor.
+            if (type == "result" && xml.contains("<fin") && !iqId.startsWith(MAM_WINDOW_QUERY_PREFIX)) {
                 parseAndHandleMAMQueryCompletion(xml, iqId)
             }
             
@@ -1886,6 +2176,71 @@ class XMPPWebSocketConnection(
     }
     
     /**
+     * Server-driven membership change (web onRoomMembershipChange): a
+     * `<message>` whose muc#user item carries a jid. Invites are not changes.
+     */
+    private fun parseAndHandleMembershipChange(rawXml: String) {
+        try {
+            val inner = unwrapMucSubInnerMessage(rawXml)
+            if (inner.contains("<invite")) return
+            val roomJid = extractAttribute(inner, "from")?.substringBefore('/').orEmpty()
+            if (roomJid.isEmpty()) return
+            val itemTag = Regex("<item\\b[^>]*>").find(inner)?.value ?: return
+            val memberJid = extractAttribute(itemTag, "jid").orEmpty()
+            if (memberJid.isEmpty()) return
+            val affiliation = extractAttribute(itemTag, "affiliation").orEmpty()
+            val room = com.ethora.chat.core.store.RoomStore.getRoomByJid(roomJid) ?: return
+            com.ethora.chat.core.store.RoomMembership.afterMembershipMessage(
+                room,
+                memberJid.substringBefore('@'),
+                memberJid,
+                affiliation
+            )?.let { com.ethora.chat.core.store.RoomStore.updateRoom(it) }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error parsing membership change", e)
+        }
+    }
+
+    /** Invite to a MUC (web inviteRoomRequest). `xmppUsername` is `appId_userId`. */
+    fun sendInvite(roomJid: String, xmppUsername: String): Boolean =
+        sendRaw(
+            RoomStanzas.invite(
+                roomJid,
+                xmppUsername,
+                host,
+                "invite-rooms:${System.currentTimeMillis()}"
+            )
+        )
+
+    /** Leave a MUC for this session (web leaveTheRoom). */
+    fun sendLeavePresence(roomJid: String): Boolean =
+        sendRaw(RoomStanzas.leavePresence(roomJid, resolveOccupantNick()))
+
+    /**
+     * Chat invite (web onChatInvite): a placeholder room so the invite shows
+     * at once, our join to the MUC, and the real room list from REST.
+     */
+    private fun handleInviteRoom(chatId: String) {
+        val local = chatId.substringBefore('@')
+        if (local.isEmpty()) return
+        if (com.ethora.chat.core.store.RoomStore.getRoomByJid(chatId) == null) {
+            com.ethora.chat.core.store.RoomStore.addRoom(
+                com.ethora.chat.core.models.Room(id = local, jid = chatId, name = local, title = local)
+            )
+        }
+        scope.launch {
+            try {
+                sendPresenceInRoom(chatId)
+                com.ethora.chat.core.store.RoomStore.setRooms(
+                    com.ethora.chat.core.networking.RoomsAPIHelper.getRooms()
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Invited room refresh failed: $chatId", e)
+            }
+        }
+    }
+
+    /**
      * Parse and handle chat invite stanza
      * Matches web: onChatInvite in stanzaHandlers.ts
      */
@@ -1906,75 +2261,22 @@ class XMPPWebSocketConnection(
             if (inviteStart == -1) return
             
             Log.d(TAG, "📥 Chat invite received for: $chatId")
-            // TODO: Send presence to room and fetch rooms from API
-            // For now, just log it
+            handleInviteRoom(chatId)
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing chat invite stanza", e)
         }
     }
     
     /**
-     * Parse and handle reaction history from MAM
-     * Matches web: onReactionHistory in stanzaHandlers.ts
+     * Parse and handle reaction history from MAM.
+     * Matches web: onReactionHistory in stanzaHandlers.ts. A reaction whose
+     * target is not loaded yet is kept by MessageStore until the target arrives.
      */
     private fun parseAndHandleReactionHistory(xml: String) {
         try {
-            // Extract reactions from MAM result
-            // Format: <result><forwarded><message><reactions>...</reactions></message></forwarded></result>
-            val reactionsStart = xml.indexOf("<reactions")
-            if (reactionsStart == -1) return
-            
-            val reactionsEnd = xml.indexOf("</reactions>", reactionsStart)
-            if (reactionsEnd == -1) return
-            
-            val reactionsXml = xml.substring(reactionsStart, reactionsEnd + "</reactions>".length)
-            val messageId = extractAttribute(reactionsXml, "id") ?: return
-            val from = extractAttribute(reactionsXml, "from") ?: return
-            
-            // Extract reaction emojis
-            val reactionElements = mutableListOf<String>()
-            var searchStart = reactionsEnd + 1
-            while (true) {
-                val reactionStart = xml.indexOf("<reaction>", searchStart)
-                if (reactionStart == -1) break
-                val reactionEnd = xml.indexOf("</reaction>", reactionStart)
-                if (reactionEnd == -1) break
-                val reactionText = xml.substring(reactionStart + "<reaction>".length, reactionEnd)
-                reactionElements.add(reactionText)
-                searchStart = reactionEnd + "</reaction>".length
-            }
-            
-            // Extract data element
-            val dataStart = xml.indexOf("<data")
-            val dataEnd = xml.indexOf("/>", dataStart)
-            val dataXml = if (dataStart != -1 && dataEnd != -1) {
-                xml.substring(dataStart, dataEnd + 2)
-            } else ""
-            
-            val senderFirstName = extractAttribute(dataXml, "senderFirstName") ?: ""
-            val senderLastName = extractAttribute(dataXml, "senderLastName") ?: ""
-            val data = mapOf(
-                "senderFirstName" to senderFirstName,
-                "senderLastName" to senderLastName
-            )
-            
-            // Extract room JID from stanza-id
-            val stanzaIdStart = xml.indexOf("<stanza-id")
-            val stanzaIdEnd = xml.indexOf(">", stanzaIdStart)
-            val stanzaIdXml = if (stanzaIdStart != -1 && stanzaIdEnd != -1) {
-                xml.substring(stanzaIdStart, stanzaIdEnd + 1)
-            } else ""
-            
-            val roomJid = extractAttribute(stanzaIdXml, "by") 
-                ?: extractAttribute(xml, "from")?.split("/")?.firstOrNull()
-                ?: return
-            
-            Log.d(TAG, "😀 Reaction history received: room=$roomJid, messageId=$messageId, from=$from, reactions=$reactionElements")
-            
-            // Notify delegate (same as real-time reaction)
-            clientWrapper?.let { client ->
-                delegate?.onReactionReceived(client, roomJid, messageId, from, reactionElements, data)
-            }
+            val parsed = ReactionStanza.parse(xml) ?: return
+            Log.d(TAG, "😀 Reaction history received: target=${parsed.targetId}, from=${parsed.from}, reactions=${parsed.emoji}")
+            applyReactionStanza(parsed)
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error parsing reaction history", e)
         }
@@ -2148,9 +2450,38 @@ class XMPPWebSocketConnection(
         }
     }
 
+    /** Re-mint credentials after a SASL failure, then open a fresh socket with them. */
+    private suspend fun recoverFromSaslFailure() {
+        val provider = credentialsProvider ?: return
+        val fresh = try {
+            provider()
+        } catch (e: Exception) {
+            Log.e(TAG, "Credential refresh failed", e)
+            null
+        }
+        if (fresh == null || fresh.first.isBlank() || fresh.second.isBlank()) {
+            clientWrapper?.let { client -> delegate?.onStatusChanged(client, ConnectionStatus.ERROR) }
+            return
+        }
+        username = fresh.first
+        password = fresh.second
+
+        val stale = webSocket
+        webSocket = null
+        isConnected = false
+        isAuthenticated = false
+        authState = AuthState.NOT_STARTED
+        try {
+            stale?.close(1000, "Re-authenticating")
+        } catch (_: Throwable) {
+        }
+        connect()
+    }
+
     fun disconnect() {
         Log.d(TAG, "🔌 Disconnecting WebSocket...")
         disconnectRequested = true
+        E2eeRuntime.stop()
         webSocket?.close(1000, "Normal closure")
         isConnected = false
         isAuthenticated = false

@@ -131,6 +131,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
     implementation(libs.gson)
+    implementation(libs.bouncycastle.bcprov)
 
     implementation("org.igniterealtime.smack:smack-core:4.4.7") {
         exclude(group = "xpp3", module = "xpp3")
@@ -164,6 +165,8 @@ dependencies {
     implementation(libs.coil.network.okhttp)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.ui)
+    // 1:1 audio and video calls (LiveKit native SDK, see ui/call/).
+    implementation(libs.livekit.android)
 
     debugImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.test.manifest)
